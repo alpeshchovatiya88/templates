@@ -1,0 +1,339 @@
+2. Duplicate treatment needs stronger justification
+
+In the policy notebook, duplicates are dropped using APPLICATION_NUMBER, keeping the last record.
+
+As validator, I would ask:
+
+Why keep the last record?
+Is the notebook sorted before dropping?
+Does “last” mean latest effective date, latest update timestamp, or just file order?
+Are duplicate cases reviewed?
+
+Potential finding: Medium to High if not justified.
+import numpy as np
+import pandas as pd
+
+
+def psi_interpretation(psi):
+    if pd.isna(psi):
+        return "Not calculated"
+    elif psi < 0.10:
+        return "Stable"
+    elif psi < 0.25:
+        return "Moderate shift"
+    else:
+        return "Significant shift"
+
+
+def calculate_psi_numeric(expected, actual, feature, bins=10, eps=1e-6):
+    """
+    Version-1-style numeric PSI:
+    - Uses np.quantile on expected data
+    - Keeps numeric missing/out-of-range values as NaN bucket
+    - Uses dropna=False in value_counts
+    - Constant expected feature returns 0.0
+    """
+    e_num = pd.to_numeric(expected[feature], errors="coerce")
+    a_num = pd.to_numeric(actual[feature], errors="coerce")
+
+    e_clean = e_num.dropna()
+
+    if e_clean.empty:
+        return 0.0
+
+    qs = np.linspace(0, 1, bins + 1)
+    bin_edges = np.unique(np.quantile(e_clean, qs))
+
+    if len(bin_edges) <= 1:
+        return 0.0
+
+    expected_bins = pd.cut(
+        e_num,
+        bins=bin_edges,
+        include_lowest=True
+    )
+
+    actual_bins = pd.cut(
+        a_num,
+        bins=bin_edges,
+        include_lowest=True
+    )
+
+    expected_pct = expected_bins.value_counts(
+        normalize=True,
+        dropna=False
+    )
+
+    actual_pct = actual_bins.value_counts(
+        normalize=True,
+        dropna=False
+    )
+
+    all_bins = expected_pct.index.union(actual_pct.index)
+
+    expected_pct = expected_pct.reindex(all_bins, fill_value=0).clip(lower=eps)
+    actual_pct = actual_pct.reindex(all_bins, fill_value=0).clip(lower=eps)
+
+    psi = (
+        (actual_pct - expected_pct)
+        * np.log(actual_pct / expected_pct)
+    ).sum()
+
+    return float(psi)
+
+
+def calculate_psi_categorical(expected, actual, feature, eps=1e-6):
+    """
+    Version-1-style categorical PSI:
+    - Converts to pandas string dtype
+    - Missing values become 'NA'
+    - Uses union of expected/actual levels
+    """
+    expected_data = (
+        expected[feature]
+        .astype("string")
+        .fillna("NA")
+    )
+
+    actual_data = (
+        actual[feature]
+        .astype("string")
+        .fillna("NA")
+    )
+
+    expected_pct = expected_data.value_counts(
+        normalize=True,
+        dropna=False
+    )
+
+    actual_pct = actual_data.value_counts(
+        normalize=True,
+        dropna=False
+    )
+
+    all_levels = expected_pct.index.union(actual_pct.index)
+
+    expected_pct = expected_pct.reindex(all_levels, fill_value=0).clip(lower=eps)
+    actual_pct = actual_pct.reindex(all_levels, fill_value=0).clip(lower=eps)
+
+    psi = (
+        (actual_pct - expected_pct)
+        * np.log(actual_pct / expected_pct)
+    ).sum()
+
+    return float(psi)
+
+
+def run_psi_for_model(
+    expected,
+    actual,
+    model_name,
+    numeric_cols,
+    categorical_cols,
+    bins=10,
+    eps=1e-6
+):
+    results = []
+
+    for feature in numeric_cols:
+        psi = calculate_psi_numeric(
+            expected=expected,
+            actual=actual,
+            feature=feature,
+            bins=bins,
+            eps=eps
+        )
+
+        results.append({
+            "model": model_name,
+            "feature": feature,
+            "type": "numeric",
+            "psi": psi,
+            "interpretation": psi_interpretation(psi)
+        })
+
+    for feature in categorical_cols:
+        psi = calculate_psi_categorical(
+            expected=expected,
+            actual=actual,
+            feature=feature,
+            eps=eps
+        )
+
+        results.append({
+            "model": model_name,
+            "feature": feature,
+            "type": "categorical",
+            "psi": psi,
+            "interpretation": psi_interpretation(psi)
+        })
+
+    return pd.DataFrame(results)
+
+
+psi_all_model = run_psi_for_model(
+    expected=all_model_dev,
+    actual=all_model_oot,
+    model_name="all_model",
+    numeric_cols=numeric_cols,
+    categorical_cols=categorical_cols
+)
+
+psi_funded_model = run_psi_for_model(
+    expected=funded_model_dev,
+    actual=funded_model_oot,
+    model_name="funded_model",
+    numeric_cols=numeric_cols,
+    categorical_cols=categorical_cols
+)
+
+psi_both_models = (
+    pd.concat([psi_all_model, psi_funded_model], ignore_index=True)
+    .sort_values(["model", "psi"], ascending=[True, False])
+    .reset_index(drop=True)
+)
+
+display(psi_both_models)
+
+------------------------------------------------------------------
+
+import numpy as np
+import pandas as pd
+from scipy.stats import chi2_contingency
+
+
+def cramer_v(feature: pd.Series, target: pd.Series):
+    temp = pd.DataFrame({
+        "feature": feature,
+        "target": target
+    }).dropna(subset=["target"])
+
+    tab = pd.crosstab(temp["feature"], temp["target"])
+
+    if tab.size == 0:
+        return np.nan
+
+    chi2, _, _, _ = chi2_contingency(tab, correction=False)
+
+    n = tab.values.sum()
+    if n == 0:
+        return np.nan
+
+    phi2 = chi2 / n
+    r, k = tab.shape
+    denom = min(r - 1, k - 1)
+
+    if denom == 0:
+        return 0.0
+
+    return np.sqrt(phi2 / denom)
+
+
+def safe_qcut(s: pd.Series, q=5):
+    s_num = pd.to_numeric(s, errors="coerce")
+    uniq = s_num.dropna().nunique()
+    bins = min(q, max(1, uniq))
+
+    if bins <= 1:
+        return pd.Series(["bin_1"] * len(s), index=s.index)
+
+    try:
+        return pd.qcut(s_num, q=bins, duplicates="drop")
+    except Exception:
+        return pd.Series(["bin_1"] * len(s), index=s.index)
+
+
+def prevalence_table_for_feature(df: pd.DataFrame, feature: str) -> pd.DataFrame:
+    temp = df[[feature, "target"]].copy()
+    temp = temp[temp["target"].notna()]
+
+    s = temp[feature]
+
+    if pd.api.types.is_numeric_dtype(s):
+        feat = safe_qcut(s, q=5)
+    else:
+        feat = s.astype("string").fillna("NA")
+
+    temp["__feat"] = feat
+
+    g = (
+        temp
+        .groupby("__feat", dropna=False)["target"]
+        .agg(["size", "sum"])
+        .reset_index()
+    )
+
+    g.rename(columns={
+        "__feat": "Level",
+        "size": "Number of files",
+        "sum": 'Number of "bad" files'
+    }, inplace=True)
+
+    total_n = g["Number of files"].sum()
+    total_b = g['Number of "bad" files'].sum()
+
+    g["% of files"] = (
+        g["Number of files"] / total_n * 100
+        if total_n else np.nan
+    )
+
+    g['% of "bad" files'] = (
+        g['Number of "bad" files'] / total_b * 100
+        if total_b else np.nan
+    )
+
+    cv = cramer_v(feat, temp["target"])
+
+    g.insert(0, "Feature", feature)
+    g["Cramér-V Stat"] = cv
+
+    g = g[
+        [
+            "Feature",
+            "Level",
+            "Number of files",
+            "% of files",
+            'Number of "bad" files',
+            '% of "bad" files',
+            "Cramér-V Stat"
+        ]
+    ]
+
+    return g
+
+
+def prevalence_tables_for_features(df: pd.DataFrame, features: list) -> pd.DataFrame:
+    results = []
+
+    for col in features:
+        try:
+            result = prevalence_table_for_feature(df, col)
+            results.append(result)
+        except Exception as e:
+            print(f"Skipped {col}: {e}")
+
+    if not results:
+        return pd.DataFrame()
+
+    return pd.concat(results, ignore_index=True)
+
+
+# Example usage
+all_prevalence = prevalence_tables_for_features(
+    all_model,
+    categorical_cols
+)
+
+funded_prevalence = prevalence_tables_for_features(
+    funded_model,
+    categorical_cols
+)
+
+print("ALL MODEL PREVALENCE TABLE")
+display(all_prevalence)
+
+print("FUNDED MODEL PREVALENCE TABLE")
+display(funded_prevalence)
+
+---------------------------------------------------------------------
+
