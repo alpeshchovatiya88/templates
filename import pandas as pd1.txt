@@ -1,0 +1,329 @@
+
+
+# =========================
+# Normalize SHAP and IV values
+# Max normalization: value / max(value)
+# =========================
+df["SHAP_All_Norm"] = df["SHAP_All"] / df["SHAP_All"].max()
+df["SHAP_Funded_Norm"] = df["SHAP_Funded"] / df["SHAP_Funded"].max()
+
+df["IV_All_Norm"] = df["IV_All"] / df["IV_All"].max()
+df["IV_Funded_Norm"] = df["IV_Funded"] / df["IV_Funded"].max()
+
+# Check normalized values
+df[[
+    "Feature",
+    "SHAP_All_Norm",
+    "SHAP_Funded_Norm",
+    "IV_All_Norm",
+    "IV_Funded_Norm"
+]].head()
+
+--------------------------------------------------------
+# =========================
+# Sort by SHAP Rank All
+# =========================
+plot_df = df.sort_values("SHAP_Rank_All").copy()
+
+features = plot_df["Feature"]
+
+shap_val = plot_df["SHAP_All_Norm"]
+iv_val = plot_df["IV_All_Norm"]
+
+shap_rank = plot_df["SHAP_Rank_All"]
+iv_rank = plot_df["IV_Rank_All"]
+
+n_features = len(plot_df)
+
+plt.rcParams["figure.dpi"] = 150
+
+fig, ax = plt.subplots(figsize=(26, 40))
+
+y = np.arange(n_features)
+bar_height = 0.30
+
+ax.barh(
+    y - bar_height/2,
+    shap_val,
+    height=bar_height,
+    label="SHAP All Model"
+)
+
+ax.barh(
+    y + bar_height/2,
+    iv_val,
+    height=bar_height,
+    label="IV All Model"
+)
+
+ax.set_yticks(y)
+ax.set_yticklabels(features, fontsize=14)
+
+ax.set_xlabel("Normalized Value", fontsize=18, fontweight="bold")
+
+ax.set_title(
+    "Normalized SHAP vs IV Comparison - All Model",
+    fontsize=22,
+    fontweight="bold",
+    pad=25
+)
+
+ax.legend(fontsize=15)
+ax.invert_yaxis()
+
+max_value = max(shap_val.max(), iv_val.max())
+offset = max_value * 0.01
+
+for i in range(n_features):
+    ax.text(
+        shap_val.iloc[i] + offset,
+        y[i] - bar_height/2,
+        f"{shap_val.iloc[i]:.3f} (R{int(shap_rank.iloc[i])})",
+        va="center",
+        fontsize=11
+    )
+
+    ax.text(
+        iv_val.iloc[i] + offset,
+        y[i] + bar_height/2,
+        f"{iv_val.iloc[i]:.3f} (R{int(iv_rank.iloc[i])})",
+        va="center",
+        fontsize=11
+    )
+
+ax.grid(axis="x", linestyle="--", alpha=0.4)
+ax.set_xlim(0, max_value * 1.35)
+
+plt.tight_layout()
+
+plt.savefig(
+    "Normalized_SHAP_vs_IV_All_Model.png",
+    dpi=400,
+    bbox_inches="tight"
+)
+
+plt.show()
+
+--------------------------------------------------
+
+# =========================
+# Sort by SHAP Rank Funded
+# =========================
+plot_df = df.sort_values("SHAP_Rank_Funded").copy()
+
+features = plot_df["Feature"]
+
+shap_val = plot_df["SHAP_Funded_Norm"]
+iv_val = plot_df["IV_Funded_Norm"]
+
+shap_rank = plot_df["SHAP_Rank_Funded"]
+iv_rank = plot_df["IV_Rank_Funded"]
+
+n_features = len(plot_df)
+
+fig, ax = plt.subplots(figsize=(26, 40))
+
+y = np.arange(n_features)
+bar_height = 0.30
+
+ax.barh(
+    y - bar_height/2,
+    shap_val,
+    height=bar_height,
+    label="SHAP Funded Model"
+)
+
+ax.barh(
+    y + bar_height/2,
+    iv_val,
+    height=bar_height,
+    label="IV Funded Model"
+)
+
+ax.set_yticks(y)
+ax.set_yticklabels(features, fontsize=14)
+
+ax.set_xlabel("Normalized Value", fontsize=18, fontweight="bold")
+
+ax.set_title(
+    "Normalized SHAP vs IV Comparison - Funded Model",
+    fontsize=22,
+    fontweight="bold",
+    pad=25
+)
+
+ax.legend(fontsize=15)
+ax.invert_yaxis()
+
+max_value = max(shap_val.max(), iv_val.max())
+offset = max_value * 0.01
+
+for i in range(n_features):
+    ax.text(
+        shap_val.iloc[i] + offset,
+        y[i] - bar_height/2,
+        f"{shap_val.iloc[i]:.3f} (R{int(shap_rank.iloc[i])})",
+        va="center",
+        fontsize=11
+    )
+
+    ax.text(
+        iv_val.iloc[i] + offset,
+        y[i] + bar_height/2,
+        f"{iv_val.iloc[i]:.3f} (R{int(iv_rank.iloc[i])})",
+        va="center",
+        fontsize=11
+    )
+
+ax.grid(axis="x", linestyle="--", alpha=0.4)
+ax.set_xlim(0, max_value * 1.35)
+
+plt.tight_layout()
+
+plt.savefig(
+    "Normalized_SHAP_vs_IV_Funded_Model.png",
+    dpi=400,
+    bbox_inches="tight"
+)
+
+plt.show()
+
+--------------------------------------------------------------
+
+-------------------------------------------------------------
+
+
+# ============================================================
+# PLOT SETTINGS
+# ============================================================
+plt.rcParams["figure.dpi"] = 150
+
+n_features = len(df)
+y = np.arange(n_features)
+
+fig, ax = plt.subplots(figsize=(30, 50))
+
+bar_height = 0.18
+
+# Four bars per feature
+ax.barh(
+    y - 1.5 * bar_height,
+    shap_all,
+    height=bar_height,
+    label="SHAP All"
+)
+
+ax.barh(
+    y - 0.5 * bar_height,
+    iv_all,
+    height=bar_height,
+    label="IV All"
+)
+
+ax.barh(
+    y + 0.5 * bar_height,
+    shap_funded,
+    height=bar_height,
+    label="SHAP Funded"
+)
+
+ax.barh(
+    y + 1.5 * bar_height,
+    iv_funded,
+    height=bar_height,
+    label="IV Funded"
+)
+
+# ============================================================
+# AXIS FORMATTING
+# ============================================================
+ax.set_yticks(y)
+ax.set_yticklabels(features, fontsize=15)
+
+ax.set_xlabel(
+    "Normalized Value",
+    fontsize=20,
+    fontweight="bold"
+)
+
+ax.set_title(
+    "Normalized SHAP vs IV Comparison\nAll Model and Funded Model",
+    fontsize=24,
+    fontweight="bold",
+    pad=25
+)
+
+ax.tick_params(axis="x", labelsize=15)
+
+ax.legend(
+    fontsize=16,
+    loc="upper right"
+)
+
+ax.invert_yaxis()
+
+# ============================================================
+# LABELS: VALUE + RANK
+# ============================================================
+max_value = max(
+    shap_all.max(),
+    iv_all.max(),
+    shap_funded.max(),
+    iv_funded.max()
+)
+
+offset = max_value * 0.01
+
+for i in range(n_features):
+
+    ax.text(
+        shap_all.iloc[i] + offset,
+        y[i] - 1.5 * bar_height,
+        f"{shap_all.iloc[i]:.3f} (R{int(shap_rank_all.iloc[i])})",
+        va="center",
+        fontsize=10
+    )
+
+    ax.text(
+        iv_all.iloc[i] + offset,
+        y[i] - 0.5 * bar_height,
+        f"{iv_all.iloc[i]:.3f} (R{int(iv_rank_all.iloc[i])})",
+        va="center",
+        fontsize=10
+    )
+
+    ax.text(
+        shap_funded.iloc[i] + offset,
+        y[i] + 0.5 * bar_height,
+        f"{shap_funded.iloc[i]:.3f} (R{int(shap_rank_funded.iloc[i])})",
+        va="center",
+        fontsize=10
+    )
+
+    ax.text(
+        iv_funded.iloc[i] + offset,
+        y[i] + 1.5 * bar_height,
+        f"{iv_funded.iloc[i]:.3f} (R{int(iv_rank_funded.iloc[i])})",
+        va="center",
+        fontsize=10
+    )
+
+# ============================================================
+# GRID AND LIMITS
+# ============================================================
+ax.grid(axis="x", linestyle="--", alpha=0.4)
+
+ax.set_xlim(0, max_value * 1.45)
+
+# ============================================================
+# LAYOUT + SAVE
+# ============================================================
+plt.tight_layout()
+
+plt.savefig(
+    "Normalized_SHAP_IV_All_vs_Funded.png",
+    dpi=400,
+    bbox_inches="tight"
+)
+
+plt.show()
