@@ -2,134 +2,151 @@ import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 
-# ==========================
-# Read Excel File
-# ==========================
-file_path = "feature_importance.xlsx"   # <-- Update filename
+# ============================================================
+# READ EXCEL
+# ============================================================
+df = pd.read_excel("feature_importance.xlsx")
 
-df = pd.read_excel(file_path)
+# ============================================================
+# SORT BY ALL MODEL RANK
+# ============================================================
+df = df.sort_values("Rank_All")
 
-# ==========================
-# Sort by All Model Rank
-# ==========================
-df = df.sort_values("SHAP Rank_All Model")
-
-# ==========================
-# Extract Columns
-# ==========================
+# ============================================================
+# COLUMNS
+# ============================================================
 features = df["Feature"]
 
-all_val = df["Abs Shap Value_All Model"]
-funded_val = df["Abs Shap Value_Funded Model"]
+all_val = df["All Model"]
+funded_val = df["Funded Model"]
 
-all_rank = df["SHAP Rank_All Model"]
-funded_rank = df["SHAP Rank_Funded Model"]
+all_rank = df["Rank_All"]
+funded_rank = df["Rank_Funded"]
 
-# ==========================
-# Plot Settings
-# ==========================
+# ============================================================
+# PLOT SETTINGS
+# ============================================================
+plt.rcParams["figure.dpi"] = 150
+
 n_features = len(df)
 
 fig, ax = plt.subplots(
-    figsize=(20, max(12, n_features * 0.55))
+    figsize=(26, 40)      # <-- BIG HEIGHT
 )
 
+# ============================================================
+# BAR SETTINGS
+# ============================================================
 y = np.arange(n_features)
-bar_height = 0.38
 
-# ==========================
-# Bars
-# ==========================
-bars1 = ax.barh(
+bar_height = 0.30
+
+ax.barh(
     y - bar_height/2,
     all_val,
     height=bar_height,
     label="All Model"
 )
 
-bars2 = ax.barh(
+ax.barh(
     y + bar_height/2,
     funded_val,
     height=bar_height,
     label="Funded Model"
 )
 
-# ==========================
-# Labels
-# ==========================
+# ============================================================
+# AXES
+# ============================================================
 ax.set_yticks(y)
-ax.set_yticklabels(features, fontsize=11)
+
+ax.set_yticklabels(
+    features,
+    fontsize=15
+)
+
+ax.tick_params(
+    axis='x',
+    labelsize=14
+)
 
 ax.set_xlabel(
     "Mean Absolute SHAP Value",
-    fontsize=14
-)
-
-ax.set_title(
-    "SHAP Feature Importance Comparison\n(All Model vs Funded Model)",
     fontsize=18,
     fontweight="bold"
 )
 
-ax.legend(fontsize=12)
+ax.set_title(
+    "SHAP Feature Importance Comparison\n(All Model vs Funded Model)",
+    fontsize=22,
+    fontweight="bold",
+    pad=25
+)
 
-# Highest rank at top
+ax.legend(
+    fontsize=15,
+    loc="upper right"
+)
+
 ax.invert_yaxis()
 
-# ==========================
-# Add Value + Rank Labels
-# ==========================
-x_offset = max(
+# ============================================================
+# LABELS (VALUE + RANK)
+# ============================================================
+max_value = max(
     all_val.max(),
     funded_val.max()
-) * 0.01
+)
+
+offset = max_value * 0.01
 
 for i in range(n_features):
 
     ax.text(
-        all_val.iloc[i] + x_offset,
+        all_val.iloc[i] + offset,
         y[i] - bar_height/2,
         f"{all_val.iloc[i]:.3f} (R{int(all_rank.iloc[i])})",
         va="center",
-        fontsize=9
+        fontsize=12
     )
 
     ax.text(
-        funded_val.iloc[i] + x_offset,
+        funded_val.iloc[i] + offset,
         y[i] + bar_height/2,
         f"{funded_val.iloc[i]:.3f} (R{int(funded_rank.iloc[i])})",
         va="center",
-        fontsize=9
+        fontsize=12
     )
 
-# ==========================
-# Grid
-# ==========================
+# ============================================================
+# GRID
+# ============================================================
 ax.grid(
     axis="x",
     linestyle="--",
     alpha=0.4
 )
 
-# Leave room for labels
+# ============================================================
+# EXTRA SPACE FOR LABELS
+# ============================================================
+ax.set_xlim(
+    0,
+    max_value * 1.40
+)
+
+# ============================================================
+# LAYOUT
+# ============================================================
 plt.tight_layout()
 
-# ==========================
-# Save High Resolution Image
-# ==========================
+# ============================================================
+# SAVE
+# ============================================================
 plt.savefig(
-    "SHAP_Comparison_All_Features.png",
-    dpi=300,
+    "SHAP_Comparison.png",
+    dpi=400,
     bbox_inches="tight"
 )
 
 plt.show()
-
-
-ax.text(
-    funded_val.iloc[i] + x_offset,
-    y[i] + bar_height/2,
-    f"{funded_val.iloc[i]:.3f} (R{int(funded_rank.iloc[i])}, Δ{int(funded_rank.iloc[i]-all_rank.iloc[i])})",
-    va="center",
-    fontsize=9
-)
