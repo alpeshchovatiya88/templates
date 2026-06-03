@@ -1,0 +1,46 @@
+import pandas as pd
+import matplotlib.pyplot as plt
+import numpy as np
+
+df = pd.read_excel("your_file.xlsx")
+
+df = df.sort_values("SHAP Rank_All Model")
+
+features = df["Feature"]
+all_val = df["Abs Shap Value_All Model"]
+funded_val = df["Abs Shap Value_Funded Model"]
+all_rank = df["SHAP Rank_All Model"]
+funded_rank = df["SHAP Rank_Funded Model"]
+
+y = np.arange(len(df))
+bar_height = 0.38
+
+plt.figure(figsize=(14, max(8, len(df) * 0.35)))
+
+plt.barh(y - bar_height/2, all_val, height=bar_height, label="All Model")
+plt.barh(y + bar_height/2, funded_val, height=bar_height, label="Funded Model")
+
+plt.yticks(y, features)
+plt.xlabel("Mean Absolute SHAP Value")
+plt.title("SHAP Feature Importance Comparison with Values and Ranks")
+plt.legend()
+plt.gca().invert_yaxis()
+
+for i in range(len(df)):
+    plt.text(
+        all_val.iloc[i],
+        y[i] - bar_height/2,
+        f" {all_val.iloc[i]:.3f} (R{int(all_rank.iloc[i])})",
+        va="center",
+        fontsize=8
+    )
+    plt.text(
+        funded_val.iloc[i],
+        y[i] + bar_height/2,
+        f" {funded_val.iloc[i]:.3f} (R{int(funded_rank.iloc[i])})",
+        va="center",
+        fontsize=8
+    )
+
+plt.tight_layout()
+plt.show()
