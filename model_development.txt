@@ -657,3 +657,84 @@ risk_table = results["risk_table"]
 
 print("Final OOT AUC:", test_auc)
 
+------------------------------------------------------------------------
+
+from sklearn.model_selection import RandomizedSearchCV, StratifiedKFold
+from sklearn.pipeline import Pipeline
+from xgboost import XGBClassifier
+
+def build_model(random_state=42):
+    return XGBClassifier(
+        objective="binary:logistic",
+        eval_metric="auc",
+        tree_method="hist",
+        random_state=random_state,
+        n_jobs=-1
+    )
+
+
+def build_pipeline(X, credit_use="bin", random_state=42):
+    preprocessor = build_preprocessor(X, credit_use=credit_use)
+    model = build_model(random_state=random_state)
+
+    return Pipeline([
+        ("pre", preprocessor),
+        ("model", model)
+    ])
+
+
+def train_model(
+    X_train,
+    y_train,
+    credit_use="bin",
+    random_state=42,
+    tune=True
+):
+    pipeline = build_pipeline(
+        X_train,
+        credit_use=credit_use,
+        random_state=random_state
+    )
+
+    if not tune:
+        pipeline.fit(X_train, y_train)
+        return pipeline
+
+    param_dist = {
+        "model__n_estimators": [300, 500, 700],
+        "model__max_depth": [3, 4, 5, 6],
+        "model__learning_rate": [0.01, 0.03, 0.05, 0.06],
+        "model__subsample": [0.7, 0.8, 0.9],
+        "model__colsample_bytree": [0.7, 0.8, 0.9],
+        "model__min_child_weight": [25, 50, 75, 100],
+        "model__gamma": [0, 0.5, 1, 2],
+        "model__reg_lambda": [1, 2, 5, 10],
+        "model__reg_alpha": [0, 0.1, 0.5, 1]
+    }
+
+    cv = StratifiedKFold(
+        n_splits=5,
+        shuffle=True,
+        random_state=random_state
+    )
+
+    search = RandomizedSearchCV(
+        estimator=pipeline,
+        param_distributions=param_dist,
+        n_iter=25,
+        scoring="roc_auc",
+        cv=cv,
+        verbose=2,
+        n_jobs=-1,
+        random_state=random_state,
+        refit=True
+    )
+
+    search.fit(X_train, y_train)
+
+    print("Best CV AUC:", search.best_score_)
+    print("Best parameters:")
+    print(search.best_params_)
+
+    return search.best_estimator_
+
