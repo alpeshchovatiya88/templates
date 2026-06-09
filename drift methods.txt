@@ -442,3 +442,11 @@ credit_score_drift = (
 )
 
 display(credit_score_drift)
+
+======================================================
+
+| Metric | Definition | Advantages | Limitations |
+|----------|------------|------------|------------|
+| **PSI (Population Stability Index)** | Measures the change in feature distribution between the development (training) and monitoring (production) populations. | • Easy to understand and communicate<br>• Industry standard in banking and credit risk<br>• Widely accepted by regulators and model validators<br>• Common interpretation thresholds available | • Sensitive to binning methodology<br>• Not a true statistical distance measure<br>• May miss subtle distribution changes |
+| **KL Divergence** | Measures the information loss when one distribution is used to approximate another distribution. | • Strong theoretical foundation in information theory<br>• Highly sensitive to distribution changes<br>• Useful for root-cause analysis and investigation | • Difficult for non-technical audiences to interpret<br>• No widely accepted thresholds<br>• Asymmetric (KL(P‖Q) ≠ KL(Q‖P))<br>• Can become unstable when probabilities approach zero |
+| **JSD (Jensen-Shannon Divergence)** | Measures the similarity between two distributions using a symmetric and smoothed version of KL Divergence. | • Symmetric and stable<br>• Always finite and bounded<br>• Effective for comparing drift across multiple features<br>• Less sensitive to extreme probability values | • Less familiar to business stakeholders<br>• No standard regulatory thresholds<br>• Less commonly used in traditional model risk governance |
