@@ -400,3 +400,31 @@ final_drift_comparison = (
 )
 
 display(final_drift_comparison)
+
+
+============================
+
+top15_drift_features = (
+    final_drift_comparison[
+        [
+            "model",
+            "feature",
+            "feature_type",
+            "psi",
+            "psi_interpretation",
+            "jsd",
+            "jsd_interpretation",
+            "kl",
+            "kl_interpretation",
+            "wasserstein",
+            "wasserstein_interpretation",
+            "hellinger",
+            "hellinger_interpretation"
+        ]
+    ]
+    .sort_values("psi", ascending=False)
+    .head(15)
+    .reset_index(drop=True)
+)
+
+display(top15_drift_features)
