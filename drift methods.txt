@@ -450,3 +450,197 @@ display(credit_score_drift)
 | **PSI (Population Stability Index)** | Measures the change in feature distribution between the development (training) and monitoring (production) populations. | • Easy to understand and communicate<br>• Industry standard in banking and credit risk<br>• Widely accepted by regulators and model validators<br>• Common interpretation thresholds available | • Sensitive to binning methodology<br>• Not a true statistical distance measure<br>• May miss subtle distribution changes |
 | **KL Divergence** | Measures the information loss when one distribution is used to approximate another distribution. | • Strong theoretical foundation in information theory<br>• Highly sensitive to distribution changes<br>• Useful for root-cause analysis and investigation | • Difficult for non-technical audiences to interpret<br>• No widely accepted thresholds<br>• Asymmetric (KL(P‖Q) ≠ KL(Q‖P))<br>• Can become unstable when probabilities approach zero |
 | **JSD (Jensen-Shannon Divergence)** | Measures the similarity between two distributions using a symmetric and smoothed version of KL Divergence. | • Symmetric and stable<br>• Always finite and bounded<br>• Effective for comparing drift across multiple features<br>• Less sensitive to extreme probability values | • Less familiar to business stakeholders<br>• No standard regulatory thresholds<br>• Less commonly used in traditional model risk governance |
+
+
+==============================================
+# CSI Interpretation
+
+def csi_interpretation(csi):
+    if pd.isna(csi):
+        return "Not calculated"
+    elif csi < 0.10:
+        return "Stable"
+    elif csi < 0.25:
+        return "Moderate shift"
+    else:
+        return "Significant shift"
+
+==============================
+def calculate_csi_numeric(
+    expected,
+    actual,
+    feature,
+    bins=10,
+    eps=1e-6
+):
+    expected_data = (
+        expected[feature]
+        .replace([np.inf, -np.inf], np.nan)
+        .dropna()
+    )
+
+    actual_data = (
+        actual[feature]
+        .replace([np.inf, -np.inf], np.nan)
+        .dropna()
+    )
+
+    if expected_data.nunique() < 2:
+        return np.nan
+
+    try:
+        _, bin_edges = pd.qcut(
+            expected_data,
+            q=bins,
+            retbins=True,
+            duplicates="drop"
+        )
+
+        expected_bins = pd.cut(
+            expected_data,
+            bins=bin_edges,
+            include_lowest=True
+        )
+
+        actual_bins = pd.cut(
+            actual_data,
+            bins=bin_edges,
+            include_lowest=True
+        )
+
+        expected_pct = (
+            expected_bins
+            .value_counts(normalize=True, sort=False)
+            .fillna(0)
+        )
+
+        actual_pct = (
+            actual_bins
+            .value_counts(normalize=True, sort=False)
+            .fillna(0)
+        )
+
+        p = expected_pct.values + eps
+        q = actual_pct.values + eps
+
+        return np.sum((q - p) * np.log(q / p))
+
+    except Exception:
+        return np.nan
+
+===========================================
+
+def calculate_csi_categorical(
+    expected,
+    actual,
+    feature,
+    eps=1e-6
+):
+    expected_data = (
+        expected[feature]
+        .fillna("MISSING")
+        .astype(str)
+    )
+
+    actual_data = (
+        actual[feature]
+        .fillna("MISSING")
+        .astype(str)
+    )
+
+    levels = sorted(
+        set(expected_data.unique())
+        .union(set(actual_data.unique()))
+    )
+
+    expected_pct = (
+        expected_data
+        .value_counts(normalize=True)
+        .reindex(levels, fill_value=0)
+    )
+
+    actual_pct = (
+        actual_data
+        .value_counts(normalize=True)
+        .reindex(levels, fill_value=0)
+    )
+
+    p = expected_pct.values + eps
+    q = actual_pct.values + eps
+
+    return np.sum((q - p) * np.log(q / p))
+
+================================================
+
+def run_csi_for_model(
+    expected,
+    actual,
+    model_name,
+    numeric_cols,
+    categorical_cols
+):
+
+    results = []
+
+    for col in numeric_cols:
+
+        csi_value = calculate_csi_numeric(
+            expected,
+            actual,
+            col
+        )
+
+        results.append({
+            "model": model_name,
+            "feature": col,
+            "feature_type": "numeric",
+            "csi": csi_value,
+            "interpretation": csi_interpretation(csi_value)
+        })
+
+    for col in categorical_cols:
+
+        csi_value = calculate_csi_categorical(
+            expected,
+            actual,
+            col
+        )
+
+        results.append({
+            "model": model_name,
+            "feature": col,
+            "feature_type": "categorical",
+            "csi": csi_value,
+            "interpretation": csi_interpretation(csi_value)
+        })
+
+    return pd.DataFrame(results)
+
+=====================================
+
+all_model_csi = run_csi_for_model(
+    expected=all_model_dev,
+    actual=all_model_oot,
+    model_name="all_model",
+    numeric_cols=numeric_cols,
+    categorical_cols=categorical_cols
+)
+
+funded_model_csi = run_csi_for_model(
+    expected=funded_model_dev,
+    actual=funded_model_oot,
+    model_name="funded_model",
+    numeric_cols=numeric_cols,
+    categorical_cols=categorical_cols
+)
+
+final_csi = (
+    pd.concat(
+        [all_model_csi, funded_model_csi],
+        ignore_index=True
+    )
+    .sort_values("csi", ascending=False)
+    .reset_index(drop=True)
+)
+
+display(final_csi)
