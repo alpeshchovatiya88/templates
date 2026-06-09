@@ -216,3 +216,95 @@ jsd_both_models = (
 )
 
 display(jsd_both_models)
+
+
+===========================================
+
+def compare_psi_jsd_for_model(
+    expected,
+    actual,
+    model_name,
+    numeric_cols,
+    categorical_cols
+):
+    results = []
+
+    for col in numeric_cols:
+        psi_value = calculate_psi_numeric(
+            expected=expected,
+            actual=actual,
+            feature=col,
+            bins=10
+        )
+
+        jsd_value = calculate_jsd_numeric(
+            expected=expected,
+            actual=actual,
+            feature=col,
+            bins=10
+        )
+
+        results.append({
+            "model": model_name,
+            "feature": col,
+            "psi": psi_value,
+            "psi_interpretation": psi_interpretation(psi_value),
+            "jsd": jsd_value,
+            "jsd_interpretation": jsd_interpretation(jsd_value)
+        })
+
+    for col in categorical_cols:
+        psi_value = calculate_psi_categorical(
+            expected=expected,
+            actual=actual,
+            feature=col
+        )
+
+        jsd_value = calculate_jsd_categorical(
+            expected=expected,
+            actual=actual,
+            feature=col
+        )
+
+        results.append({
+            "model": model_name,
+            "feature": col,
+            "psi": psi_value,
+            "psi_interpretation": psi_interpretation(psi_value),
+            "jsd": jsd_value,
+            "jsd_interpretation": jsd_interpretation(jsd_value)
+        })
+
+    return pd.DataFrame(results)
+
+----------------------------------------------------
+
+compare_all_model = compare_psi_jsd_for_model(
+    expected=all_model_dev,
+    actual=all_model_oot,
+    model_name="all_model",
+    numeric_cols=numeric_cols,
+    categorical_cols=categorical_cols
+)
+
+compare_funded_model = compare_psi_jsd_for_model(
+    expected=funded_model_dev,
+    actual=funded_model_oot,
+    model_name="funded_model",
+    numeric_cols=numeric_cols,
+    categorical_cols=categorical_cols
+)
+
+psi_jsd_comparison = (
+    pd.concat(
+        [compare_all_model, compare_funded_model],
+        ignore_index=True
+    )
+    .sort_values(
+        ["model", "psi"],
+        ascending=[True, False]
+    )
+    .reset_index(drop=True)
+)
+
+display(psi_jsd_comparison)
