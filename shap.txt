@@ -1,0 +1,114 @@
+from __future__ import annotations
+import os
+import numpy as np
+import pandas as pd, shap
+import matplotlib.pyplot as plt
+import scipy.sparse as sp
+from typing import Optional, List
+from sklearn.pipeline import Pipeline
+
+def make_shap(pipeline: Pipeline,
+              X_train: pd.DataFrame,
+              out_dir: str,
+              cfg: object,
+              model_name: str,
+              feat_names: Optional[List[str]] = None
+              ) -> None:
+
+    print(cfg.shap_dep_enabled)
+    try:
+        Xs_raw = X_train.sample(min(len(X_train), int(cfg.shap_sample)), random_state=int(cfg.random_state))
+        Xs = pipeline.named_steps["pre"].transform(Xs_raw)
+
+        if sp.issparse(Xs):
+            Xs = Xs.toarray()
+
+        model = pipeline.named_steps["model"]
+
+        if feat_names is None:
+            try:
+                feat_names = pipeline.named_steps["pre"].get_feature_names_out().tolist()
+            except Exception:
+                feat_names = [f"f{i}" for i in range(Xs.shape[1])]
+
+        try:
+            explainer = shap.Explainer(model, Xs)
+            sv_expl = explainer(Xs)
+            sv_use = sv_expl.values
+        except Exception:
+            expl = shap.TreeExplainer(model) if model.__class__.__name__.startswith(("XGB", "LGB", "CatBoost")) else shap.LinearExplainer(model, Xs)
+            sv = expl.shap_values(Xs)
+            if isinstance(sv, list):
+                sv_use = sv[1] if len(sv) == 2 and getattr(sv[0], "shape", None) == getattr(sv[1], "shape", None) else np.mean(np.stack(sv, axis=0), axis=0)
+            else:
+                sv_use = sv
+
+        os.makedirs(out_dir, exist_ok=True)
+
+        np.save(os.path.join(out_dir, f"shap_values_{model_name}.npy"), sv_use)
+
+        shap.summary_plot(sv_use, Xs, feature_names=feat_names, show=False)
+        plt.tight_layout()
+        plt.savefig(os.path.join(out_dir, f"shap_summary_{model_name}.png"))
+        plt.close()
+
+        mean_abs = np.nanmean(np.abs(sv_use), axis=0)
+
+        shap_importance = pd.DataFrame({
+            "feature": feat_names,
+            "mean_abs_shap": mean_abs
+        })
+
+        shap_importance["feature"] = (
+            shap_importance["feature"]
+            .str.replace("cat__", "", regex=False)
+            .str.replace("num__", "", regex=False)
+            .str.replace("remainder__", "", regex=False)
+        )
+
+        for col in sorted(X_train.columns, key=len, reverse=True):
+            shap_importance.loc[
+                shap_importance["feature"].str.startswith(col + "_"),
+                "feature"
+            ] = col
+
+        shap_importance = (
+            shap_importance
+            .groupby("feature", as_index=False)["mean_abs_shap"]
+            .sum()
+            .sort_values("mean_abs_shap", ascending=False)
+        )
+
+        shap_importance.to_csv(
+            os.path.join(out_dir, f"shap_feature_importance_{model_name}.csv"),
+            index=False
+        )
+
+        if cfg.shap_dep_enabled:
+            top_k = cfg.shap_top_k
+            if top_k > 0 and Xs.shape[1] > 0:
+                order = np.argsort(-mean_abs)[:min(top_k, Xs.shape[1])]
+                dep_dir = os.path.join(out_dir, f"shap_dependence_{model_name}")
+                os.makedirs(dep_dir, exist_ok=True)
+
+                for idx in order:
+                    fname = feat_names[idx] if idx < len(feat_names) else f"f{idx}"
+                    shap.dependence_plot(
+                        ind=idx,
+                        shap_values=sv_use,
+                        features=Xs,
+                        feature_names=feat_names,
+                        show=False,
+                        interaction_index=cfg.shap_interaction_index
+                    )
+
+                    plt.tight_layout()
+                    safe = "".join(ch if ch.isalnum() or ch in "._-" else "_" for ch in str(fname))
+                    outp = os.path.join(dep_dir, f"{safe}.png")
+                    plt.savefig(outp)
+                    plt.close()
+
+    except Exception as e:
+        os.makedirs(out_dir, exist_ok=True)
+        with open(os.path.join(out_dir, f"shap_error_{model_name}.txt"), "w") as f:
+            f.write(str(e))
