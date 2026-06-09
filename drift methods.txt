@@ -428,3 +428,17 @@ top15_drift_features = (
 )
 
 display(top15_drift_features)
+
+
+=======================
+
+credit_score_drift = (
+    final_drift_comparison[
+        final_drift_comparison["feature"]
+        .str.contains("credit_score", case=False, na=False)
+    ]
+    .sort_values("model")
+    .reset_index(drop=True)
+)
+
+display(credit_score_drift)
