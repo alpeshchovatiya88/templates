@@ -337,3 +337,175 @@ display(funded_prevalence)
 
 ---------------------------------------------------------------------
 
+
+# =========================
+# PLOT SETTINGS
+# =========================
+
+plt.rcParams["figure.dpi"] = 150
+
+n_features = len(df_plot)
+fig, ax = plt.subplots(figsize=(22, 10))
+
+y = np.arange(n_features)
+bar_height = 0.35
+
+color_with_hpi = "#A9CCE3"      # light blue
+color_without_hpi = "#F9E79F"   # light yellow/orange
+
+# =========================
+# BARS
+# =========================
+
+ax.barh(
+    y - bar_height / 2,
+    all_shap_with_hpi,
+    height=bar_height,
+    label="All Model SHAP With HPI",
+    color=color_with_hpi,
+    edgecolor="black",
+    linewidth=0.8
+)
+
+ax.barh(
+    y + bar_height / 2,
+    all_shap_without_hpi,
+    height=bar_height,
+    label="All Model SHAP Without HPI",
+    color=color_without_hpi,
+    edgecolor="black",
+    linewidth=0.8
+)
+
+# =========================
+# AXES
+# =========================
+
+ax.set_yticks(y)
+ax.set_yticklabels(features, fontsize=18, fontweight="bold")
+
+ax.tick_params(axis="x", labelsize=16)
+
+ax.set_xlabel(
+    "Absolute SHAP Value",
+    fontsize=20,
+    fontweight="bold"
+)
+
+ax.set_title(
+    "SHAP Feature Importance Comparison\n(All Model: With HPI vs Without HPI)",
+    fontsize=24,
+    fontweight="bold",
+    pad=25
+)
+
+ax.legend(fontsize=15, loc="upper right")
+ax.invert_yaxis()
+
+# =========================
+# LABELS WITH VALUE + RANK CHANGE
+# =========================
+
+max_value = max(all_shap_with_hpi.max(), all_shap_without_hpi.max())
+inside_offset = max_value * 0.03
+outside_offset = max_value * 0.015
+
+for i in range(n_features):
+
+    # -------------------------
+    # With HPI label
+    # Rank change: Without HPI rank -> With HPI rank
+    # -------------------------
+    rank_change_with = int(all_rank_without_hpi.iloc[i]) - int(all_rank_with_hpi.iloc[i])
+
+    if rank_change_with > 0:
+        rank_move_with = f"↑{rank_change_with}"
+    elif rank_change_with < 0:
+        rank_move_with = f"↓{abs(rank_change_with)}"
+    else:
+        rank_move_with = "–"
+
+    label_with = (
+        f"{all_shap_with_hpi.iloc[i]:.3f} "
+        f"(R{int(all_rank_with_hpi.iloc[i])}, {rank_move_with})"
+    )
+
+    value_with = all_shap_with_hpi.iloc[i]
+
+    if value_with > max_value * 0.18:
+        x_with = value_with - inside_offset
+        ha_with = "right"
+    else:
+        x_with = value_with + outside_offset
+        ha_with = "left"
+
+    ax.text(
+        x_with,
+        y[i] - bar_height / 2,
+        label_with,
+        va="center",
+        ha=ha_with,
+        fontsize=14,
+        fontweight="bold",
+        color="black"
+    )
+
+    # -------------------------
+    # Without HPI label
+    # Rank change: With HPI rank -> Without HPI rank
+    # -------------------------
+    rank_change_without = int(all_rank_with_hpi.iloc[i]) - int(all_rank_without_hpi.iloc[i])
+
+    if rank_change_without > 0:
+        rank_move_without = f"↑{rank_change_without}"
+    elif rank_change_without < 0:
+        rank_move_without = f"↓{abs(rank_change_without)}"
+    else:
+        rank_move_without = "–"
+
+    label_without = (
+        f"{all_shap_without_hpi.iloc[i]:.3f} "
+        f"(R{int(all_rank_without_hpi.iloc[i])}, {rank_move_without})"
+    )
+
+    value_without = all_shap_without_hpi.iloc[i]
+
+    if value_without > max_value * 0.18:
+        x_without = value_without - inside_offset
+        ha_without = "right"
+    else:
+        x_without = value_without + outside_offset
+        ha_without = "left"
+
+    ax.text(
+        x_without,
+        y[i] + bar_height / 2,
+        label_without,
+        va="center",
+        ha=ha_without,
+        fontsize=14,
+        fontweight="bold",
+        color="black"
+    )
+
+# =========================
+# GRID + SPACING
+# =========================
+
+ax.grid(axis="x", linestyle="--", alpha=0.35)
+ax.set_xlim(0, max_value * 1.25)
+
+plt.tight_layout()
+
+# =========================
+# SAVE + SHOW
+# =========================
+
+plt.savefig(
+    "All_Model_SHAP_Comparison_With_HPI_vs_Without_HPI.png",
+    dpi=400,
+    bbox_inches="tight"
+)
+
+plt.show()
+
