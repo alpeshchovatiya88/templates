@@ -1,24 +1,6 @@
-import numpy as np
-import matplotlib.pyplot as plt
-
-# =========================
-# DATA PREP
-# =========================
-
-df_plot = (
-    df.sort_values("funded_shap_with_HPI_Rank", ascending=True)
-      .head(10)
-      .copy()
-)
-
-features = df_plot["feature"]
-
-funded_shap_with_hpi = df_plot["funded_shap_with_HPI"]
-funded_shap_without_hpi = df_plot["funded_shap_without_HPI"]
-
-funded_rank_with_hpi = df_plot["funded_shap_with_HPI_Rank"]
-funded_rank_without_hpi = df_plot["funded_shap_without_HPI_Rank"]
-
+### ===============================================
+### SHAP comparison between all vs funded with hpi
+### ===============================================
 # =========================
 # PLOT SETTINGS
 # =========================
@@ -31,8 +13,8 @@ fig, ax = plt.subplots(figsize=(22, 10))
 y = np.arange(n_features)
 bar_height = 0.35
 
-color_with_hpi = "#A9CCE3"
-color_without_hpi = "#F9E79F"
+color_all = "#A9CCE3"      # light blue
+color_funded = "#F9E79F"   # light yellow
 
 # =========================
 # BARS
@@ -40,20 +22,20 @@ color_without_hpi = "#F9E79F"
 
 ax.barh(
     y - bar_height / 2,
-    funded_shap_with_hpi,
+    all_shap_with_hpi,
     height=bar_height,
-    label="Funded Model SHAP With HPI",
-    color=color_with_hpi,
+    label="All Model SHAP With HPI",
+    color=color_all,
     edgecolor="black",
     linewidth=0.8
 )
 
 ax.barh(
     y + bar_height / 2,
-    funded_shap_without_hpi,
+    funded_shap_with_hpi,
     height=bar_height,
-    label="Funded Model SHAP Without HPI",
-    color=color_without_hpi,
+    label="Funded Model SHAP With HPI",
+    color=color_funded,
     edgecolor="black",
     linewidth=0.8
 )
@@ -69,7 +51,7 @@ ax.tick_params(axis="x", labelsize=16)
 ax.set_xlabel("Absolute SHAP Value", fontsize=20, fontweight="bold")
 
 ax.set_title(
-    "SHAP Feature Importance Comparison\n(Funded Model: With HPI vs Without HPI)",
+    "SHAP Feature Importance Comparison\n(All Model vs Funded Model: With HPI)",
     fontsize=24,
     fontweight="bold",
     pad=25
@@ -82,75 +64,77 @@ ax.invert_yaxis()
 # LABELS
 # =========================
 
-max_value = max(funded_shap_with_hpi.max(), funded_shap_without_hpi.max())
+max_value = max(all_shap_with_hpi.max(), funded_shap_with_hpi.max())
 inside_offset = max_value * 0.03
 outside_offset = max_value * 0.015
 
 for i in range(n_features):
 
-    rank_change_with = int(funded_rank_without_hpi.iloc[i]) - int(funded_rank_with_hpi.iloc[i])
+    # All model label: rank change from Funded rank to All rank
+    rank_change_all = int(funded_rank_with_hpi.iloc[i]) - int(all_rank_with_hpi.iloc[i])
 
-    if rank_change_with > 0:
-        rank_move_with = f"↑{rank_change_with}"
-    elif rank_change_with < 0:
-        rank_move_with = f"↓{abs(rank_change_with)}"
+    if rank_change_all > 0:
+        rank_move_all = f"↑{rank_change_all}"
+    elif rank_change_all < 0:
+        rank_move_all = f"↓{abs(rank_change_all)}"
     else:
-        rank_move_with = "–"
+        rank_move_all = "–"
 
-    label_with = (
-        f"{funded_shap_with_hpi.iloc[i]:.3f} "
-        f"(R{int(funded_rank_with_hpi.iloc[i])}, {rank_move_with})"
+    label_all = (
+        f"{all_shap_with_hpi.iloc[i]:.3f} "
+        f"(R{int(all_rank_with_hpi.iloc[i])}, {rank_move_all})"
     )
 
-    value_with = funded_shap_with_hpi.iloc[i]
+    value_all = all_shap_with_hpi.iloc[i]
 
-    if value_with > max_value * 0.18:
-        x_with = value_with - inside_offset
-        ha_with = "right"
+    if value_all > max_value * 0.18:
+        x_all = value_all - inside_offset
+        ha_all = "right"
     else:
-        x_with = value_with + outside_offset
-        ha_with = "left"
+        x_all = value_all + outside_offset
+        ha_all = "left"
 
     ax.text(
-        x_with,
+        x_all,
         y[i] - bar_height / 2,
-        label_with,
+        label_all,
         va="center",
-        ha=ha_with,
+        ha=ha_all,
         fontsize=14,
         fontweight="bold",
         color="black"
     )
 
-    rank_change_without = int(funded_rank_with_hpi.iloc[i]) - int(funded_rank_without_hpi.iloc[i])
+    # Funded model label: rank change from All rank to Funded rank
+    rank_change_funded = int(all_rank_with_hpi.iloc[i]) - int(funded_rank_with_hpi.iloc[i])
 
-    if rank_change_without > 0:
-        rank_move_without = f"↑{rank_change_without}"
-    elif rank_change_without < 0:
-        rank_move_without = f"↓{abs(rank_change_without)}"
+    if rank_change_funded > 0:
+        rank_move_funded = f"↑{rank_change_funded}"
+    elif rank_change_funded < 0:
+        rank_move_funded = f"↓{abs(rank_change_funded)}"
     else:
-        rank_move_without = "–"
+        rank_move_funded = "–"
 
-    label_without = (
-        f"{funded_shap_without_hpi.iloc[i]:.3f} "
-        f"(R{int(funded_rank_without_hpi.iloc[i])}, {rank_move_without})"
+    label_funded = (
+        f"{funded_shap_with_hpi.iloc[i]:.3f} "
+        f"(R{int(funded_rank_with_hpi.iloc[i])}, {rank_move_funded})"
     )
 
-    value_without = funded_shap_without_hpi.iloc[i]
+    value_funded = funded_shap_with_hpi.iloc[i]
 
-    if value_without > max_value * 0.18:
-        x_without = value_without - inside_offset
-        ha_without = "right"
+    if value_funded > max_value * 0.18:
+        x_funded = value_funded - inside_offset
+        ha_funded = "right"
     else:
-        x_without = value_without + outside_offset
-        ha_without = "left"
+        x_funded = value_funded + outside_offset
+        ha_funded = "left"
 
     ax.text(
-        x_without,
+        x_funded,
         y[i] + bar_height / 2,
-        label_without,
+        label_funded,
         va="center",
-        ha=ha_without,
+        ha=ha_funded,
         fontsize=14,
         fontweight="bold",
         color="black"
@@ -166,9 +150,201 @@ ax.set_xlim(0, max_value * 1.25)
 plt.tight_layout()
 
 plt.savefig(
-    "Funded_Model_SHAP_Comparison_With_HPI_vs_Without_HPI.png",
+    "SHAP_Comparison_All_vs_Funded_With_HPI.png",
     dpi=400,
     bbox_inches="tight"
 )
+
+
+### ===============================================
+### SHAP comparison between all vs funded without hpi
+### ===============================================
+import numpy as np
+import matplotlib.pyplot as plt
+
+# =========================
+# DATA PREP
+# =========================
+
+df_plot = (
+    df.sort_values("all_shap_without_HPI_Rank", ascending=True)
+      .head(10)
+      .copy()
+)
+
+features = df_plot["feature"]
+
+all_shap = df_plot["all_shap_without_HPI"]
+funded_shap = df_plot["funded_shap_without_HPI"]
+
+all_rank = df_plot["all_shap_without_HPI_Rank"]
+funded_rank = df_plot["funded_shap_without_HPI_Rank"]
+
+# =========================
+# PLOT SETTINGS
+# =========================
+
+plt.rcParams["figure.dpi"] = 150
+
+n_features = len(df_plot)
+fig, ax = plt.subplots(figsize=(22, 10))
+
+y = np.arange(n_features)
+bar_height = 0.35
+
+color_all = "#A9CCE3"      # light blue
+color_funded = "#F9E79F"   # light yellow
+
+# =========================
+# BARS
+# =========================
+
+ax.barh(
+    y - bar_height / 2,
+    all_shap,
+    height=bar_height,
+    label="All Model SHAP Without HPI",
+    color=color_all,
+    edgecolor="black",
+    linewidth=0.8
+)
+
+ax.barh(
+    y + bar_height / 2,
+    funded_shap,
+    height=bar_height,
+    label="Funded Model SHAP Without HPI",
+    color=color_funded,
+    edgecolor="black",
+    linewidth=0.8
+)
+
+# =========================
+# AXES
+# =========================
+
+ax.set_yticks(y)
+ax.set_yticklabels(features, fontsize=18, fontweight="bold")
+ax.tick_params(axis="x", labelsize=16)
+
+ax.set_xlabel("Absolute SHAP Value", fontsize=20, fontweight="bold")
+
+ax.set_title(
+    "SHAP Feature Importance Comparison\n(All Model vs Funded Model: Without HPI)",
+    fontsize=24,
+    fontweight="bold",
+    pad=25
+)
+
+ax.legend(fontsize=15, loc="upper right")
+ax.invert_yaxis()
+
+# =========================
+# LABELS WITH VALUE + RANK CHANGE
+# =========================
+
+max_value = max(all_shap.max(), funded_shap.max())
+inside_offset = max_value * 0.03
+outside_offset = max_value * 0.015
+
+for i in range(n_features):
+
+    # -------------------------
+    # All model label
+    # Rank change: Funded rank -> All rank
+    # -------------------------
+    rank_change_all = int(funded_rank.iloc[i]) - int(all_rank.iloc[i])
+
+    if rank_change_all > 0:
+        rank_move_all = f"↑{rank_change_all}"
+    elif rank_change_all < 0:
+        rank_move_all = f"↓{abs(rank_change_all)}"
+    else:
+        rank_move_all = "–"
+
+    label_all = (
+        f"{all_shap.iloc[i]:.3f} "
+        f"(R{int(all_rank.iloc[i])}, {rank_move_all})"
+    )
+
+    value_all = all_shap.iloc[i]
+
+    if value_all > max_value * 0.18:
+        x_all = value_all - inside_offset
+        ha_all = "right"
+    else:
+        x_all = value_all + outside_offset
+        ha_all = "left"
+
+    ax.text(
+        x_all,
+        y[i] - bar_height / 2,
+        label_all,
+        va="center",
+        ha=ha_all,
+        fontsize=14,
+        fontweight="bold",
+        color="black"
+    )
+
+    # -------------------------
+    # Funded model label
+    # Rank change: All rank -> Funded rank
+    # -------------------------
+    rank_change_funded = int(all_rank.iloc[i]) - int(funded_rank.iloc[i])
+
+    if rank_change_funded > 0:
+        rank_move_funded = f"↑{rank_change_funded}"
+    elif rank_change_funded < 0:
+        rank_move_funded = f"↓{abs(rank_change_funded)}"
+    else:
+        rank_move_funded = "–"
+
+    label_funded = (
+        f"{funded_shap.iloc[i]:.3f} "
+        f"(R{int(funded_rank.iloc[i])}, {rank_move_funded})"
+    )
+
+    value_funded = funded_shap.iloc[i]
+
+    if value_funded > max_value * 0.18:
+        x_funded = value_funded - inside_offset
+        ha_funded = "right"
+    else:
+        x_funded = value_funded + outside_offset
+        ha_funded = "left"
+
+    ax.text(
+        x_funded,
+        y[i] + bar_height / 2,
+        label_funded,
+        va="center",
+        ha=ha_funded,
+        fontsize=14,
+        fontweight="bold",
+        color="black"
+    )
+
+# =========================
+# GRID + SPACING
+# =========================
+
+ax.grid(axis="x", linestyle="--", alpha=0.35)
+ax.set_xlim(0, max_value * 1.25)
+
+plt.tight_layout()
+
+# =========================
+# SAVE + SHOW
+# =========================
+
+plt.savefig(
+    "SHAP_Comparison_All_vs_Funded_Without_HPI.png",
+    dpi=400,
+    bbox_inches="tight"
+)
+
+plt.show()
+
 
 plt.show()
