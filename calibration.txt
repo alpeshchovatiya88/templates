@@ -1,0 +1,154 @@
+from sklearn.calibration import calibration_curve
+import matplotlib.pyplot as plt
+import os
+
+def plot_calibration_curve(
+    model,
+    X_test,
+    y_test,
+    out_dir="model_outputs",
+    label="oot_2021_2023",
+    n_bins=10
+):
+    os.makedirs(out_dir, exist_ok=True)
+
+    proba = model.predict_proba(X_test)[:, 1]
+
+    prob_true, prob_pred = calibration_curve(
+        y_true=y_test,
+        y_prob=proba,
+        n_bins=n_bins,
+        strategy="quantile"
+    )
+
+    plt.figure(figsize=(6, 6))
+
+    plt.plot(
+        prob_pred,
+        prob_true,
+        marker="o",
+        linewidth=2,
+        label="XGBoost"
+    )
+
+    plt.plot(
+        [0, 1],
+        [0, 1],
+        linestyle="--",
+        label="Perfect calibration"
+    )
+
+    plt.xlabel("Mean predicted probability")
+    plt.ylabel("Observed default rate")
+    plt.title(f"Calibration Curve - {label}")
+    plt.legend()
+    plt.grid(True)
+    plt.tight_layout()
+
+    file_path = os.path.join(out_dir, f"{label}_calibration_curve.png")
+    plt.savefig(file_path, dpi=300, bbox_inches="tight")
+    plt.show()
+
+    print("Saved calibration curve to:", file_path)
+
+    return file_path
+
+===============================================
+Run this after your model is trained:
+
+df_train, df_test, X_train, X_test, y_train, y_test, features = prepare_train_test(
+    df=df,
+    features=features,
+    target="target"
+)
+
+calibration_plot_path = plot_calibration_curve(
+    model=model,
+    X_test=X_test,
+    y_test=y_test,
+    out_dir="model_outputs",
+    label="oot_2021_2023",
+    n_bins=10
+)
+
+================================================
+
+from sklearn.calibration import CalibratedClassifierCV, calibration_curve
+import matplotlib.pyplot as plt
+import os
+
+def calibrate_model(
+    model,
+    X_train,
+    y_train,
+    method="isotonic",
+    cv=5
+):
+    calibrated_model = CalibratedClassifierCV(
+        estimator=model,
+        method=method,   # "isotonic" or "sigmoid"
+        cv=cv
+    )
+
+    calibrated_model.fit(X_train, y_train)
+
+    return calibrated_model
+
+
+========================
+Run calibration:
+
+calibrated_model = calibrate_model(
+    model=model,
+    X_train=X_train,
+    y_train=y_train,
+    method="isotonic",
+    cv=5
+)
+
+========================
+Plot calibrated curve:
+
+def plot_calibrated_curve(
+    calibrated_model,
+    X_test,
+    y_test,
+    out_dir="model_outputs",
+    label="oot_2021_2023_calibrated",
+    n_bins=10
+):
+    os.makedirs(out_dir, exist_ok=True)
+
+    proba = calibrated_model.predict_proba(X_test)[:, 1]
+
+    prob_true, prob_pred = calibration_curve(
+        y_test,
+        proba,
+        n_bins=n_bins,
+        strategy="quantile"
+    )
+
+    plt.figure(figsize=(6, 6))
+    plt.plot(prob_pred, prob_true, marker="o", label="Calibrated XGBoost")
+    plt.plot([0, 1], [0, 1], linestyle="--", label="Perfect calibration")
+
+    plt.xlabel("Mean predicted probability")
+    plt.ylabel("Observed default rate")
+    plt.title("Calibrated Calibration Curve")
+    plt.legend()
+    plt.grid(True)
+    plt.tight_layout()
+
+    file_path = os.path.join(out_dir, f"{label}_calibration_curve.png")
+    plt.savefig(file_path, dpi=300, bbox_inches="tight")
+    plt.show()
+
+    return file_path
+
+============================
+plot_calibrated_curve(
+    calibrated_model=calibrated_model,
+    X_test=X_test,
+    y_test=y_test
+)
+
