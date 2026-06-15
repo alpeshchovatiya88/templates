@@ -152,3 +152,136 @@ plot_calibrated_curve(
     y_test=y_test
 )
 
+
+==================================================================================
+
+from sklearn.calibration import CalibratedClassifierCV, calibration_curve
+from sklearn.model_selection import train_test_split
+import matplotlib.pyplot as plt
+
+# Split TRAIN data into fit set and calibration set
+X_fit, X_cal, y_fit, y_cal = train_test_split(
+    X_train,
+    y_train,
+    test_size=0.2,
+    random_state=42,
+    stratify=y_train
+)
+
+# Build your same pipeline: preprocessor + XGBoost
+base_pipeline = build_pipeline(
+    X_fit,
+    credit_use="bin",
+    random_state=42
+)
+
+# Fit pipeline, including encoding
+base_pipeline.fit(X_fit, y_fit)
+
+# Calibrate the already-fitted pipeline
+calibrated_model = CalibratedClassifierCV(
+    estimator=base_pipeline,
+    method="isotonic",
+    cv="prefit"
+)
+
+calibrated_model.fit(X_cal, y_cal)
+
+# Predict on OOT test set
+calibrated_probs = calibrated_model.predict_proba(X_test)[:, 1]
+
+# Plot calibration curve
+prob_true, prob_pred = calibration_curve(
+    y_test,
+    calibrated_probs,
+    n_bins=10,
+    strategy="quantile"
+)
+
+plt.figure(figsize=(6, 6))
+plt.plot(prob_pred, prob_true, marker="o", label="Calibrated XGBoost")
+plt.plot([0, 1], [0, 1], linestyle="--", label="Perfect calibration")
+plt.xlabel("Mean predicted probability")
+plt.ylabel("Observed default rate")
+plt.title("Calibration Curve - Calibrated Model")
+plt.legend()
+plt.grid(True)
+plt.show()
+
+================================================
+
+For your notebook, the safest next step is:
+
+df_train, df_test, X_train, X_test, y_train, y_test, features = prepare_train_test(
+    df=df,
+    features=features,
+    target="target"
+)
+
+plot_calibration_curve(
+    model=model,
+    X_test=X_test,
+    y_test=y_test,
+    out_dir="model_outputs",
+    label="oot_2021_2023"
+)
+
+Do not calibrate yet. First check whether calibration is actually needed
+
+===========================================================
+
+from sklearn.calibration import CalibratedClassifierCV, calibration_curve
+from sklearn.model_selection import train_test_split
+import matplotlib.pyplot as plt
+
+# split training data into calibration set
+X_fit, X_cal, y_fit, y_cal = train_test_split(
+    X_train,
+    y_train,
+    test_size=0.2,
+    random_state=42,
+    stratify=y_train
+)
+
+# refit your existing pipeline model
+model.fit(X_fit, y_fit)
+
+# calibrate fitted pipeline
+calibrated_model = CalibratedClassifierCV(
+    estimator=model,
+    method="isotonic",
+    cv="prefit"
+)
+
+calibrated_model.fit(X_cal, y_cal)
+
+# predict on OOT test data
+calibrated_probs = calibrated_model.predict_proba(X_test)[:, 1]
+
+# plot curve
+prob_true, prob_pred = calibration_curve(
+    y_test,
+    calibrated_probs,
+    n_bins=10,
+    strategy="quantile"
+)
+
+plt.figure(figsize=(6, 6))
+plt.plot(prob_pred, prob_true, marker="o", label="Calibrated XGBoost")
+plt.plot([0, 1], [0, 1], linestyle="--", label="Perfect calibration")
+plt.xlabel("Mean predicted probability")
+plt.ylabel("Observed default rate")
+plt.title("Calibration Curve - Calibrated Model")
+plt.legend()
+plt.grid(True)
+plt.show()
+
+===================================
+For newer sklearn:
+
+from sklearn.frozen import FrozenEstimator
+
+calibrated_model = CalibratedClassifierCV(
+    estimator=FrozenEstimator(model),
+    method="isotonic"
+)
