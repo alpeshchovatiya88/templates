@@ -393,3 +393,36 @@ test_auc = results["test_auc"]
 scored_df = results["test_scored"]
 
 print("Final OOT AUC:", test_auc)
+
+======================
+
+from lightgbm import LGBMClassifier
+
+def build_model(random_state=42):
+    return LGBMClassifier(
+        objective="binary",
+        n_estimators=700,
+        learning_rate=0.03,
+        num_leaves=31,
+        max_depth=4,
+        min_child_samples=200,
+        subsample=0.8,
+        colsample_bytree=0.8,
+        reg_alpha=1,
+        reg_lambda=20,
+        random_state=random_state,
+        n_jobs=-1,
+        verbose=-1
+    )
+
+param_dist = {
+    "model__n_estimators": [300, 500, 700],
+    "model__learning_rate": [0.01, 0.03, 0.05],
+    "model__num_leaves": [15, 31, 63],
+    "model__max_depth": [3, 4, 5],
+    "model__min_child_samples": [100, 200, 300, 500],
+    "model__subsample": [0.7, 0.8, 0.9],
+    "model__colsample_bytree": [0.7, 0.8, 0.9],
+    "model__reg_alpha": [0, 0.5, 1, 2],
+    "model__reg_lambda": [10, 20, 50]
+}
