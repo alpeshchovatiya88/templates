@@ -1,0 +1,395 @@
+import os
+import numpy as np
+import pandas as pd
+
+from sklearn.pipeline import Pipeline
+from sklearn.compose import ColumnTransformer
+from sklearn.impute import SimpleImputer
+from sklearn.preprocessing import StandardScaler, OneHotEncoder, OrdinalEncoder
+from sklearn.metrics import roc_auc_score, classification_report
+from sklearn.model_selection import RandomizedSearchCV
+
+from xgboost import XGBClassifier
+
+
+# -----------------------------
+# 1. Train / test split by year
+# -----------------------------
+def prepare_train_test(
+    df,
+    features,
+    target="target",
+    train_years=(2009, 2017),
+    test_years=(2021, 2023),
+    year_col="BOOKYEAR"
+):
+    df = df.copy()
+
+    df_train = df[df[year_col].between(*train_years)].copy()
+    df_test = df[df[year_col].between(*test_years)].copy()
+
+    features = [
+        c for c in features
+        if c not in ["APPLICATION_NUMBER", "BOOKYEAR", target]
+    ]
+
+    X_train = df_train[features].copy()
+    y_train = df_train[target].astype(int).to_numpy().ravel()
+
+    X_test = df_test[features].copy()
+    y_test = df_test[target].astype(int).to_numpy().ravel()
+
+    return df_train, df_test, X_train, X_test, y_train, y_test, features
+
+
+# -----------------------------
+# 2. Preprocessor
+# -----------------------------
+def build_preprocessor(X, credit_use="bin"):
+    ordinal_cols = ["PRK_NUM_OF_UNITS", "NUM_OF_BOR"]
+
+    if credit_use == "bin" and "CRD_SCORE_bin" in X.columns:
+        ordinal_cols = ["CRD_SCORE_bin"] + ordinal_cols
+
+    log_cols = ["HPI_t4"] if "HPI_t4" in X.columns else []
+
+    num_cols = X.select_dtypes(include=["number", "bool"]).columns.tolist()
+    cat_cols = X.select_dtypes(exclude=["number", "bool"]).columns.tolist()
+
+    ordinal_cols = [c for c in ordinal_cols if c in X.columns]
+    num_cols = [c for c in num_cols if c not in ordinal_cols + log_cols]
+    cat_cols = [c for c in cat_cols if c not in ordinal_cols]
+
+    num_tf = Pipeline([
+        ("imputer", SimpleImputer(strategy="median")),
+        ("scaler", StandardScaler())
+    ])
+
+    log_tf = Pipeline([
+        ("imputer", SimpleImputer(strategy="median")),
+        ("scaler", StandardScaler())
+    ])
+
+    ord_tf = Pipeline([
+        ("imputer", SimpleImputer(strategy="most_frequent")),
+        ("ord", OrdinalEncoder(
+            handle_unknown="use_encoded_value",
+            unknown_value=-1
+        ))
+    ])
+
+    cat_tf = Pipeline([
+        ("imputer", SimpleImputer(strategy="most_frequent")),
+        ("ohe", OneHotEncoder(
+            handle_unknown="ignore",
+            sparse_output=False
+        ))
+    ])
+
+    preprocessor = ColumnTransformer([
+        ("lognum", log_tf, log_cols),
+        ("num", num_tf, num_cols),
+        ("ord", ord_tf, ordinal_cols),
+        ("cat", cat_tf, cat_cols)
+    ], sparse_threshold=0)
+
+    return preprocessor
+
+
+# -----------------------------
+# 3. Model pipeline
+# -----------------------------
+def build_model(random_state=42):
+    return XGBClassifier(
+        objective="binary:logistic",
+        eval_metric="auc",
+        tree_method="hist",
+        random_state=random_state,
+        n_jobs=-1
+    )
+
+
+def build_pipeline(X, credit_use="bin", random_state=42):
+    preprocessor = build_preprocessor(X, credit_use=credit_use)
+    model = build_model(random_state=random_state)
+
+    return Pipeline([
+        ("pre", preprocessor),
+        ("model", model)
+    ])
+
+
+# -----------------------------
+# 4. Time-based CV splitter
+# -----------------------------
+def make_time_splits(df_train, year_col="BOOKYEAR"):
+    splits = [
+        ((2009, 2014), (2015, 2015)),
+        ((2009, 2015), (2016, 2016)),
+        ((2009, 2016), (2017, 2017)),
+    ]
+
+    cv = []
+
+    for train_years, valid_years in splits:
+        train_idx = df_train.index[
+            df_train[year_col].between(*train_years)
+        ].to_numpy()
+
+        valid_idx = df_train.index[
+            df_train[year_col].between(*valid_years)
+        ].to_numpy()
+
+        train_pos = df_train.index.get_indexer(train_idx)
+        valid_pos = df_train.index.get_indexer(valid_idx)
+
+        cv.append((train_pos, valid_pos))
+
+    return cv
+
+
+# -----------------------------
+# 5. Tune with time-based CV
+# -----------------------------
+def train_model_time_cv(
+    X_train,
+    y_train,
+    df_train,
+    credit_use="bin",
+    random_state=42,
+    year_col="BOOKYEAR"
+):
+    pipeline = build_pipeline(
+        X_train,
+        credit_use=credit_use,
+        random_state=random_state
+    )
+
+    param_dist = {
+        "model__n_estimators": [200, 300, 500],
+        "model__max_depth": [2, 3, 4],
+        "model__learning_rate": [0.01, 0.03, 0.05],
+        "model__subsample": [0.7, 0.8, 0.9],
+        "model__colsample_bytree": [0.7, 0.8, 0.9],
+        "model__min_child_weight": [50, 75, 100, 150],
+        "model__gamma": [0, 0.5, 1, 2],
+        "model__reg_lambda": [2, 5, 10, 20],
+        "model__reg_alpha": [0, 0.1, 0.5, 1],
+    }
+
+    cv = make_time_splits(df_train, year_col=year_col)
+
+    search = RandomizedSearchCV(
+        estimator=pipeline,
+        param_distributions=param_dist,
+        n_iter=20,
+        scoring="roc_auc",
+        cv=cv,
+        verbose=2,
+        n_jobs=1,
+        random_state=random_state,
+        refit=True
+    )
+
+    search.fit(X_train, y_train)
+
+    print("Best Time-CV AUC:", search.best_score_)
+    print("Best Parameters:")
+    print(search.best_params_)
+
+    return search.best_estimator_
+
+
+# -----------------------------
+# 6. Time-CV OOF predictions
+# -----------------------------
+def run_time_oof(
+    X_train,
+    y_train,
+    df_train,
+    credit_use="bin",
+    random_state=42,
+    year_col="BOOKYEAR"
+):
+    cv = make_time_splits(df_train, year_col=year_col)
+
+    oof_proba = np.full(len(X_train), np.nan)
+
+    fold_scores = []
+
+    for fold, (tr_idx, va_idx) in enumerate(cv, 1):
+        X_tr = X_train.iloc[tr_idx]
+        y_tr = y_train[tr_idx]
+
+        X_va = X_train.iloc[va_idx]
+        y_va = y_train[va_idx]
+
+        model = build_pipeline(
+            X_tr,
+            credit_use=credit_use,
+            random_state=random_state
+        )
+
+        model.fit(X_tr, y_tr)
+
+        va_proba = model.predict_proba(X_va)[:, 1]
+        auc = roc_auc_score(y_va, va_proba)
+
+        oof_proba[va_idx] = va_proba
+        fold_scores.append(auc)
+
+        valid_years = sorted(df_train.iloc[va_idx][year_col].unique())
+        print(f"Fold {fold}, valid years {valid_years}, AUC: {auc:.4f}")
+
+    mask = ~np.isnan(oof_proba)
+    oof_auc = roc_auc_score(y_train[mask], oof_proba[mask])
+
+    print("Overall Time-OOF AUC:", oof_auc)
+    print("Fold AUCs:", fold_scores)
+
+    return oof_proba, oof_auc, fold_scores
+
+
+# -----------------------------
+# 7. OOT evaluation
+# -----------------------------
+def evaluate_model(model, X, y, df, out_dir, label="oot"):
+    os.makedirs(out_dir, exist_ok=True)
+
+    proba = model.predict_proba(X)[:, 1]
+    auc = roc_auc_score(y, proba)
+
+    scored = df.copy()
+    scored["pred_proba"] = proba
+    scored["pred_class"] = (proba >= 0.5).astype(int)
+
+    print(f"{label} AUC:", auc)
+    print(classification_report(y, scored["pred_class"]))
+
+    scored.to_csv(
+        os.path.join(out_dir, f"{label}_scored.csv"),
+        index=False
+    )
+
+    return {
+        "auc": auc,
+        "proba": proba,
+        "scored": scored
+    }
+
+
+# -----------------------------
+# 8. Year-wise AUC
+# -----------------------------
+def auc_by_year(scored_df, target="target", year_col="BOOKYEAR"):
+    for yr in sorted(scored_df[year_col].unique()):
+        temp = scored_df[scored_df[year_col] == yr]
+
+        if temp[target].nunique() < 2:
+            print(yr, "skipped because only one class exists")
+            continue
+
+        auc = roc_auc_score(temp[target], temp["pred_proba"])
+        print(f"{yr} AUC: {auc:.4f}")
+
+
+# -----------------------------
+# 9. Full workflow
+# -----------------------------
+def full_model_workflow_time_cv(
+    df,
+    features,
+    target="target",
+    out_dir="model_outputs",
+    credit_use="bin",
+    random_state=42,
+    year_col="BOOKYEAR"
+):
+    os.makedirs(out_dir, exist_ok=True)
+
+    df_train, df_test, X_train, X_test, y_train, y_test, features = prepare_train_test(
+        df=df,
+        features=features,
+        target=target,
+        train_years=(2009, 2017),
+        test_years=(2021, 2023),
+        year_col=year_col
+    )
+
+    print("Train years:", sorted(df_train[year_col].unique()))
+    print("Test years:", sorted(df_test[year_col].unique()))
+    print("Train shape:", X_train.shape)
+    print("Test shape:", X_test.shape)
+
+    print("\nRunning time-based OOF...")
+    oof_proba, oof_auc, fold_scores = run_time_oof(
+        X_train=X_train,
+        y_train=y_train,
+        df_train=df_train,
+        credit_use=credit_use,
+        random_state=random_state,
+        year_col=year_col
+    )
+
+    df_train_oof = df_train.copy()
+    df_train_oof["oof_pred_proba"] = oof_proba
+    df_train_oof.to_csv(
+        os.path.join(out_dir, "train_time_oof_predictions.csv"),
+        index=False
+    )
+
+    print("\nTraining final tuned model...")
+    model = train_model_time_cv(
+        X_train=X_train,
+        y_train=y_train,
+        df_train=df_train,
+        credit_use=credit_use,
+        random_state=random_state,
+        year_col=year_col
+    )
+
+    print("\nEvaluating OOT test...")
+    eval_result = evaluate_model(
+        model=model,
+        X=X_test,
+        y=y_test,
+        df=df_test,
+        out_dir=out_dir,
+        label="oot_2021_2023"
+    )
+
+    print("\nYear-wise OOT AUC:")
+    auc_by_year(
+        scored_df=eval_result["scored"],
+        target=target,
+        year_col=year_col
+    )
+
+    return {
+        "model": model,
+        "time_oof_auc": oof_auc,
+        "fold_scores": fold_scores,
+        "test_auc": eval_result["auc"],
+        "test_scored": eval_result["scored"],
+        "features": features
+    }
+
+
+# -----------------------------
+# 10. Run
+# -----------------------------
+results = full_model_workflow_time_cv(
+    df=df,
+    features=features,
+    target="target",
+    out_dir="model_outputs",
+    credit_use="bin",
+    random_state=42,
+    year_col="BOOKYEAR"
+)
+
+model = results["model"]
+test_auc = results["test_auc"]
+scored_df = results["test_scored"]
+
+print("Final OOT AUC:", test_auc)
