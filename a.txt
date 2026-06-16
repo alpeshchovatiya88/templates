@@ -1,18 +1,21 @@
-# Totals per BOOKYEAR
-totals = (
-    df.groupby("BOOKYEAR")
+summary = (
+    df.groupby(["BOOKYEAR", "which_score", "CRD_SCORE_bin"])
       .agg(
-          Total_N=("target", "count"),
-          Total_Bad=("target", "sum"),
-          Bad_Rate=("target", lambda x: round(x.mean() * 100, 2))
+          total_number=("target", "count"),
+          total_bad_count=("target", "sum"),
+          bad_rate_pct=("target", lambda x: round(x.mean() * 100, 2))
       )
 )
 
-# Create display string
-formatted["Overall"] = (
-    "n=" + totals["Total_N"].astype(str)
-    + " (bad=" + totals["Total_Bad"].astype(str)
-    + ", " + totals["Bad_Rate"].astype(str) + "%)"
+out = summary.unstack(["which_score", "CRD_SCORE_bin"])
+
+formatted = (
+    out["total_number"].astype("Int64").astype(str)
+    + " (bad="
+    + out["total_bad_count"].astype("Int64").astype(str)
+    + ", "
+    + out["bad_rate_pct"].astype(str)
+    + "%)"
 )
 
 formatted
