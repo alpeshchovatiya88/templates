@@ -285,3 +285,232 @@ calibrated_model = CalibratedClassifierCV(
     estimator=FrozenEstimator(model),
     method="isotonic"
 )
+================================oof==============================
+
+from sklearn.calibration import calibration_curve
+import matplotlib.pyplot as plt
+
+def plot_oof_calibration_curve(
+    y_true,
+    oof_proba,
+    n_bins=5,
+    strategy="quantile"
+):
+
+    prob_true, prob_pred = calibration_curve(
+        y_true,
+        oof_proba,
+        n_bins=n_bins,
+        strategy=strategy
+    )
+
+    plt.figure(figsize=(7,6))
+
+    plt.plot(
+        prob_pred,
+        prob_true,
+        marker="o",
+        linewidth=2,
+        label="OOF predictions"
+    )
+
+    plt.plot(
+        [0,1],
+        [0,1],
+        "--",
+        color="red",
+        label="Perfect calibration"
+    )
+
+    plt.xlabel("Mean predicted probability")
+
+    plt.ylabel("Observed default rate")
+
+    plt.title("Calibration Curve (5-fold OOF)")
+
+    plt.legend()
+
+    plt.grid(True)
+
+    plt.show()
+
+    return prob_true, prob_pred
+
+=============
+plot_oof_calibration_curve(
+    y_true=y_train,
+    oof_proba=oof_proba,
+    n_bins=5
+)
+
+--------------------
+
+If oof_proba no longer exists
+
+Use the dataframe you created:
+
+df_train_oof["oof_pred_proba"]
+
+Then:
+
+plot_oof_calibration_curve(
+    y_true=y_train,
+    oof_proba=df_train_oof["oof_pred_proba"]
+)
+
+============================================================================
+
+X_fit, X_cal, y_fit, y_cal = train_test_split(
+    X_train,
+    y_train,
+    test_size=0.2,
+    random_state=42,
+    stratify=y_train
+)
+
+base_model = build_pipeline(
+    X_fit,
+    credit_use="bin",
+    random_state=42
+)
+
+base_model.fit(X_fit, y_fit)
+
+calibrated_model = CalibratedClassifierCV(
+    estimator=base_model,
+    method="sigmoid",   # better than isotonic for your rare default rate
+    cv="prefit"
+)
+
+calibrated_model.fit(X_cal, y_cal)
+
+-----------------
+
+Then evaluate calibrated model on OOT:
+
+calibrated_probs = calibrated_model.predict_proba(X_test)[:, 1]
+
+----------------------------
+hen plot:
+
+from sklearn.calibration import calibration_curve
+import matplotlib.pyplot as plt
+
+prob_true, prob_pred = calibration_curve(
+    y_test,
+    calibrated_probs,
+    n_bins=5,
+    strategy="quantile"
+)
+
+plt.figure(figsize=(7, 6))
+plt.plot(prob_pred, prob_true, marker="o", label="Calibrated model")
+plt.plot([0, 1], [0, 1], "--", label="Perfect calibration")
+plt.xlabel("Mean predicted probability")
+plt.ylabel("Observed default rate")
+plt.title("Calibration Curve - Calibrated Model on OOT")
+plt.legend()
+plt.grid(True)
+plt.show()
+
+---------------------------
+For newer sklearn, replace cv="prefit" with:
+
+from sklearn.frozen import FrozenEstimator
+
+calibrated_model = CalibratedClassifierCV(
+    estimator=FrozenEstimator(base_model),
+    method="sigmoid"
+)
+
+=============================================================================================
+
+from sklearn.calibration import CalibrationDisplay
+import matplotlib.pyplot as plt
+
+def plot_oof_calibration_display(y_true, oof_proba, n_bins=5):
+
+    fig, ax = plt.subplots(figsize=(7,6))
+
+    CalibrationDisplay.from_predictions(
+        y_true=y_true,
+        y_prob=oof_proba,
+        n_bins=n_bins,
+        strategy="quantile",
+        name="XGBoost (OOF)",
+        ax=ax
+    )
+
+    ax.set_title("Calibration Curve (5-fold OOF)")
+    ax.grid(True)
+
+    plt.show()
+
+-----------------------------------------
+
+plot_oof_calibration_display(
+    y_true=y_train,
+    oof_proba=oof_proba,
+    n_bins=5
+)
+
+-----------------------------------
+or, if you stored OOF predictions:
+
+plot_oof_calibration_display(
+    y_true=y_train,
+    oof_proba=df_train_oof["oof_pred_proba"],
+    n_bins=5
+)
+
+==================================================
+
+from sklearn.model_selection import train_test_split
+from sklearn.calibration import CalibratedClassifierCV, CalibrationDisplay
+import matplotlib.pyplot as plt
+
+# 1. Split training data
+X_fit, X_cal, y_fit, y_cal = train_test_split(
+    X_train,
+    y_train,
+    test_size=0.2,
+    random_state=42,
+    stratify=y_train
+)
+
+# 2. Build full pipeline: preprocessing + XGBoost
+base_model = build_pipeline(
+    X_fit,
+    credit_use="bin",
+    random_state=42
+)
+
+# 3. Fit base model
+base_model.fit(X_fit, y_fit)
+
+# 4. Calibrate fitted model
+calibrated_model = CalibratedClassifierCV(
+    estimator=base_model,
+    method="sigmoid",   # better for your rare default rate
+    cv="prefit"
+)
+
+calibrated_model.fit(X_cal, y_cal)
+
+# 5. Evaluate calibrated model on OOT
+calibrated_probs = calibrated_model.predict_proba(X_test)[:, 1]
+
+fig, ax = plt.subplots(figsize=(7, 6))
+
+CalibrationDisplay.from_predictions(
+    y_true=y_test,
+    y_prob=calibrated_probs,
+    n_bins=5,
+    strategy="quantile",
+    name="Calibrated XGBoost",
+    ax=ax
+)
+
+ax.set_title("Calibration Curve - Calibrated Model on OOT")
+ax.grid(True)
+plt.show()
