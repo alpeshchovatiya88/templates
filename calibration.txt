@@ -514,3 +514,144 @@ CalibrationDisplay.from_predictions(
 ax.set_title("Calibration Curve - Calibrated Model on OOT")
 ax.grid(True)
 plt.show()
+
+====================================================================================
+
+import os
+import numpy as np
+import matplotlib.pyplot as plt
+
+from sklearn.model_selection import StratifiedKFold, train_test_split
+from sklearn.calibration import CalibratedClassifierCV, CalibrationDisplay
+from sklearn.metrics import brier_score_loss, roc_auc_score
+
+
+def run_oof_calibration_pipeline_with_metrics(
+    X_train,
+    y_train,
+    build_pipeline_fn,
+    credit_use="bin",
+    method="sigmoid",
+    cal_size=0.2,
+    n_splits=5,
+    n_bins=5,
+    out_dir="model_outputs",
+    label="train_oof",
+    random_state=42
+):
+    os.makedirs(out_dir, exist_ok=True)
+
+    y_train = np.asarray(y_train)
+
+    oof_uncal_probs = np.zeros(len(y_train))
+    oof_cal_probs = np.zeros(len(y_train))
+
+    cv = StratifiedKFold(
+        n_splits=n_splits,
+        shuffle=True,
+        random_state=random_state
+    )
+
+    for fold, (tr_idx, val_idx) in enumerate(cv.split(X_train, y_train), 1):
+        print(f"Running fold {fold}/{n_splits}...")
+
+        X_tr_fold = X_train.iloc[tr_idx]
+        y_tr_fold = y_train[tr_idx]
+
+        X_val_fold = X_train.iloc[val_idx]
+        y_val_fold = y_train[val_idx]
+
+        X_fit, X_cal, y_fit, y_cal = train_test_split(
+            X_tr_fold,
+            y_tr_fold,
+            test_size=cal_size,
+            random_state=random_state,
+            stratify=y_tr_fold
+        )
+
+        base_pipeline = build_pipeline_fn(
+            X_fit,
+            credit_use=credit_use,
+            random_state=random_state
+        )
+
+        base_pipeline.fit(X_fit, y_fit)
+
+        oof_uncal_probs[val_idx] = base_pipeline.predict_proba(X_val_fold)[:, 1]
+
+        calibrated_model = CalibratedClassifierCV(
+            estimator=base_pipeline,
+            method=method,
+            cv="prefit"
+        )
+
+        calibrated_model.fit(X_cal, y_cal)
+
+        oof_cal_probs[val_idx] = calibrated_model.predict_proba(X_val_fold)[:, 1]
+
+    brier_uncal = brier_score_loss(y_train, oof_uncal_probs)
+    brier_cal = brier_score_loss(y_train, oof_cal_probs)
+
+    auc_uncal = roc_auc_score(y_train, oof_uncal_probs)
+    auc_cal = roc_auc_score(y_train, oof_cal_probs)
+
+    print("\n--- OOF Validation Metrics ---")
+    print(f"Uncalibrated OOF Brier Score: {brier_uncal:.6f}")
+    print(f"Calibrated OOF Brier Score:   {brier_cal:.6f}")
+    print(f"Uncalibrated OOF AUC:         {auc_uncal:.6f}")
+    print(f"Calibrated OOF AUC:           {auc_cal:.6f}")
+
+    fig, ax = plt.subplots(figsize=(7, 6))
+
+    CalibrationDisplay.from_predictions(
+        y_true=y_train,
+        y_prob=oof_uncal_probs,
+        n_bins=n_bins,
+        strategy="quantile",
+        name=f"Uncalibrated OOF | Brier={brier_uncal:.4f}",
+        ax=ax
+    )
+
+    CalibrationDisplay.from_predictions(
+        y_true=y_train,
+        y_prob=oof_cal_probs,
+        n_bins=n_bins,
+        strategy="quantile",
+        name=f"Calibrated OOF ({method}) | Brier={brier_cal:.4f}",
+        ax=ax
+    )
+
+    ax.set_title(f"OOF Calibration Comparison - {label}")
+    ax.set_xlabel("Mean predicted probability")
+    ax.set_ylabel("Observed default rate")
+    ax.grid(True)
+
+    plt.tight_layout()
+
+    plot_path = os.path.join(out_dir, f"{label}_oof_calibration_comparison.png")
+    plt.savefig(plot_path, dpi=300, bbox_inches="tight")
+    plt.show()
+
+    return {
+        "oof_uncal_probs": oof_uncal_probs,
+        "oof_cal_probs": oof_cal_probs,
+        "brier_uncal": brier_uncal,
+        "brier_cal": brier_cal,
+        "auc_uncal": auc_uncal,
+        "auc_cal": auc_cal,
+        "plot_path": plot_path
+    }
+---------------------------------------------------------------------------
+oof_calibration_results = run_oof_calibration_pipeline_with_metrics(
+    X_train=X_train,
+    y_train=y_train,
+    build_pipeline_fn=build_pipeline,
+    credit_use="bin",
+    method="sigmoid",
+    cal_size=0.2,
+    n_splits=5,
+    n_bins=5,
+    out_dir="model_outputs",
+    label="train_oof_calibrated"
+)
+
