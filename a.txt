@@ -1,6 +1,6 @@
-# Totals by BOOKYEAR + CRD_SCORE_bin
-row_totals = (
-    df.groupby(["BOOKYEAR", "CRD_SCORE_bin"])
+# Totals per BOOKYEAR
+totals = (
+    df.groupby("BOOKYEAR")
       .agg(
           Total_N=("target", "count"),
           Total_Bad=("target", "sum"),
@@ -8,26 +8,11 @@ row_totals = (
       )
 )
 
-# Add a formatted total column
-row_totals["Overall"] = (
-    "n=" + row_totals["Total_N"].astype(str)
-    + " (bad=" + row_totals["Total_Bad"].astype(str)
-    + ", " + row_totals["Bad_Rate"].astype(str) + "%)"
+# Create display string
+formatted["Overall"] = (
+    "n=" + totals["Total_N"].astype(str)
+    + " (bad=" + totals["Total_Bad"].astype(str)
+    + ", " + totals["Bad_Rate"].astype(str) + "%)"
 )
 
-# Your existing table
-f = formatted1.T
-
-# Add the overall column
-f["Overall"] = row_totals["Overall"]
-
-f
-
-----------------------
-If instead you want 3 separate columns (better for Power BI):
-
-f = formatted1.T
-
-f = f.join(row_totals[["Total_N", "Total_Bad", "Bad_Rate"]])
-
-f
+formatted
