@@ -1,19 +1,17 @@
-target_years = [year for year in range(2009, 2026) if year != 2020]
+def make_year_time_cv(df_train, year_col="BOOKYEAR"):
+    splits = [
+        ((2009, 2012), (2013, 2013)),
+        ((2009, 2013), (2014, 2014)),
+        ((2009, 2014), (2015, 2015)),
+        ((2009, 2015), (2016, 2016)),
+        ((2009, 2016), (2017, 2017)),
+    ]
 
-df = df[df['BOOKYEAR'].isin(target_years)]
+    cv = []
 
-summary = (
-    df.groupby(['CRD_SCORE_bin', 'BOOKYEAR'])
-      .agg(
-          Total_Count=('target', 'count'),
-          Bad_Count=('target', 'sum'),
-          Bad_Rate=('target', 'mean')
-      )
-      .reset_index()
-)
+    for train_years, valid_years in splits:
+        train_idx = np.where(df_train[year_col].between(*train_years))[0]
+        valid_idx = np.where(df_train[year_col].between(*valid_years))[0]
+        cv.append((train_idx, valid_idx))
 
-summary['Bad_Rate'] = (summary['Bad_Rate'] * 100).round(2)
-
-summary.to_csv('badrate_summary.csv', index=False)
-
-summary.head()
+    return cv
