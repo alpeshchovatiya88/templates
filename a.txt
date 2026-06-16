@@ -1,20 +1,33 @@
-summary = (
-    df.groupby(["BOOKYEAR", "which_score", "CRD_SCORE_bin"])
+# Totals by BOOKYEAR + CRD_SCORE_bin
+row_totals = (
+    df.groupby(["BOOKYEAR", "CRD_SCORE_bin"])
       .agg(
-          total_number=("target", "count"),
-          total_bad_count=("target", "sum"),
-          bad_rate_pct=("target", lambda x: round(x.mean() * 100, 2))
+          Total_N=("target", "count"),
+          Total_Bad=("target", "sum"),
+          Bad_Rate=("target", lambda x: round(x.mean() * 100, 2))
       )
 )
 
-out = summary.unstack(["which_score", "CRD_SCORE_bin"])
-
-# optional: format as "rate% (bad/total)"
-formatted = (
-    out["bad_rate_pct"].astype(str) + "% "
-    + "(bad=" + out["total_bad_count"].astype("Int64").astype(str)
-    + ", n=" + out["total_number"].astype("Int64").astype(str) + ")"
+# Add a formatted total column
+row_totals["Overall"] = (
+    "n=" + row_totals["Total_N"].astype(str)
+    + " (bad=" + row_totals["Total_Bad"].astype(str)
+    + ", " + row_totals["Bad_Rate"].astype(str) + "%)"
 )
 
-formatted
+# Your existing table
+f = formatted1.T
 
+# Add the overall column
+f["Overall"] = row_totals["Overall"]
+
+f
+
+----------------------
+If instead you want 3 separate columns (better for Power BI):
+
+f = formatted1.T
+
+f = f.join(row_totals[["Total_N", "Total_Bad", "Bad_Rate"]])
+
+f
