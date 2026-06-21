@@ -1,3 +1,32 @@
+bad = df[df["target"] == 1].copy()
+
+bad["COLLECTION_FLAG"] = (bad["CRA_COLLECTION"] == "Y").astype(int)
+bad["BANKRUPTCY_FLAG"] = (bad["CRA_BANKRUPTCY_FORECLOSURE_IND"] == "Y").astype(int)
+bad["JUDGEMENT_FLAG"] = (bad["CRA_JUDGEMENT"] == "Y").astype(int)
+bad["DEROG_FLAG"] = (bad["CRD_PUBLIC_DEROG_TU"] > 0).astype(int)
+
+flag_cols = [
+    "COLLECTION_FLAG",
+    "BANKRUPTCY_FLAG",
+    "JUDGEMENT_FLAG",
+    "DEROG_FLAG"
+]
+
+bad["ADVERSE_COUNT"] = bad[flag_cols].sum(axis=1)
+
+overlap = (
+    bad[bad["ADVERSE_COUNT"].isin([2, 3, 4])]
+    .groupby(flag_cols + ["ADVERSE_COUNT"])
+    .size()
+    .reset_index(name="Row_Count")
+    .sort_values(["ADVERSE_COUNT", "Row_Count"], ascending=[True, False])
+)
+
+overlap
+
+
+
+
 def combo_name(row):
     names = []
     if row["COLLECTION_FLAG"] == 1:
