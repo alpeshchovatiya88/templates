@@ -1,47 +1,15 @@
+def combo_name(row):
+    names = []
+    if row["COLLECTION_FLAG"] == 1:
+        names.append("Collection")
+    if row["BANKRUPTCY_FLAG"] == 1:
+        names.append("Bankruptcy/Foreclosure")
+    if row["JUDGEMENT_FLAG"] == 1:
+        names.append("Judgement")
+    if row["DEROG_FLAG"] == 1:
+        names.append("Public Derog")
+    return " + ".join(names)
 
-import pandas as pd
-import matplotlib.pyplot as plt
+overlap["Combination"] = overlap.apply(combo_name, axis=1)
 
-target = "BAD_EVENT"   # replace with your target column
-
-summary = (
-    df.groupby("BOOKYEAR")
-      .agg(
-          Total=(target, "count"),
-          Bad=(target, "sum")
-      )
-      .reset_index()
-)
-
-summary["Bad_Rate_%"] = (
-    summary["Bad"] / summary["Total"] * 100
-)
-
-plt.figure(figsize=(10,6))
-
-bars = plt.bar(
-    summary["BOOKYEAR"].astype(str),
-    summary["Bad_Rate_%"]
-)
-
-# Add labels above each bar
-for i, row in summary.iterrows():
-
-    plt.text(
-        i,
-        row["Bad_Rate_%"] + 0.1,
-        f'T:{row["Total"]}\n'
-        f'B:{row["Bad"]}\n'
-        f'({row["Bad_Rate_%"]:.1f}%)',
-        ha='center',
-        fontsize=9
-    )
-
-plt.xlabel("BOOKYEAR")
-plt.ylabel("Bad Rate (%)")
-plt.title("Bad Rate by BOOKYEAR")
-plt.ylim(0, summary["Bad_Rate_%"].max() + 2)
-
-plt.grid(axis='y', alpha=0.3)
-
-plt.show()
+overlap[["Combination", "ADVERSE_COUNT", "Row_Count"]]
