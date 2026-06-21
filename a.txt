@@ -1,44 +1,52 @@
-bad = df[df["target"] == 1]
+# Keep only bad accounts
+bad = df[df["target"] == 1].copy()
 
+results = []
+
+# Total bad CRA_COLLECTION count
 total_collection = (bad["CRA_COLLECTION"] == "Y").sum()
 
-print("Total CRA_COLLECTION:", total_collection)
+features = [
+    "CRA_BANKRUPTCY_FORECLOSURE_IND",
+    "CRA_JUDGEMENT",
+    "CRD_PUBLIC_DEROG_TU"
+]
 
-print(
-    "Total CRA_BANKRUPTCY_FORECLOSURE_IND:",
-    (bad["CRA_BANKRUPTCY_FORECLOSURE_IND"] == "Y").sum()
-)
+for col in features:
 
-print(
-    "Total CRA_JUDGEMENT:",
-    (bad["CRA_JUDGEMENT"] == "Y").sum()
-)
+    # Total bad count of each feature
+    if col == "CRD_PUBLIC_DEROG_TU":
 
-print(
-    "Total CRD_PUBLIC_DEROG_TU:",
-    (bad["CRD_PUBLIC_DEROG_TU"] > 0).sum()
-)
+        total_feature = (bad[col] > 0).sum()
 
-print(
-    "Overlap Collection + Bankruptcy:",
-    (
-        (bad["CRA_COLLECTION"] == "Y")
-        & (bad["CRA_BANKRUPTCY_FORECLOSURE_IND"] == "Y")
-    ).sum()
-)
+        overlap = (
+            (bad["CRA_COLLECTION"] == "Y")
+            & (bad[col] > 0)
+        ).sum()
 
-print(
-    "Overlap Collection + Judgement:",
-    (
-        (bad["CRA_COLLECTION"] == "Y")
-        & (bad["CRA_JUDGEMENT"] == "Y")
-    ).sum()
-)
+    else:
 
-print(
-    "Overlap Collection + Public Derog:",
-    (
-        (bad["CRA_COLLECTION"] == "Y")
-        & (bad["CRD_PUBLIC_DEROG_TU"] > 0)
-    ).sum()
-)
+        total_feature = (bad[col] == "Y").sum()
+
+        overlap = (
+            (bad["CRA_COLLECTION"] == "Y")
+            & (bad[col] == "Y")
+        ).sum()
+
+    overlap_pct = round(
+        overlap / total_collection * 100,
+        1
+    )
+
+    results.append({
+        "Feature": col,
+        "Total_Bad_Count": total_feature,
+        "Overlap_With_CRA_COLLECTION": overlap,
+        "Overlap_%": overlap_pct
+    })
+
+results = pd.DataFrame(results)
+
+print("Total bad CRA_COLLECTION =", total_collection)
+
+results
