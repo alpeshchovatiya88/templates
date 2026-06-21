@@ -1,13 +1,44 @@
-collection_overlap = (
-    collection.assign(
-        Bankruptcy = (collection["CRA_BANKRUPTCY_FORECLOSURE_IND"]=="Y"),
-        Judgement  = (collection["CRA_JUDGEMENT"]=="Y"),
-        PublicDerog= (collection["CRD_PUBLIC_DEROG_TU"]>0)
-    )
-    .groupby(["Bankruptcy","Judgement","PublicDerog"])
-    .size()
-    .reset_index(name="Count")
-    .sort_values("Count", ascending=False)
+bad = df[df["target"] == 1]
+
+total_collection = (bad["CRA_COLLECTION"] == "Y").sum()
+
+print("Total CRA_COLLECTION:", total_collection)
+
+print(
+    "Total CRA_BANKRUPTCY_FORECLOSURE_IND:",
+    (bad["CRA_BANKRUPTCY_FORECLOSURE_IND"] == "Y").sum()
 )
 
-collection_overlap
+print(
+    "Total CRA_JUDGEMENT:",
+    (bad["CRA_JUDGEMENT"] == "Y").sum()
+)
+
+print(
+    "Total CRD_PUBLIC_DEROG_TU:",
+    (bad["CRD_PUBLIC_DEROG_TU"] > 0).sum()
+)
+
+print(
+    "Overlap Collection + Bankruptcy:",
+    (
+        (bad["CRA_COLLECTION"] == "Y")
+        & (bad["CRA_BANKRUPTCY_FORECLOSURE_IND"] == "Y")
+    ).sum()
+)
+
+print(
+    "Overlap Collection + Judgement:",
+    (
+        (bad["CRA_COLLECTION"] == "Y")
+        & (bad["CRA_JUDGEMENT"] == "Y")
+    ).sum()
+)
+
+print(
+    "Overlap Collection + Public Derog:",
+    (
+        (bad["CRA_COLLECTION"] == "Y")
+        & (bad["CRD_PUBLIC_DEROG_TU"] > 0)
+    ).sum()
+)
