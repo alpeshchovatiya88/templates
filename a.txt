@@ -2,28 +2,21 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import seaborn as sns
 
+
 def plot_grouped_bad_rate(
     df,
     category_col,
     target_col="target",
     year_col="BOOKYEAR",
     palette="turbo",
-    figsize=(16, 8),
+    figsize=(18,8),
     save_image=True
 ):
 
-    # Yearly bad rate
-    agg_year = (
-        df.groupby([year_col, category_col])[target_col]
-          .agg(
-              total_count="count",
-              bad_count="sum",
-              bad_rate="mean"
-          )
-          .reset_index()
-    )
+    # -------------------------
+    # Overall
+    # -------------------------
 
-    # Overall bad rate
     overall = (
         df.groupby(category_col)[target_col]
           .agg(
@@ -36,13 +29,53 @@ def plot_grouped_bad_rate(
 
     overall[year_col] = "Overall"
 
-    # Combine overall + yearly
-    agg_df = pd.concat([overall, agg_year], ignore_index=True)
 
-    # Order Overall first, then years
-    year_order = ["Overall"] + sorted(df[year_col].dropna().unique().tolist())
+    # -------------------------
+    # Yearly
+    # -------------------------
+
+    agg_year = (
+        df.groupby([year_col, category_col])[target_col]
+          .agg(
+              total_count="count",
+              bad_count="sum",
+              bad_rate="mean"
+          )
+          .reset_index()
+    )
+
+
+    # -------------------------
+    # Combine
+    # -------------------------
+
+    agg_df = pd.concat(
+        [overall, agg_year],
+        ignore_index=True
+    )
+
+
+    # -------------------------
+    # Order
+    # -------------------------
+
+    year_order = (
+        ["Overall"]
+        + sorted(
+            df[year_col]
+            .dropna()
+            .unique()
+            .tolist()
+        )
+    )
+
+
+    # -------------------------
+    # Plot
+    # -------------------------
 
     plt.figure(figsize=figsize)
+
     sns.set_theme(style="whitegrid")
 
     ax = sns.barplot(
@@ -54,43 +87,100 @@ def plot_grouped_bad_rate(
         palette=palette
     )
 
-    # Add % labels on every bar
+
+    # -------------------------
+    # Labels
+    # -------------------------
+
     for container in ax.containers:
-        labels = [
-            f"{bar.get_height():.1%}" if bar.get_height() > 0 else ""
-            for bar in container
-        ]
+
+        labels = []
+
+        subset = (
+            agg_df[
+                agg_df[category_col]
+                == container.get_label()
+            ]
+            .set_index(year_col)
+            .reindex(year_order)
+            .reset_index()
+        )
+
+        for _, row in subset.iterrows():
+
+            total = int(row["total_count"])
+
+            bad = int(row["bad_count"])
+
+            rate = row["bad_rate"]
+
+            labels.append(
+                f"T:{total}\nB:{bad}\n({rate:.1%})"
+            )
 
         ax.bar_label(
             container,
             labels=labels,
             padding=4,
-            fontsize=8,
+            fontsize=7,
             fontweight="bold"
         )
 
-    clean_name = category_col.replace("_", " ").title()
+
+    # -------------------------
+    # Formatting
+    # -------------------------
+
+    clean_name = (
+        category_col
+        .replace("_", " ")
+        .title()
+    )
 
     plt.title(
-        f"Bad Rate per {clean_name} by BOOKYEAR",
+        f"Bad Rate by {clean_name} and BOOKYEAR",
         fontsize=16,
         fontweight="bold"
     )
 
-    plt.xlabel("BOOKYEAR", fontsize=12)
-    plt.ylabel("Bad Rate (%)", fontsize=12)
+    plt.xlabel("BOOKYEAR")
+
+    plt.ylabel("Bad Rate (%)")
 
     ax.yaxis.set_major_formatter(
-        plt.FuncFormatter(lambda y, _: f"{y:.0%}")
+        plt.FuncFormatter(
+            lambda y, _: f"{y:.0%}"
+        )
     )
 
     plt.xticks(rotation=45)
-    plt.legend(title=clean_name, bbox_to_anchor=(1.02, 1), loc="upper left")
+
+    plt.legend(
+        title=clean_name,
+        bbox_to_anchor=(1.02,1),
+        loc="upper left"
+    )
+
     plt.tight_layout()
 
+
+    # -------------------------
+    # Save image
+    # -------------------------
+
     if save_image:
-        filename = f"{category_col.lower()}_bad_rate_by_bookyear_with_overall.png"
-        plt.savefig(filename, dpi=300, bbox_inches="tight")
-        print(f"Saved image: {filename}")
+
+        filename = (
+            f"{category_col.lower()}_overall_bookyear.png"
+        )
+
+        plt.savefig(
+            filename,
+            dpi=300,
+            bbox_inches="tight"
+        )
+
+        print(f"Saved: {filename}")
+
 
     plt.show()
