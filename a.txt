@@ -1,137 +1,36 @@
+bar_idx = 0
 
-bad = df[df["target"] == 1].copy()
+for container in ax.containers:
 
-results = []
+    labels = []
 
-total_collection = (bad["CRA_COLLECTION"] == "Y").sum()
+    for bar in container:
 
-features = [
-    "CRA_BANKRUPTCY_FORECLOSURE_IND",
-    "CRA_JUDGEMENT",
-    "CRD_PUBLIC_DEROG_TU"
-]
+        height = bar.get_height()
 
-# Individual rows
-for col in features:
+        if bar_idx < len(agg_df):
 
-    if col == "CRD_PUBLIC_DEROG_TU":
-        feature_flag = bad[col] > 0
-    else:
-        feature_flag = bad[col] == "Y"
+            row = agg_df.iloc[bar_idx]
 
-    collection_flag = bad["CRA_COLLECTION"] == "Y"
+            total = int(row["total_count"])
 
-    total_feature = feature_flag.sum()
+            count = int(row["bad_count"])
 
-    overlap = (collection_flag & feature_flag).sum()
+            labels.append(
+                f"T: {total}\nB: {count}\n({height:.1%})"
+            )
 
-    overlap_pct = round(overlap / total_feature * 100, 1)
+        else:
 
-    results.append({
-        "Feature": col,
-        "Total_Bad_Count": total_feature,
-        "Overlap_With_CRA_COLLECTION": overlap,
-        "Overlap_%": overlap_pct
-    })
+            labels.append("")
 
+        bar_idx += 1
 
-# Combined row
-combined_flag = (
-    (bad["CRA_BANKRUPTCY_FORECLOSURE_IND"] == "Y")
-    | (bad["CRA_JUDGEMENT"] == "Y")
-    | (bad["CRD_PUBLIC_DEROG_TU"] > 0)
-)
-
-combined_total = combined_flag.sum()
-
-combined_overlap = (
-    (bad["CRA_COLLECTION"] == "Y")
-    & combined_flag
-).sum()
-
-combined_pct = round(
-    combined_overlap / combined_total * 100,
-    1
-)
-
-results.append({
-    "Feature": "ALL_3_COMBINED",
-    "Total_Bad_Count": combined_total,
-    "Overlap_With_CRA_COLLECTION": combined_overlap,
-    "Overlap_%": combined_pct
-})
-
-results = pd.DataFrame(results)
-
-print("Total bad CRA_COLLECTION =", total_collection)
-
-results
-
-
-
-
-
-import numpy as np
-import matplotlib.pyplot as plt
-
-plot_df = results.copy()
-
-x = np.arange(len(plot_df))
-width = 0.35
-
-plt.figure(figsize=(11,5))
-
-bars1 = plt.bar(
-    x - width/2,
-    plot_df["Total_Bad_Count"],
-    width=width,
-    label="Total Bad Count"
-)
-
-bars2 = plt.bar(
-    x + width/2,
-    plot_df["Overlap_With_CRA_COLLECTION"],
-    width=width,
-    label="Overlap with CRA_COLLECTION"
-)
-
-# Total count labels
-for bar in bars1:
-    height = bar.get_height()
-
-    plt.text(
-        bar.get_x() + bar.get_width()/2,
-        height,
-        f'{int(height)}',
-        ha='center',
-        va='bottom',
-        fontsize=9
+    ax.bar_label(
+        container,
+        labels=labels,
+        padding=4,
+        fontsize=7,
+        fontweight="bold",
+        rotation=0
     )
-
-# Overlap count + percentage labels
-for i, bar in enumerate(bars2):
-
-    height = bar.get_height()
-
-    pct = plot_df["Overlap_%"].iloc[i]
-
-    plt.text(
-        bar.get_x() + bar.get_width()/2,
-        height,
-        f'{int(height)}\n({pct}%)',
-        ha='center',
-        va='bottom',
-        fontsize=9
-    )
-
-plt.xticks(x, plot_df["Feature"], rotation=30)
-
-plt.ylabel("Bad Count")
-
-plt.title("Overlap Analysis with CRA_COLLECTION")
-
-plt.legend()
-
-plt.tight_layout()
-
-plt.show()
