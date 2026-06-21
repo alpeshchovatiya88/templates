@@ -1,36 +1,96 @@
-bar_idx = 0
+import pandas as pd
+import matplotlib.pyplot as plt
+import seaborn as sns
 
-for container in ax.containers:
+def plot_grouped_bad_rate(
+    df,
+    category_col,
+    target_col="target",
+    year_col="BOOKYEAR",
+    palette="turbo",
+    figsize=(16, 8),
+    save_image=True
+):
 
-    labels = []
-
-    for bar in container:
-
-        height = bar.get_height()
-
-        if bar_idx < len(agg_df):
-
-            row = agg_df.iloc[bar_idx]
-
-            total = int(row["total_count"])
-
-            count = int(row["bad_count"])
-
-            labels.append(
-                f"T: {total}\nB: {count}\n({height:.1%})"
-            )
-
-        else:
-
-            labels.append("")
-
-        bar_idx += 1
-
-    ax.bar_label(
-        container,
-        labels=labels,
-        padding=4,
-        fontsize=7,
-        fontweight="bold",
-        rotation=0
+    # Yearly bad rate
+    agg_year = (
+        df.groupby([year_col, category_col])[target_col]
+          .agg(
+              total_count="count",
+              bad_count="sum",
+              bad_rate="mean"
+          )
+          .reset_index()
     )
+
+    # Overall bad rate
+    overall = (
+        df.groupby(category_col)[target_col]
+          .agg(
+              total_count="count",
+              bad_count="sum",
+              bad_rate="mean"
+          )
+          .reset_index()
+    )
+
+    overall[year_col] = "Overall"
+
+    # Combine overall + yearly
+    agg_df = pd.concat([overall, agg_year], ignore_index=True)
+
+    # Order Overall first, then years
+    year_order = ["Overall"] + sorted(df[year_col].dropna().unique().tolist())
+
+    plt.figure(figsize=figsize)
+    sns.set_theme(style="whitegrid")
+
+    ax = sns.barplot(
+        data=agg_df,
+        x=year_col,
+        y="bad_rate",
+        hue=category_col,
+        order=year_order,
+        palette=palette
+    )
+
+    # Add % labels on every bar
+    for container in ax.containers:
+        labels = [
+            f"{bar.get_height():.1%}" if bar.get_height() > 0 else ""
+            for bar in container
+        ]
+
+        ax.bar_label(
+            container,
+            labels=labels,
+            padding=4,
+            fontsize=8,
+            fontweight="bold"
+        )
+
+    clean_name = category_col.replace("_", " ").title()
+
+    plt.title(
+        f"Bad Rate per {clean_name} by BOOKYEAR",
+        fontsize=16,
+        fontweight="bold"
+    )
+
+    plt.xlabel("BOOKYEAR", fontsize=12)
+    plt.ylabel("Bad Rate (%)", fontsize=12)
+
+    ax.yaxis.set_major_formatter(
+        plt.FuncFormatter(lambda y, _: f"{y:.0%}")
+    )
+
+    plt.xticks(rotation=45)
+    plt.legend(title=clean_name, bbox_to_anchor=(1.02, 1), loc="upper left")
+    plt.tight_layout()
+
+    if save_image:
+        filename = f"{category_col.lower()}_bad_rate_by_bookyear_with_overall.png"
+        plt.savefig(filename, dpi=300, bbox_inches="tight")
+        print(f"Saved image: {filename}")
+
+    plt.show()
