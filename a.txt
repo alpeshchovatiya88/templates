@@ -1,44 +1,35 @@
 bad = df[df["target"] == 1].copy()
 
-bad["COLLECTION_FLAG"] = (bad["CRA_COLLECTION"] == "Y").astype(int)
-bad["BANKRUPTCY_FLAG"] = (bad["CRA_BANKRUPTCY_FORECLOSURE_IND"] == "Y").astype(int)
-bad["JUDGEMENT_FLAG"] = (bad["CRA_JUDGEMENT"] == "Y").astype(int)
-bad["DEROG_FLAG"] = (bad["CRD_PUBLIC_DEROG_TU"] > 0).astype(int)
+# Create flags
+bad["COLLECTION"] = (bad["CRA_COLLECTION"] == "Y").astype(int)
+bad["BANKRUPTCY"] = (bad["CRA_BANKRUPTCY_FORECLOSURE_IND"] == "Y").astype(int)
+bad["JUDGEMENT"] = (bad["CRA_JUDGEMENT"] == "Y").astype(int)
+bad["PUBLIC_DEROG"] = (bad["CRD_PUBLIC_DEROG_TU"] > 0).astype(int)
 
-flag_cols = [
-    "COLLECTION_FLAG",
-    "BANKRUPTCY_FLAG",
-    "JUDGEMENT_FLAG",
-    "DEROG_FLAG"
-]
+flag_cols = ["COLLECTION", "BANKRUPTCY", "JUDGEMENT", "PUBLIC_DEROG"]
 
+# Count adverse indicators
 bad["ADVERSE_COUNT"] = bad[flag_cols].sum(axis=1)
 
+# Keep only overlaps of 2, 3, and 4
 overlap = (
     bad[bad["ADVERSE_COUNT"].isin([2, 3, 4])]
-    .groupby(flag_cols + ["ADVERSE_COUNT"])
+    .groupby(flag_cols)
     .size()
     .reset_index(name="Row_Count")
-    .sort_values(["ADVERSE_COUNT", "Row_Count"], ascending=[True, False])
 )
 
-overlap
+# Create readable combination names
+overlap["Combination"] = overlap.apply(
+    lambda x: " + ".join([
+        col for col in flag_cols if x[col] == 1
+    ]),
+    axis=1
+)
 
+# Show results
+overlap = overlap[["Combination", "Row_Count"]].sort_values(
+    "Row_Count", ascending=False
+)
 
-
-
-def combo_name(row):
-    names = []
-    if row["COLLECTION_FLAG"] == 1:
-        names.append("Collection")
-    if row["BANKRUPTCY_FLAG"] == 1:
-        names.append("Bankruptcy/Foreclosure")
-    if row["JUDGEMENT_FLAG"] == 1:
-        names.append("Judgement")
-    if row["DEROG_FLAG"] == 1:
-        names.append("Public Derog")
-    return " + ".join(names)
-
-overlap["Combination"] = overlap.apply(combo_name, axis=1)
-
-overlap[["Combination", "ADVERSE_COUNT", "Row_Count"]]
+print(overlap)
