@@ -9,23 +9,30 @@ features = [
     "CRD_PUBLIC_DEROG_TU"
 ]
 
+# only bad rows
+bad = df[df["target"] == 1].copy()
+
+# clean values
+bad["CRA_COLLECTION"] = bad["CRA_COLLECTION"].fillna("N").astype(str).str.upper().str.strip()
+bad["CRA_BANKRUPTCY_FORECLOSURE_IND"] = bad["CRA_BANKRUPTCY_FORECLOSURE_IND"].fillna("N").astype(str).str.upper().str.strip()
+bad["CRA_JUDGEMENT"] = bad["CRA_JUDGEMENT"].fillna("N").astype(str).str.upper().str.strip()
+bad["CRD_PUBLIC_DEROG_TU"] = pd.to_numeric(bad["CRD_PUBLIC_DEROG_TU"], errors="coerce").fillna(0)
+
 for score_bin in sorted(bad["CRD_SCORE_bin"].dropna().unique()):
 
     bad_bin = bad[bad["CRD_SCORE_bin"] == score_bin].copy()
 
     collection_flag = bad_bin["CRA_COLLECTION"].eq("Y")
 
-    # Individual rows
     for col in features:
 
         if col == "CRD_PUBLIC_DEROG_TU":
-            feature_flag = bad_bin[col].fillna(0).gt(0)
+            feature_flag = bad_bin[col].gt(0)
         else:
-            feature_flag = bad_bin[col].fillna("N").eq("Y")
+            feature_flag = bad_bin[col].eq("Y")
 
         total_feature = feature_flag.sum()
         overlap = (collection_flag & feature_flag).sum()
-
         overlap_pct = round(overlap / total_feature * 100, 1) if total_feature > 0 else 0
 
         results.append({
@@ -36,16 +43,15 @@ for score_bin in sorted(bad["CRD_SCORE_bin"].dropna().unique()):
             "Overlap_%": overlap_pct
         })
 
-    # Correct ALL_3_COMBINED = row-level OR condition
-    flag1 = bad_bin["CRA_BANKRUPTCY_FORECLOSURE_IND"].fillna("N").eq("Y")
-    flag2 = bad_bin["CRA_JUDGEMENT"].fillna("N").eq("Y")
-    flag3 = bad_bin["CRD_PUBLIC_DEROG_TU"].fillna(0).gt(0)
-
-    combined_flag = flag1 | flag2 | flag3
+    # ALL_3_COMBINED = any of the 3 flags
+    combined_flag = (
+        bad_bin["CRA_BANKRUPTCY_FORECLOSURE_IND"].eq("Y")
+        | bad_bin["CRA_JUDGEMENT"].eq("Y")
+        | bad_bin["CRD_PUBLIC_DEROG_TU"].gt(0)
+    )
 
     combined_total = combined_flag.sum()
     combined_overlap = (collection_flag & combined_flag).sum()
-
     combined_pct = round(combined_overlap / combined_total * 100, 1) if combined_total > 0 else 0
 
     results.append({
