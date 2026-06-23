@@ -62,10 +62,57 @@ for score_bin in sorted(bad["CRD_SCORE_bin"].dropna().unique()):
 results = pd.DataFrame(results)
 
 results
+==============================
+
+results_display = results.copy()
+
+results_display["CRD_SCORE_bin"] = results_display["CRD_SCORE_bin"].astype(int)
+results_display["Overlap_%"] = results_display["Overlap_%"].round(1)
+
+styled_results = (
+    results_display
+    .style
+    .hide(axis="index")
+    .format({
+        "Total_Bad_Count": "{:,.0f}",
+        "Overlap_With_CRA_COLLECTION": "{:,.0f}",
+        "Overlap_%": "{:.1f}%"
+    })
+    .set_properties(**{
+        "text-align": "center",
+        "font-weight": "bold"
+    })
+    .set_table_styles([
+        {"selector": "th", "props": [
+            ("text-align", "center"),
+            ("font-weight", "bold"),
+            ("background-color", "#222"),
+            ("color", "white")
+        ]},
+        {"selector": "td", "props": [
+            ("padding", "8px")
+        ]}
+    ])
+    .background_gradient(
+        subset=["Overlap_%"],
+        cmap="Greens"
+    )
+)
+
+styled_results
+
+----------------------
+
+results_display = (
+    results
+    .sort_values(["CRD_SCORE_bin", "Feature"])
+    .reset_index(drop=True)
+)
+
+results_display
 
 
-=====================
-
+===============================
 
 import math
 
