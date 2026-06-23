@@ -68,4 +68,109 @@ for score_bin in sorted(bad["CRD_SCORE_bin"].dropna().unique()):
 
 results = pd.DataFrame(results)
 
+===================================
+
+import math
+import numpy as np
+import matplotlib.pyplot as plt
+
+bins = sorted(results["CRD_SCORE_bin"].dropna().unique())
+
+ncols = 4
+nrows = math.ceil(len(bins) / ncols)
+
+fig, axes = plt.subplots(nrows, ncols, figsize=(24, 6 * nrows))
+axes = axes.flatten()
+
+for i, score_bin in enumerate(bins):
+
+    ax = axes[i]
+
+    plot_df = results[results["CRD_SCORE_bin"] == score_bin].copy()
+
+    x = np.arange(len(plot_df))
+    width = 0.35
+
+    bars1 = ax.bar(
+        x - width/2,
+        plot_df["Total_Bad_Count"],
+        width=width,
+        label="Total Bad Count"
+    )
+
+    bars2 = ax.bar(
+        x + width/2,
+        plot_df["Overlap_With_CRA_COLLECTION"],
+        width=width,
+        label="Overlap with CRA_COLLECTION"
+    )
+
+    for bar in bars1:
+        height = bar.get_height()
+
+        ax.text(
+            bar.get_x() + bar.get_width()/2,
+            height,
+            f"{int(height)}",
+            ha="center",
+            va="bottom",
+            fontsize=8,
+            fontweight="bold"
+        )
+
+    for j, bar in enumerate(bars2):
+        height = bar.get_height()
+        pct = plot_df["Overlap_%"].iloc[j]
+
+        ax.text(
+            bar.get_x() + bar.get_width()/2,
+            height,
+            f"{int(height)}\n({pct}%)",
+            ha="center",
+            va="bottom",
+            fontsize=8,
+            fontweight="bold"
+        )
+
+    ax.set_title(
+        f"CRD_SCORE_bin: {score_bin}",
+        fontweight="bold",
+        fontsize=12
+    )
+
+    ax.set_xticks(x)
+    ax.set_xticklabels(
+        plot_df["Feature"],
+        rotation=30,
+        ha="right",
+        fontweight="bold"
+    )
+
+    ax.set_ylabel("Bad Count", fontweight="bold")
+    ax.grid(axis="y", alpha=0.3)
+
+for j in range(i + 1, len(axes)):
+    axes[j].axis("off")
+
+handles, labels = axes[0].get_legend_handles_labels()
+
+fig.legend(
+    handles,
+    labels,
+    loc="upper center",
+    bbox_to_anchor=(0.5, 1.04),
+    ncol=2,
+    frameon=False
+)
+
+plt.suptitle(
+    "Overlap Analysis with CRA_COLLECTION by CRD_SCORE_bin",
+    fontsize=18,
+    fontweight="bold",
+    y=1.08
+)
+
+plt.tight_layout(rect=[0, 0, 1, 0.93])
+plt.show()
+
 results
