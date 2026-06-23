@@ -1,15 +1,15 @@
-import numpy as np
 import pandas as pd
-import matplotlib.pyplot as plt
 
-# Bad population only
+# Use bad population only
 bad = df[df["target"] == 1].copy()
 
-# Clean columns
+# Clean values
 bad["CRA_COLLECTION"] = bad["CRA_COLLECTION"].fillna("N").astype(str).str.upper().str.strip()
 bad["CRA_BANKRUPTCY_FORECLOSURE_IND"] = bad["CRA_BANKRUPTCY_FORECLOSURE_IND"].fillna("N").astype(str).str.upper().str.strip()
 bad["CRA_JUDGEMENT"] = bad["CRA_JUDGEMENT"].fillna("N").astype(str).str.upper().str.strip()
-bad["CRD_PUBLIC_DEROG_TU"] = pd.to_numeric(bad["CRD_PUBLIC_DEROG_TU"], errors="coerce").fillna(0)
+bad["CRD_PUBLIC_DEROG_TU"] = pd.to_numeric(
+    bad["CRD_PUBLIC_DEROG_TU"], errors="coerce"
+).fillna(0)
 
 results = []
 
@@ -22,11 +22,10 @@ features = [
 for score_bin in sorted(bad["CRD_SCORE_bin"].dropna().unique()):
 
     bad_bin = bad[bad["CRD_SCORE_bin"] == score_bin].copy()
+
     collection_flag = bad_bin["CRA_COLLECTION"].eq("Y")
 
-    combined_total = 0
-    combined_overlap = 0
-
+    # Individual feature rows
     for col in features:
 
         if col == "CRD_PUBLIC_DEROG_TU":
@@ -36,10 +35,8 @@ for score_bin in sorted(bad["CRD_SCORE_bin"].dropna().unique()):
 
         total_feature = feature_flag.sum()
         overlap = (collection_flag & feature_flag).sum()
-        overlap_pct = round(overlap / total_feature * 100, 1) if total_feature > 0 else 0
 
-        combined_total += total_feature
-        combined_overlap += overlap
+        overlap_pct = round(overlap / total_feature * 100, 1) if total_feature > 0 else 0
 
         results.append({
             "CRD_SCORE_bin": score_bin,
@@ -49,11 +46,21 @@ for score_bin in sorted(bad["CRD_SCORE_bin"].dropna().unique()):
             "Overlap_%": overlap_pct
         })
 
+    # Unique combined row: count each row once if ANY of the 3 flags is true
+    combined_flag = (
+        bad_bin["CRA_BANKRUPTCY_FORECLOSURE_IND"].eq("Y")
+        | bad_bin["CRA_JUDGEMENT"].eq("Y")
+        | bad_bin["CRD_PUBLIC_DEROG_TU"].gt(0)
+    )
+
+    combined_total = combined_flag.sum()
+    combined_overlap = (collection_flag & combined_flag).sum()
+
     combined_pct = round(combined_overlap / combined_total * 100, 1) if combined_total > 0 else 0
 
     results.append({
         "CRD_SCORE_bin": score_bin,
-        "Feature": "ALL_3_COMBINED",
+        "Feature": "ALL_3_COMBINED_UNIQUE",
         "Total_Bad_Count": combined_total,
         "Overlap_With_CRA_COLLECTION": combined_overlap,
         "Overlap_%": combined_pct
@@ -62,142 +69,3 @@ for score_bin in sorted(bad["CRD_SCORE_bin"].dropna().unique()):
 results = pd.DataFrame(results)
 
 results
-==============================
-
-results_display = results.copy()
-
-results_display["CRD_SCORE_bin"] = results_display["CRD_SCORE_bin"].astype(int)
-results_display["Overlap_%"] = results_display["Overlap_%"].round(1)
-
-styled_results = (
-    results_display
-    .style
-    .hide(axis="index")
-    .format({
-        "Total_Bad_Count": "{:,.0f}",
-        "Overlap_With_CRA_COLLECTION": "{:,.0f}",
-        "Overlap_%": "{:.1f}%"
-    })
-    .set_properties(**{
-        "text-align": "center",
-        "font-weight": "bold"
-    })
-    .set_table_styles([
-        {"selector": "th", "props": [
-            ("text-align", "center"),
-            ("font-weight", "bold"),
-            ("background-color", "#222"),
-            ("color", "white")
-        ]},
-        {"selector": "td", "props": [
-            ("padding", "8px")
-        ]}
-    ])
-    .background_gradient(
-        subset=["Overlap_%"],
-        cmap="Greens"
-    )
-)
-
-styled_results
-
-----------------------
-
-results_display = (
-    results
-    .sort_values(["CRD_SCORE_bin", "Feature"])
-    .reset_index(drop=True)
-)
-
-results_display
-
-
-===============================
-
-import math
-
-bins = sorted(results["CRD_SCORE_bin"].dropna().unique())
-
-ncols = 4
-nrows = math.ceil(len(bins) / ncols)
-
-fig, axes = plt.subplots(nrows, ncols, figsize=(24, 6 * nrows))
-axes = axes.flatten()
-
-for i, score_bin in enumerate(bins):
-
-    ax = axes[i]
-    plot_df = results[results["CRD_SCORE_bin"] == score_bin].copy()
-
-    x = np.arange(len(plot_df))
-    width = 0.35
-
-    bars1 = ax.bar(
-        x - width/2,
-        plot_df["Total_Bad_Count"],
-        width=width,
-        label="Total Bad Count"
-    )
-
-    bars2 = ax.bar(
-        x + width/2,
-        plot_df["Overlap_With_CRA_COLLECTION"],
-        width=width,
-        label="Overlap with CRA_COLLECTION"
-    )
-
-    for bar in bars1:
-        height = bar.get_height()
-        ax.text(
-            bar.get_x() + bar.get_width()/2,
-            height,
-            f"{int(height)}",
-            ha="center",
-            va="bottom",
-            fontsize=8,
-            fontweight="bold"
-        )
-
-    for j, bar in enumerate(bars2):
-        height = bar.get_height()
-        pct = plot_df["Overlap_%"].iloc[j]
-
-        ax.text(
-            bar.get_x() + bar.get_width()/2,
-            height,
-            f"{int(height)}\n({pct}%)",
-            ha="center",
-            va="bottom",
-            fontsize=8,
-            fontweight="bold"
-        )
-
-    ax.set_title(f"CRD_SCORE_bin: {score_bin}", fontweight="bold")
-    ax.set_xticks(x)
-    ax.set_xticklabels(plot_df["Feature"], rotation=30, ha="right", fontweight="bold")
-    ax.set_ylabel("Bad Count", fontweight="bold")
-    ax.grid(axis="y", alpha=0.3)
-
-for j in range(i + 1, len(axes)):
-    axes[j].axis("off")
-
-handles, labels = axes[0].get_legend_handles_labels()
-
-fig.legend(
-    handles,
-    labels,
-    loc="upper center",
-    bbox_to_anchor=(0.5, 1.04),
-    ncol=2,
-    frameon=False
-)
-
-plt.suptitle(
-    "Overlap Analysis with CRA_COLLECTION by CRD_SCORE_bin",
-    fontsize=18,
-    fontweight="bold",
-    y=1.08
-)
-
-plt.tight_layout(rect=[0, 0, 1, 0.93])
-plt.show()
