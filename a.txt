@@ -1,18 +1,71 @@
-LR_summary = (
-    df
-    .group_by("train_test")
-    .agg(
-        SMI3_LOSS = pl.col("SMI3_LOSS").sum(),
-        ACTUAL_LOSS = pl.col("ACTUAL_LOSS").sum(),
-        POD_PREMIUM_WRITTEN = pl.col("POD_PREMIUM_WRITTEN").sum()
-    )
-    .with_columns(
-        SMI3_LR = pl.col("SMI3_LOSS") / pl.col("POD_PREMIUM_WRITTEN"),
-        ACTUAL_LR = pl.col("ACTUAL_LOSS") / pl.col("POD_PREMIUM_WRITTEN")
-    )
-    .with_columns(
-        LR_diff = pl.col("SMI3_LR") - pl.col("ACTUAL_LR")
-    )
+lr_summary = (
+    df.groupby("train_test")
+      .agg(
+          SMI3_LOSS=("SMI3_LOSS", "sum"),
+          ACTUAL_LOSS=("ACTUAL_LOSS", "sum"),
+          POD_PREMIUM_WRITTEN=("POD_PREMIUM_WRITTEN", "sum")
+      )
+      .reset_index()
 )
 
-LR_summary
+lr_summary["SMI3_LR"] = (
+    lr_summary["SMI3_LOSS"]
+    / lr_summary["POD_PREMIUM_WRITTEN"]
+)
+
+lr_summary["ACTUAL_LR"] = (
+    lr_summary["ACTUAL_LOSS"]
+    / lr_summary["POD_PREMIUM_WRITTEN"]
+)
+
+lr_summary["LR_diff"] = (
+    lr_summary["SMI3_LR"]
+    - lr_summary["ACTUAL_LR"]
+)
+
+lr_summary
+
+===========================
+
+lr_summary = (
+    df.groupby(["BOOKYEAR", "train_test"])
+      .agg(
+          SMI3_LOSS=("SMI3_LOSS", "sum"),
+          ACTUAL_LOSS=("ACTUAL_LOSS", "sum"),
+          POD_PREMIUM_WRITTEN=("POD_PREMIUM_WRITTEN", "sum")
+      )
+      .reset_index()
+)
+
+lr_summary["SMI3_LR"] = (
+    lr_summary["SMI3_LOSS"]
+    / lr_summary["POD_PREMIUM_WRITTEN"]
+)
+
+lr_summary["ACTUAL_LR"] = (
+    lr_summary["ACTUAL_LOSS"]
+    / lr_summary["POD_PREMIUM_WRITTEN"]
+)
+
+lr_summary["LR_diff"] = (
+    lr_summary["SMI3_LR"]
+    - lr_summary["ACTUAL_LR"]
+)
+
+lr_summary
+
+===========================================
+
+lr_summary = (
+    df.groupby(["ECON_REGION", "BOOKYEAR", "train_test"])
+      .agg(
+          SMI3_LOSS=("SMI3_LOSS", "sum"),
+          ACTUAL_LOSS=("ACTUAL_LOSS", "sum"),
+          POD_PREMIUM_WRITTEN=("POD_PREMIUM_WRITTEN", "sum")
+      )
+      .reset_index()
+)
+
+lr_summary["SMI3_LR"] = lr_summary["SMI3_LOSS"] / lr_summary["POD_PREMIUM_WRITTEN"]
+lr_summary["ACTUAL_LR"] = lr_summary["ACTUAL_LOSS"] / lr_summary["POD_PREMIUM_WRITTEN"]
+lr_summary["LR_diff"] = lr_summary["SMI3_LR"] - lr_summary["ACTUAL_LR"]
