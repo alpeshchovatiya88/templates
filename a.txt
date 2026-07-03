@@ -1,33 +1,3 @@
-from sklearn.model_selection import train_test_split
-
-def apply_custom_time_split(trainer, train_mask, valid_mask):
-    d_train = trainer.df.loc[train_mask].copy()
-    d_test = trainer.df.loc[valid_mask].copy()
-
-    target_col = trainer.cfg.target_col
-    drop_cols = trainer.cfg.drop_cols
-
-    X_train = d_train.drop(columns=drop_cols + [target_col], errors="ignore")
-    y_train = d_train[target_col]
-
-    X_test = d_test.drop(columns=drop_cols + [target_col], errors="ignore")
-    y_test = d_test[target_col]
-
-    trainer._cache["X_train"] = X_train
-    trainer._cache["X_test"] = X_test
-    trainer._cache["y_train"] = y_train
-    trainer._cache["y_test"] = y_test
-    trainer._cache["d_train"] = d_train
-    trainer._cache["d_test"] = d_test
-
-    trainer._cache["X_full"] = pd.concat([X_train, X_test], axis=0)
-    trainer._cache["y_full"] = pd.concat([y_train, y_test], axis=0)
-    trainer._cache["d_full"] = pd.concat([d_train, d_test], axis=0)
-
-    return trainer
-
-=====================
-
 df_exp1 = df.copy()
 
 train_mask = df_exp1[YEAR_COL].between(2009, 2015)
@@ -38,9 +8,11 @@ trainer_exp1 = ModelTrainer(df_exp1, load_cfg())
 trainer_exp1.prepare(
     funded_only=True,
     imbalance_use_ros=False,
-    eval_mode="holdout",
+    eval_mode="cv",      # important: avoids failing holdout split
     credit_use="bin",
 )
+
+trainer_exp1._eval_mode = "holdout"   # important: fit() should use holdout path
 
 trainer_exp1 = apply_custom_time_split(
     trainer_exp1,
@@ -54,5 +26,3 @@ exp1_scored = score_validation_set(
     trainer_exp1,
     "train_2009_2015_valid_2016_2017"
 )
-
-=======================
