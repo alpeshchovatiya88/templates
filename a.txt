@@ -1,153 +1,33 @@
-import pandas as pd
-import numpy as np
-from IPython.display import display, Markdown
+from sklearn.model_selection import train_test_split
 
-from trainer import ModelTrainer
-from loss_ratio import LRCalculator
-from common_utils import loadfile, load_cfg
+def apply_custom_time_split(trainer, train_mask, valid_mask):
+    d_train = trainer.df.loc[train_mask].copy()
+    d_test = trainer.df.loc[valid_mask].copy()
 
-RANDOM_STATE = 42
-YEAR_COL = "BOOKYEAR"
-PROB_COL = "smi3_pred_prob_all"
-LR_COL = "SMI3_LR_all"
-LOSS_COL = "SMI3_LOSS_all"
+    target_col = trainer.cfg.target_col
+    drop_cols = trainer.cfg.drop_cols
 
-========================================================================
+    X_train = d_train.drop(columns=drop_cols + [target_col], errors="ignore")
+    y_train = d_train[target_col]
 
-cfg = load_cfg()
-df_main = loadfile(cfg["Data"]["input_path"])
+    X_test = d_test.drop(columns=drop_cols + [target_col], errors="ignore")
+    y_test = d_test[target_col]
 
-features = [
-    "APPLICATION_NUMBER",
-    "CRD_SCORE_bin",
-    "CRD_SCORE",
-    "CRD_SCORE_max",
-    "CRD_MONTHS_TU",
-    "CRD_OPEN_TRADE_TU",
-    "CRD_PUBLIC_DEROG_TU",
-    "CRA_COLLECTION",
-    "CRA_JUDGEMENT",
-    "CRA_BANKRUPTCY_FORECLOSURE_IND",
-    "ECON_REGION",
-    "REG_REGION_CODE",
-    "HPI+4",
-    "UE+4",
-    "ACTLTV",
-    "TDSR",
-    "GDSR",
-    "DSR_DIFF",
-    "NUM_OF_BOR",
-    "PRD_RATE_TYPE",
-    "PRD_LOAN_TERM",
-    "PRD_AMORTIZATION",
-    "PRD_PORT",
-    "PRD_FOREIGN_BORROWER",
-    "PRK_PROPERTY_AGE",
-    "PRK_PROPERTY_TYPE",
-    "PRK_NUM_OF_UNITS",
-    "PRK_OCCUPANCY",
-    "PRK_CONS_TYPE",
-    "PRK_TENURE",
-    "PRK_CONDO_FEE",
-    "RURAL_IND",
-    "POD_MARKET_CODE",
-    "POD_SOURCE_OF_BUSS_TYPE",
-    "PRD_LOAN_PURPOSE",
-    "BORYREMP",
-    "LOB_RENAMED",
-    "POD_OMNI_SCORE",
-    "category",
-    "BOOKYEAR",
-    "STATUS",
-    "target",
-    "POD_INSURANCE_IN_FORCE",
-    "lgd",
-    "TOTAL_INCURRED_LOSS",
-]
+    trainer._cache["X_train"] = X_train
+    trainer._cache["X_test"] = X_test
+    trainer._cache["y_train"] = y_train
+    trainer._cache["y_test"] = y_test
+    trainer._cache["d_train"] = d_train
+    trainer._cache["d_test"] = d_test
 
-df = df_main[features].copy()
-df = df[df["CRD_SCORE"].notna()].copy()
-df = df[df[YEAR_COL].between(2009, 2017)].copy()
-df = df.reset_index(drop=True)
+    trainer._cache["X_full"] = pd.concat([X_train, X_test], axis=0)
+    trainer._cache["y_full"] = pd.concat([y_train, y_test], axis=0)
+    trainer._cache["d_full"] = pd.concat([d_train, d_test], axis=0)
 
-print(df.shape)
-display(df.head())
+    return trainer
 
-===========================================================================
+=====================
 
-def get_best_model(trainer):
-    if hasattr(trainer, "best_model_"):
-        return trainer.best_model_
-    if hasattr(trainer, "best_model"):
-        return trainer.best_model
-    raise AttributeError("No best model found.")
-
-
-def score_validation_set(trainer, experiment_name):
-    model = get_best_model(trainer)
-
-    X_valid = trainer._cache["X_test"]
-    valid_df = trainer._cache["d_test"].copy()
-
-    valid_df[PROB_COL] = model.predict_proba(X_valid)[:, 1]
-
-    lr_calc = LRCalculator()
-    valid_df = lr_calc.transform(
-        valid_df,
-        {LR_COL: PROB_COL}
-    )
-
-    valid_df["experiment"] = experiment_name
-    return valid_df
-
-
-def lr_summary(scored_df):
-    actual_loss = scored_df["ACTUAL_LOSS"].sum()
-    predicted_loss = scored_df[LOSS_COL].sum()
-
-    return pd.Series({
-        "experiment": scored_df["experiment"].iloc[0],
-        "n": len(scored_df),
-        "mean_lr": scored_df[LR_COL].mean(),
-        "median_lr": scored_df[LR_COL].median(),
-        "sum_predicted_loss": predicted_loss,
-        "sum_actual_loss": actual_loss,
-        "diff_predicted_minus_actual": predicted_loss - actual_loss,
-        "pct_diff_predicted_vs_actual": (
-            (predicted_loss - actual_loss) / actual_loss * 100
-            if actual_loss != 0 else np.nan
-        ),
-    })
-
-
-def lr_by_bookyear(scored_df):
-    out = (
-        scored_df
-        .groupby(["experiment", YEAR_COL])
-        .agg(
-            n=(LR_COL, "size"),
-            mean_lr=(LR_COL, "mean"),
-            median_lr=(LR_COL, "median"),
-            sum_predicted_loss=(LOSS_COL, "sum"),
-            sum_actual_loss=("ACTUAL_LOSS", "sum"),
-        )
-        .reset_index()
-    )
-
-    out["diff_predicted_minus_actual"] = (
-        out["sum_predicted_loss"] - out["sum_actual_loss"]
-    )
-
-    out["pct_diff_predicted_vs_actual"] = np.where(
-        out["sum_actual_loss"] != 0,
-        out["diff_predicted_minus_actual"] / out["sum_actual_loss"] * 100,
-        np.nan,
-    )
-
-    return out
-
-=====================================================================
-# Experiment 1: train 2009–2015, validate 2016–2017
 df_exp1 = df.copy()
 
 train_mask = df_exp1[YEAR_COL].between(2009, 2015)
@@ -160,6 +40,10 @@ trainer_exp1.prepare(
     imbalance_use_ros=False,
     eval_mode="holdout",
     credit_use="bin",
+)
+
+trainer_exp1 = apply_custom_time_split(
+    trainer_exp1,
     train_mask=train_mask,
     valid_mask=valid_mask,
 )
@@ -171,128 +55,4 @@ exp1_scored = score_validation_set(
     "train_2009_2015_valid_2016_2017"
 )
 
-====================================================================
-# Experiment 2: random 80/20 on 2009–2017
-
-cfg_exp2 = load_cfg()
-cfg_exp2["Training"]["test_size"] = 0.20
-cfg_exp2["Training"]["random_state"] = RANDOM_STATE
-
-df_exp2 = df.copy()
-
-trainer_exp2 = ModelTrainer(df_exp2, cfg_exp2)
-
-trainer_exp2.prepare(
-    funded_only=True,
-    imbalance_use_ros=False,
-    eval_mode="holdout",
-    credit_use="bin",
-)
-
-trainer_exp2.fit()
-
-exp2_scored = score_validation_set(
-    trainer_exp2,
-    "random_80_20_2009_2017"
-)
-===============================================================================
-# LR comparison
-overall_comparison = pd.DataFrame([
-    lr_summary(exp1_scored),
-    lr_summary(exp2_scored),
-])
-
-display(Markdown("## Overall LR Comparison"))
-display(overall_comparison)
-
-=============================================================
-
-by_year_comparison = pd.concat(
-    [
-        lr_by_bookyear(exp1_scored),
-        lr_by_bookyear(exp2_scored),
-    ],
-    ignore_index=True,
-)
-
-display(Markdown("## LR Comparison by BOOKYEAR"))
-display(by_year_comparison)
-
-===============================================================
-# EXP1
-from sklearn.metrics import roc_auc_score
-
-model = get_best_model(trainer_exp1)
-
-X_train = trainer_exp1._cache["X_train"]
-y_train = trainer_exp1._cache["y_train"]
-
-X_test = trainer_exp1._cache["X_test"]
-y_test = trainer_exp1._cache["y_test"]
-
-train_pred = model.predict_proba(X_train)[:, 1]
-test_pred = model.predict_proba(X_test)[:, 1]
-
-train_auc = roc_auc_score(y_train, train_pred)
-test_auc = roc_auc_score(y_test, test_pred)
-
-print(f"Training AUC: {train_auc:.4f}")
-print(f"Testing AUC : {test_auc:.4f}")
-
-=====================================================
-#EXP2
-model = get_best_model(trainer_exp2)
-
-X_train = trainer_exp2._cache["X_train"]
-y_train = trainer_exp2._cache["y_train"]
-
-X_test = trainer_exp2._cache["X_test"]
-y_test = trainer_exp2._cache["y_test"]
-
-train_pred = model.predict_proba(X_train)[:, 1]
-test_pred = model.predict_proba(X_test)[:, 1]
-
-train_auc = roc_auc_score(y_train, train_pred)
-test_auc = roc_auc_score(y_test, test_pred)
-
-print(f"Training AUC: {train_auc:.4f}")
-print(f"Testing AUC : {test_auc:.4f}")
-
-===============================================
-
-from sklearn.metrics import roc_auc_score
-
-def get_train_test_auc(trainer):
-    model = get_best_model(trainer)
-
-    X_train = trainer._cache["X_train"]
-    y_train = trainer._cache["y_train"]
-
-    X_test = trainer._cache["X_test"]
-    y_test = trainer._cache["y_test"]
-
-    train_auc = roc_auc_score(
-        y_train,
-        model.predict_proba(X_train)[:, 1]
-    )
-
-    test_auc = roc_auc_score(
-        y_test,
-        model.predict_proba(X_test)[:, 1]
-    )
-
-    return pd.Series({
-        "train_auc": train_auc,
-        "test_auc": test_auc,
-        "auc_gap": train_auc - test_auc
-    })
-
-========================
-
-exp1_auc = get_train_test_auc(trainer_exp1)
-exp2_auc = get_train_test_auc(trainer_exp2)
-
-pd.DataFrame([
-    exp1_auc.rename("Time Split"),
-    exp2_auc.rename("Random 80/20")
-])
+=======================
