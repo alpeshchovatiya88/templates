@@ -1,28 +1,18 @@
-df_exp1 = df.copy()
-
-train_mask = df_exp1[YEAR_COL].between(2009, 2015)
-valid_mask = df_exp1[YEAR_COL].between(2016, 2017)
-
-trainer_exp1 = ModelTrainer(df_exp1, load_cfg())
-
-trainer_exp1.prepare(
-    funded_only=True,
-    imbalance_use_ros=False,
-    eval_mode="cv",      # important: avoids failing holdout split
-    credit_use="bin",
+LR_summary = (
+    df
+    .group_by("train_test")
+    .agg(
+        SMI3_LOSS = pl.col("SMI3_LOSS").sum(),
+        ACTUAL_LOSS = pl.col("ACTUAL_LOSS").sum(),
+        POD_PREMIUM_WRITTEN = pl.col("POD_PREMIUM_WRITTEN").sum()
+    )
+    .with_columns(
+        SMI3_LR = pl.col("SMI3_LOSS") / pl.col("POD_PREMIUM_WRITTEN"),
+        ACTUAL_LR = pl.col("ACTUAL_LOSS") / pl.col("POD_PREMIUM_WRITTEN")
+    )
+    .with_columns(
+        LR_diff = pl.col("SMI3_LR") - pl.col("ACTUAL_LR")
+    )
 )
 
-trainer_exp1._eval_mode = "holdout"   # important: fit() should use holdout path
-
-trainer_exp1 = apply_custom_time_split(
-    trainer_exp1,
-    train_mask=train_mask,
-    valid_mask=valid_mask,
-)
-
-trainer_exp1.fit()
-
-exp1_scored = score_validation_set(
-    trainer_exp1,
-    "train_2009_2015_valid_2016_2017"
-)
+LR_summary
