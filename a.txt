@@ -1,5 +1,5 @@
-Title:
-[Analysis] Assess impact of deterministic HPI assumption on model predictions through swap set analysis
-
-Description:
-The model is trained using actual HPI values, while the testing dataset applies a deterministic HPI scenario where HPI remains constant. Since HPI is an input feature to the XGBoost model, this may alter tree-splitting behavior and prediction outcomes compared to the training environment. Additional analysis is required to perform a swap set analysis and quantify the impact of using deterministic versus actual HPI values on model predictions, risk rankings, and portfolio segmentation. Material changes exceeding a 5% threshold should be identified, investigated, and documented, along with an assessment of whether the deterministic HPI assumption remains appropriate for model use.
+Swap set analysis is performed using actual HPI and deterministic HPI values.
+Impact on model predictions and risk rankings is quantified.
+Population movement between risk bands is assessed against the 5% threshold.
+Material changes and affected segments are identified and documented.
+Rationale for the continued use of the deterministic HPI assumption is provided.
