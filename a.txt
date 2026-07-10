@@ -1,5 +1,48 @@
-Swap set analysis is performed using actual HPI and deterministic HPI values.
-Impact on model predictions and risk rankings is quantified.
-Population movement between risk bands is assessed against the 5% threshold.
-Material changes and affected segments are identified and documented.
-Rationale for the continued use of the deterministic HPI assumption is provided.
+import pandas as pd
+
+LR_bt_by = (
+    df.loc[df["STATUS"] == "Funded"]
+      .groupby(["BOOKYEAR", "train_test"], as_index=False)
+      .agg(
+          n=("STATUS", "size"),
+          SMI3_LOSS=("SMI3_LOSS", "sum"),
+          ACTUAL_LOSS=("ACTUAL_LOSS", "sum"),
+          POD_PREMIUM_WRITTEN=("POD_PREMIUM_WRITTEN", "sum")
+      )
+)
+
+LR_bt_by["SMI3_LR"] = (
+    LR_bt_by["SMI3_LOSS"] /
+    LR_bt_by["POD_PREMIUM_WRITTEN"]
+)
+
+LR_bt_by["ACTUAL_LR"] = (
+    LR_bt_by["ACTUAL_LOSS"] /
+    LR_bt_by["POD_PREMIUM_WRITTEN"]
+)
+
+LR_bt_by["LR_diff"] = (
+    LR_bt_by["SMI3_LR"] -
+    LR_bt_by["ACTUAL_LR"]
+)
+
+========================
+LR_bt_by = (
+    df.query("STATUS == 'Funded'")
+      .groupby(["BOOKYEAR", "train_test"], as_index=False)
+      .agg(
+          n=("STATUS", "size"),
+          SMI3_LOSS=("SMI3_LOSS", "sum"),
+          ACTUAL_LOSS=("ACTUAL_LOSS", "sum"),
+          POD_PREMIUM_WRITTEN=("POD_PREMIUM_WRITTEN", "sum"),
+      )
+      .assign(
+          SMI3_LR=lambda x: x["SMI3_LOSS"] / x["POD_PREMIUM_WRITTEN"],
+          ACTUAL_LR=lambda x: x["ACTUAL_LOSS"] / x["POD_PREMIUM_WRITTEN"],
+          LR_diff=lambda x: (
+              x["SMI3_LOSS"] / x["POD_PREMIUM_WRITTEN"]
+              - x["ACTUAL_LOSS"] / x["POD_PREMIUM_WRITTEN"]
+          )
+      )
+)
+
