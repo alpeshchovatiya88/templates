@@ -1,48 +1,57 @@
-import pandas as pd
+import matplotlib.pyplot as plt
 
-LR_bt_by = (
-    df.loc[df["STATUS"] == "Funded"]
-      .groupby(["BOOKYEAR", "train_test"], as_index=False)
-      .agg(
-          n=("STATUS", "size"),
-          SMI3_LOSS=("SMI3_LOSS", "sum"),
-          ACTUAL_LOSS=("ACTUAL_LOSS", "sum"),
-          POD_PREMIUM_WRITTEN=("POD_PREMIUM_WRITTEN", "sum")
-      )
+# Optional: filter train/test separately
+plot_df = (
+    LR_bt_by
+    .sort_values("BOOKYEAR")
 )
 
-LR_bt_by["SMI3_LR"] = (
-    LR_bt_by["SMI3_LOSS"] /
-    LR_bt_by["POD_PREMIUM_WRITTEN"]
+plt.figure(figsize=(10, 6))
+
+plt.plot(
+    plot_df["BOOKYEAR"],
+    plot_df["ACTUAL_LR"],
+    marker="o",
+    label="Actual LR"
 )
 
-LR_bt_by["ACTUAL_LR"] = (
-    LR_bt_by["ACTUAL_LOSS"] /
-    LR_bt_by["POD_PREMIUM_WRITTEN"]
+plt.plot(
+    plot_df["BOOKYEAR"],
+    plot_df["SMI3_LR"],
+    marker="o",
+    label="SMI3 LR"
 )
 
-LR_bt_by["LR_diff"] = (
-    LR_bt_by["SMI3_LR"] -
-    LR_bt_by["ACTUAL_LR"]
-)
+plt.xlabel("Book Year")
+plt.ylabel("Loss Ratio")
+plt.title("Actual LR vs SMI3 LR by Book Year")
+plt.grid(True, alpha=0.3)
+plt.legend()
 
-========================
-LR_bt_by = (
-    df.query("STATUS == 'Funded'")
-      .groupby(["BOOKYEAR", "train_test"], as_index=False)
-      .agg(
-          n=("STATUS", "size"),
-          SMI3_LOSS=("SMI3_LOSS", "sum"),
-          ACTUAL_LOSS=("ACTUAL_LOSS", "sum"),
-          POD_PREMIUM_WRITTEN=("POD_PREMIUM_WRITTEN", "sum"),
-      )
-      .assign(
-          SMI3_LR=lambda x: x["SMI3_LOSS"] / x["POD_PREMIUM_WRITTEN"],
-          ACTUAL_LR=lambda x: x["ACTUAL_LOSS"] / x["POD_PREMIUM_WRITTEN"],
-          LR_diff=lambda x: (
-              x["SMI3_LOSS"] / x["POD_PREMIUM_WRITTEN"]
-              - x["ACTUAL_LOSS"] / x["POD_PREMIUM_WRITTEN"]
-          )
-      )
-)
+plt.tight_layout()
+plt.show()
+
+
+
+==============
+fig, axes = plt.subplots(1, 2, figsize=(14, 5), sharey=True)
+
+for ax, tt in zip(axes, ["train", "test"]):
+    tmp = (
+        LR_bt_by[LR_bt_by["train_test"] == tt]
+        .sort_values("BOOKYEAR")
+    )
+
+    ax.plot(tmp["BOOKYEAR"], tmp["ACTUAL_LR"], marker="o", label="Actual LR")
+    ax.plot(tmp["BOOKYEAR"], tmp["SMI3_LR"], marker="o", label="SMI3 LR")
+
+    ax.set_title(tt.title())
+    ax.set_xlabel("Book Year")
+    ax.grid(True, alpha=0.3)
+
+axes[0].set_ylabel("Loss Ratio")
+axes[0].legend()
+
+plt.tight_layout()
+plt.show()
 
