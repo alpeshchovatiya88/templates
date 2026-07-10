@@ -1,12 +1,104 @@
-import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
 
-# Optional: filter train/test separately
-plot_df = (
-    LR_bt_by
-    .sort_values("BOOKYEAR")
+LR_bt = (
+    df.loc[df["STATUS"] == "Funded"]
+      .groupby("BOOKYEAR", as_index=False)
+      .agg(
+          n=("STATUS", "size"),
+
+          Actual_n_Delqs=(
+              "category",
+              lambda x: x.isin(["Delq Only"]).sum()
+          ),
+
+          Actual_n_Claims=(
+              "category",
+              lambda x: x.isin(["Delq Claim"]).sum()
+          ),
+
+          Actual_n_Delq_and_Claims=(
+              "category",
+              lambda x: x.isin(["Delq Only", "Delq Claim"]).sum()
+          ),
+
+          Predicted_n_Delq_and_Claims=(
+              "oof_pred_proba",
+              "sum"
+          ),
+
+          SMI3_LOSS=(
+              "SMI3_BT_LOSS",
+              "sum"
+          ),
+
+          ACTUAL_LOSS=(
+              "TOTAL_INCURRED_LOSS",
+              "sum"
+          ),
+
+          POD_PREMIUM_WRITTEN=(
+              "POD_PREMIUM_WRITTEN",
+              "sum"
+          )
+      )
 )
 
-plt.figure(figsize=(10, 6))
+# Compute frequency metrics
+LR_bt["n_diff"] = (
+    LR_bt["Predicted_n_Delq_and_Claims"]
+    - LR_bt["Actual_n_Delq_and_Claims"]
+)
+
+LR_bt["per_diff"] = (
+    100
+    * (
+        LR_bt["Predicted_n_Delq_and_Claims"]
+        - LR_bt["Actual_n_Delq_and_Claims"]
+    )
+    / LR_bt["Actual_n_Delq_and_Claims"]
+)
+
+LR_bt["Delq_Proportion"] = (
+    LR_bt["Actual_n_Delqs"]
+    / LR_bt["Actual_n_Delq_and_Claims"]
+)
+
+# Compute LR
+LR_bt["SMI3_LR"] = (
+    LR_bt["SMI3_LOSS"]
+    / LR_bt["POD_PREMIUM_WRITTEN"]
+)
+
+LR_bt["ACTUAL_LR"] = (
+    LR_bt["ACTUAL_LOSS"]
+    / LR_bt["POD_PREMIUM_WRITTEN"]
+)
+
+# Adjusted LR
+LR_bt["SMI3_ADJ_LR"] = (
+    LR_bt["SMI3_LR"]
+    * LR_bt["Delq_Proportion"]
+)
+
+# Differences
+LR_bt["LR_diff"] = (
+    LR_bt["SMI3_LR"]
+    - LR_bt["ACTUAL_LR"]
+)
+
+LR_bt["ADJ_LR_diff"] = (
+    LR_bt["SMI3_ADJ_LR"]
+    - LR_bt["ACTUAL_LR"]
+)
+
+==============================================
+
+import matplotlib.pyplot as plt
+
+plot_df = LR_bt.sort_values("BOOKYEAR")
+
+plt.figure(figsize=(12, 6))
 
 plt.plot(
     plot_df["BOOKYEAR"],
@@ -22,36 +114,20 @@ plt.plot(
     label="SMI3 LR"
 )
 
+plt.plot(
+    plot_df["BOOKYEAR"],
+    plot_df["SMI3_ADJ_LR"],
+    marker="o",
+    label="SMI3 Adjusted LR"
+)
+
+plt.axhline(0, linestyle="--", alpha=0.5)
+
 plt.xlabel("Book Year")
 plt.ylabel("Loss Ratio")
-plt.title("Actual LR vs SMI3 LR by Book Year")
-plt.grid(True, alpha=0.3)
+plt.title("Loss Ratio Backtest by Book Year")
 plt.legend()
+plt.grid(True, alpha=0.3)
 
 plt.tight_layout()
 plt.show()
-
-
-
-==============
-fig, axes = plt.subplots(1, 2, figsize=(14, 5), sharey=True)
-
-for ax, tt in zip(axes, ["train", "test"]):
-    tmp = (
-        LR_bt_by[LR_bt_by["train_test"] == tt]
-        .sort_values("BOOKYEAR")
-    )
-
-    ax.plot(tmp["BOOKYEAR"], tmp["ACTUAL_LR"], marker="o", label="Actual LR")
-    ax.plot(tmp["BOOKYEAR"], tmp["SMI3_LR"], marker="o", label="SMI3 LR")
-
-    ax.set_title(tt.title())
-    ax.set_xlabel("Book Year")
-    ax.grid(True, alpha=0.3)
-
-axes[0].set_ylabel("Loss Ratio")
-axes[0].legend()
-
-plt.tight_layout()
-plt.show()
-
