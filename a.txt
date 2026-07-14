@@ -1,133 +1,435 @@
 import numpy as np
 import pandas as pd
 
-LR_bt = (
-    df.loc[df["STATUS"] == "Funded"]
-      .groupby("BOOKYEAR", as_index=False)
-      .agg(
-          n=("STATUS", "size"),
 
-          Actual_n_Delqs=(
-              "category",
-              lambda x: x.isin(["Delq Only"]).sum()
-          ),
+# ============================================================
+# 1. PSI INTERPRETATION
+# ============================================================
 
-          Actual_n_Claims=(
-              "category",
-              lambda x: x.isin(["Delq Claim"]).sum()
-          ),
+def psi_interpretation(psi):
+    """
+    Interpret PSI value using commonly used thresholds.
+    """
 
-          Actual_n_Delq_and_Claims=(
-              "category",
-              lambda x: x.isin(["Delq Only", "Delq Claim"]).sum()
-          ),
+    if pd.isna(psi):
+        return "Not calculated"
+    elif psi < 0.10:
+        return "Stable"
+    elif psi < 0.25:
+        return "Moderate shift"
+    else:
+        return "Significant shift"
 
-          Predicted_n_Delq_and_Claims=(
-              "oof_pred_proba",
-              "sum"
-          ),
 
-          SMI3_LOSS=(
-              "SMI3_BT_LOSS",
-              "sum"
-          ),
+# ============================================================
+# 2. NUMERIC PSI
+# ============================================================
 
-          ACTUAL_LOSS=(
-              "TOTAL_INCURRED_LOSS",
-              "sum"
-          ),
+def calculate_psi_numeric(
+    expected,
+    actual,
+    feature,
+    bins=10,
+    eps=0.0001
+):
+    """
+    Calculate PSI for a numeric feature.
 
-          POD_PREMIUM_WRITTEN=(
-              "POD_PREMIUM_WRITTEN",
-              "sum"
-          )
-      )
-)
+    Bins are created using quantiles from the expected
+    or previous-year population.
+    """
 
-# Compute frequency metrics
-LR_bt["n_diff"] = (
-    LR_bt["Predicted_n_Delq_and_Claims"]
-    - LR_bt["Actual_n_Delq_and_Claims"]
-)
-
-LR_bt["per_diff"] = (
-    100
-    * (
-        LR_bt["Predicted_n_Delq_and_Claims"]
-        - LR_bt["Actual_n_Delq_and_Claims"]
+    expected_data = (
+        pd.to_numeric(expected[feature], errors="coerce")
+        .replace([np.inf, -np.inf], np.nan)
+        .dropna()
     )
-    / LR_bt["Actual_n_Delq_and_Claims"]
+
+    actual_data = (
+        pd.to_numeric(actual[feature], errors="coerce")
+        .replace([np.inf, -np.inf], np.nan)
+        .dropna()
+    )
+
+    # PSI cannot be calculated when data is empty
+    if expected_data.empty or actual_data.empty:
+        return np.nan
+
+    # At least two unique values are needed
+    if (
+        expected_data.nunique() < 2
+        or actual_data.nunique() < 2
+    ):
+        return np.nan
+
+    try:
+        # Create quantile bin edges from previous-year data
+        _, bin_edges = pd.qcut(
+            expected_data,
+            q=bins,
+            retbins=True,
+            duplicates="drop"
+        )
+
+        bin_edges = np.unique(bin_edges)
+
+        if len(bin_edges) < 2:
+            return np.nan
+
+        # Extend bins so all current-year values are included
+        bin_edges[0] = -np.inf
+        bin_edges[-1] = np.inf
+
+        expected_bins = pd.cut(
+            expected_data,
+            bins=bin_edges,
+            include_lowest=True
+        )
+
+        actual_bins = pd.cut(
+            actual_data,
+            bins=bin_edges,
+            include_lowest=True
+        )
+
+        expected_pct = expected_bins.value_counts(
+            normalize=True,
+            sort=False
+        )
+
+        actual_pct = actual_bins.value_counts(
+            normalize=True,
+            sort=False
+        )
+
+        # Ensure both series have identical bins
+        all_bins = expected_pct.index.union(actual_pct.index)
+
+        expected_pct = expected_pct.reindex(
+            all_bins,
+            fill_value=0
+        )
+
+        actual_pct = actual_pct.reindex(
+            all_bins,
+            fill_value=0
+        )
+
+        # Replace zero percentages to avoid log(0)
+        expected_pct = expected_pct.clip(lower=eps)
+        actual_pct = actual_pct.clip(lower=eps)
+
+        psi_components = (
+            (actual_pct - expected_pct)
+            * np.log(actual_pct / expected_pct)
+        )
+
+        return float(psi_components.sum())
+
+    except (ValueError, TypeError, KeyError):
+        return np.nan
+
+
+# ============================================================
+# 3. CATEGORICAL PSI
+# ============================================================
+
+def calculate_psi_categorical(
+    expected,
+    actual,
+    feature,
+    eps=0.0001
+):
+    """
+    Calculate PSI for a categorical feature.
+    Missing values are treated as a separate category.
+    """
+
+    expected_data = (
+        expected[feature]
+        .astype("object")
+        .where(expected[feature].notna(), "MISSING")
+        .astype(str)
+    )
+
+    actual_data = (
+        actual[feature]
+        .astype("object")
+        .where(actual[feature].notna(), "MISSING")
+        .astype(str)
+    )
+
+    if expected_data.empty or actual_data.empty:
+        return np.nan
+
+    levels = sorted(
+        set(expected_data.unique()).union(
+            set(actual_data.unique())
+        )
+    )
+
+    expected_pct = (
+        expected_data
+        .value_counts(normalize=True)
+        .reindex(levels, fill_value=0)
+        .clip(lower=eps)
+    )
+
+    actual_pct = (
+        actual_data
+        .value_counts(normalize=True)
+        .reindex(levels, fill_value=0)
+        .clip(lower=eps)
+    )
+
+    psi_components = (
+        (actual_pct - expected_pct)
+        * np.log(actual_pct / expected_pct)
+    )
+
+    return float(psi_components.sum())
+
+
+# ============================================================
+# 4. RUN PSI FOR ONE YEAR COMPARISON
+# ============================================================
+
+def run_psi_for_model(
+    expected,
+    actual,
+    model_name,
+    numeric_cols=None,
+    categorical_cols=None,
+    bins=10
+):
+    """
+    Calculate PSI for all numeric and categorical columns.
+    """
+
+    numeric_cols = numeric_cols or []
+    categorical_cols = categorical_cols or []
+
+    results = []
+
+    for col in numeric_cols:
+
+        if col not in expected.columns or col not in actual.columns:
+            continue
+
+        psi_value = calculate_psi_numeric(
+            expected=expected,
+            actual=actual,
+            feature=col,
+            bins=bins
+        )
+
+        results.append({
+            "model": model_name,
+            "feature": col,
+            "type": "numeric",
+            "psi": psi_value,
+            "interpretation": psi_interpretation(psi_value)
+        })
+
+    for col in categorical_cols:
+
+        if col not in expected.columns or col not in actual.columns:
+            continue
+
+        psi_value = calculate_psi_categorical(
+            expected=expected,
+            actual=actual,
+            feature=col
+        )
+
+        results.append({
+            "model": model_name,
+            "feature": col,
+            "type": "categorical",
+            "psi": psi_value,
+            "interpretation": psi_interpretation(psi_value)
+        })
+
+    return pd.DataFrame(results)
+
+
+# ============================================================
+# 5. YEAR-OVER-YEAR PSI
+# ============================================================
+
+def calculate_yearwise_psi(
+    df,
+    year_col,
+    start_year,
+    end_year,
+    numeric_cols=None,
+    categorical_cols=None,
+    model_name="model",
+    bins=10,
+    multiply_by_100=True
+):
+    """
+    Calculate PSI for every year compared with its previous year.
+
+    Example:
+        2016 = PSI of 2016 compared with 2015
+        2017 = PSI of 2017 compared with 2016
+        2018 = PSI of 2018 compared with 2017
+
+    Returns
+    -------
+    detailed_df:
+        Long-format PSI results.
+
+    wide_df:
+        Features as rows, comparison years as columns,
+        and PSI percentage-style values in cells.
+    """
+
+    if year_col not in df.columns:
+        raise KeyError(
+            f"Year column '{year_col}' is not present in dataframe."
+        )
+
+    if start_year >= end_year:
+        raise ValueError(
+            "start_year must be smaller than end_year."
+        )
+
+    numeric_cols = numeric_cols or []
+    categorical_cols = categorical_cols or []
+
+    data = df.copy()
+
+    # Support either a year number or a datetime column
+    if pd.api.types.is_datetime64_any_dtype(data[year_col]):
+        data["_psi_year"] = data[year_col].dt.year
+    else:
+        data["_psi_year"] = pd.to_numeric(
+            data[year_col],
+            errors="coerce"
+        )
+
+    data = data[
+        data["_psi_year"].between(start_year, end_year)
+    ].copy()
+
+    all_results = []
+
+    for current_year in range(start_year + 1, end_year + 1):
+
+        previous_year = current_year - 1
+
+        expected = data[
+            data["_psi_year"] == previous_year
+        ].copy()
+
+        actual = data[
+            data["_psi_year"] == current_year
+        ].copy()
+
+        if expected.empty or actual.empty:
+            print(
+                f"Skipping {previous_year} vs {current_year}: "
+                "data is missing for one or both years."
+            )
+            continue
+
+        year_result = run_psi_for_model(
+            expected=expected,
+            actual=actual,
+            model_name=model_name,
+            numeric_cols=numeric_cols,
+            categorical_cols=categorical_cols,
+            bins=bins
+        )
+
+        if year_result.empty:
+            continue
+
+        year_result["previous_year"] = previous_year
+        year_result["year"] = current_year
+        year_result["comparison"] = (
+            str(previous_year) + " vs " + str(current_year)
+        )
+
+        # PSI is not technically a percentage.
+        # This creates a percentage-style presentation.
+        if multiply_by_100:
+            year_result["psi_pct"] = year_result["psi"] * 100
+        else:
+            year_result["psi_pct"] = year_result["psi"]
+
+        all_results.append(year_result)
+
+    if not all_results:
+        return pd.DataFrame(), pd.DataFrame()
+
+    detailed_df = pd.concat(
+        all_results,
+        ignore_index=True
+    )
+
+    wide_df = detailed_df.pivot_table(
+        index=["feature", "type"],
+        columns="year",
+        values="psi_pct",
+        aggfunc="first"
+    ).reset_index()
+
+    wide_df.columns.name = None
+
+    # Rename year columns to clearly show previous-year comparison
+    rename_columns = {
+        year: f"{year - 1}_vs_{year}_pct"
+        for year in range(start_year + 1, end_year + 1)
+        if year in wide_df.columns
+    }
+
+    wide_df = wide_df.rename(columns=rename_columns)
+
+    return detailed_df, wide_df
+
+
+# ============================================================
+# 6. EXAMPLE COLUMN LISTS
+# ============================================================
+
+numeric_cols = [
+    "CRD_SCORE_bin",
+    "CRD_OPEN_TRADE_TU",
+    "CRD_PUBLIC_DEROG_TU"
+    # Add remaining numeric columns here
+]
+
+categorical_cols = [
+    # "STATE",
+    # "PRODUCT_TYPE",
+    # "CHANNEL"
+    # Add categorical columns here
+]
+
+
+# ============================================================
+# 7. RUN FROM 2015 TO 2021
+# ============================================================
+
+psi_detailed, psi_yearwise = calculate_yearwise_psi(
+    df=df,
+    year_col="YEAR",             # Replace with your year column
+    start_year=2015,
+    end_year=2021,
+    numeric_cols=numeric_cols,
+    categorical_cols=categorical_cols,
+    model_name="funded_model",
+    bins=10,
+    multiply_by_100=True
 )
 
-LR_bt["Delq_Proportion"] = (
-    LR_bt["Actual_n_Delqs"]
-    / LR_bt["Actual_n_Delq_and_Claims"]
-)
 
-# Compute LR
-LR_bt["SMI3_LR"] = (
-    LR_bt["SMI3_LOSS"]
-    / LR_bt["POD_PREMIUM_WRITTEN"]
-)
+# Wide output: years as columns
+display(psi_yearwise)
 
-LR_bt["ACTUAL_LR"] = (
-    LR_bt["ACTUAL_LOSS"]
-    / LR_bt["POD_PREMIUM_WRITTEN"]
-)
 
-# Adjusted LR
-LR_bt["SMI3_ADJ_LR"] = (
-    LR_bt["SMI3_LR"]
-    * LR_bt["Delq_Proportion"]
-)
-
-# Differences
-LR_bt["LR_diff"] = (
-    LR_bt["SMI3_LR"]
-    - LR_bt["ACTUAL_LR"]
-)
-
-LR_bt["ADJ_LR_diff"] = (
-    LR_bt["SMI3_ADJ_LR"]
-    - LR_bt["ACTUAL_LR"]
-)
-
-==============================================
-
-import matplotlib.pyplot as plt
-
-plot_df = LR_bt.sort_values("BOOKYEAR")
-
-plt.figure(figsize=(12, 6))
-
-plt.plot(
-    plot_df["BOOKYEAR"],
-    plot_df["ACTUAL_LR"],
-    marker="o",
-    label="Actual LR"
-)
-
-plt.plot(
-    plot_df["BOOKYEAR"],
-    plot_df["SMI3_LR"],
-    marker="o",
-    label="SMI3 LR"
-)
-
-plt.plot(
-    plot_df["BOOKYEAR"],
-    plot_df["SMI3_ADJ_LR"],
-    marker="o",
-    label="SMI3 Adjusted LR"
-)
-
-plt.axhline(0, linestyle="--", alpha=0.5)
-
-plt.xlabel("Book Year")
-plt.ylabel("Loss Ratio")
-plt.title("Loss Ratio Backtest by Book Year")
-plt.legend()
-plt.grid(True, alpha=0.3)
-
-plt.tight_layout()
-plt.show()
+# Optional: detailed output
+display(psi_detailed)
