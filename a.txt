@@ -1,83 +1,80 @@
-def psi_by_period(
-    df,
-    period_col,
-    periods,
-    numeric_cols,
-    categorical_cols
-):
-    results = []
+# Always start from the original dataframe
+df_psi = df.copy()
 
-    for i in range(1, len(periods)):
-        previous_period = periods[i - 1]
-        current_period = periods[i]
-
-        expected = df[df[period_col] == previous_period]
-        actual = df[df[period_col] == current_period]
-
-        if expected.empty or actual.empty:
-            print(f"Missing data: {previous_period} vs {current_period}")
-            continue
-
-        temp = run_psi_for_model(
-            expected=expected,
-            actual=actual,
-            model_name="funded_model",
-            numeric_cols=numeric_cols,
-            categorical_cols=categorical_cols
-        )
-
-        temp["period"] = current_period
-        results.append(temp)
-
-    result = pd.concat(results, ignore_index=True)
-
-    # PSI values with periods as columns
-    psi_wide = result.pivot(
-        index="feature",
-        columns="period",
-        values="psi"
-    ).reset_index()
-
-    # Percentage change in PSI value
-    period_columns = [
-        col for col in periods
-        if col in psi_wide.columns
-    ]
-
-    psi_pct_diff = psi_wide.copy()
-
-    psi_pct_diff[period_columns] = (
-        psi_pct_diff[period_columns]
-        .pct_change(axis=1)
-        .mul(100)
-    )
-
-    return psi_wide, psi_pct_diff
-
-=============================
-
-df["DATE"] = pd.to_datetime(df["DATE"])
-
-df["period"] = np.where(
-    df["DATE"].dt.year == 2021,
-    "2021",
-    df["DATE"].dt.year.astype(str)
-    + "_Q"
-    + df["DATE"].dt.quarter.astype(str)
+# Clean YYYYMM, including values such as 202201.0
+df_psi["YYYYMM"] = (
+    df_psi["YYYYMM"]
+    .astype(str)
+    .str.replace(".0", "", regex=False)
+    .str.strip()
 )
 
-===================================
+df_psi["year"] = pd.to_numeric(
+    df_psi["YYYYMM"].str[:4],
+    errors="coerce"
+)
 
-periods = [
-    "2021",
-    "2022_Q1",
-    "2022_Q2",
-    "2022_Q3",
-    "2022_Q4"
-]
+df_psi["month"] = pd.to_numeric(
+    df_psi["YYYYMM"].str[4:6],
+    errors="coerce"
+)
+
+# Keep baseline year and later only
+baseline_year = 2021
+
+df_psi = df_psi[
+    (df_psi["year"] >= baseline_year)
+    & (df_psi["month"].between(1, 12))
+].copy()
+
+df_psi["quarter"] = (
+    ((df_psi["month"] - 1) // 3) + 1
+).astype(int)
+
+# Full-year baseline; quarterly periods afterward
+df_psi["period"] = np.where(
+    df_psi["year"] == baseline_year,
+    str(baseline_year),
+    (
+        df_psi["year"].astype(int).astype(str)
+        + "_Q"
+        + df_psi["quarter"].astype(str)
+    )
+)
+
+# Verify that records are assigned correctly
+print(
+    df_psi.groupby("period")
+    .size()
+    .sort_index()
+)
+=================================================
+
+periods = [str(baseline_year)]
+
+future_periods = (
+    df_psi.loc[df_psi["year"] > baseline_year, "period"]
+    .dropna()
+    .unique()
+    .tolist()
+)
+
+future_periods = sorted(
+    future_periods,
+    key=lambda x: (
+        int(x.split("_Q")[0]),
+        int(x.split("_Q")[1])
+    )
+)
+
+periods += future_periods
+
+print(periods)
+
+====================================
 
 psi_values, psi_pct_diff = psi_by_period(
-    df=df,
+    df=df_psi,
     period_col="period",
     periods=periods,
     numeric_cols=numeric_cols,
@@ -85,4 +82,15 @@ psi_values, psi_pct_diff = psi_by_period(
 )
 
 display(psi_values)
-display(psi_pct_diff)
+display(psi_pct_diff) 
+
+=================================================
+
+print(df_psi["period"].value_counts().sort_index())
+
+print(
+    df_psi.loc[
+        df_psi["period"].isin(["2021", "2022_Q1"]),
+        ["YYYYMM", "year", "month", "quarter", "period"]
+    ].drop_duplicates().sort_values("YYYYMM")
+)
