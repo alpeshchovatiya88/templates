@@ -8,7 +8,7 @@ import pandas as pd
 
 def psi_interpretation(psi):
     """
-    Interpret PSI value using commonly used thresholds.
+    Interpret PSI value.
     """
 
     if pd.isna(psi):
@@ -33,10 +33,9 @@ def calculate_psi_numeric(
     eps=0.0001
 ):
     """
-    Calculate PSI for a numeric feature.
+    Calculate PSI for one numeric feature.
 
-    Bins are created using quantiles from the expected
-    or previous-year population.
+    Bin limits are created from the expected population.
     """
 
     expected_data = (
@@ -51,19 +50,14 @@ def calculate_psi_numeric(
         .dropna()
     )
 
-    # PSI cannot be calculated when data is empty
     if expected_data.empty or actual_data.empty:
         return np.nan
 
-    # At least two unique values are needed
-    if (
-        expected_data.nunique() < 2
-        or actual_data.nunique() < 2
-    ):
+    if expected_data.nunique() < 2:
         return np.nan
 
     try:
-        # Create quantile bin edges from previous-year data
+        # Create quantile bins from expected population
         _, bin_edges = pd.qcut(
             expected_data,
             q=bins,
@@ -76,7 +70,7 @@ def calculate_psi_numeric(
         if len(bin_edges) < 2:
             return np.nan
 
-        # Extend bins so all current-year values are included
+        # Include values outside the expected range
         bin_edges[0] = -np.inf
         bin_edges[-1] = np.inf
 
@@ -102,7 +96,6 @@ def calculate_psi_numeric(
             sort=False
         )
 
-        # Ensure both series have identical bins
         all_bins = expected_pct.index.union(actual_pct.index)
 
         expected_pct = expected_pct.reindex(
@@ -115,16 +108,15 @@ def calculate_psi_numeric(
             fill_value=0
         )
 
-        # Replace zero percentages to avoid log(0)
         expected_pct = expected_pct.clip(lower=eps)
         actual_pct = actual_pct.clip(lower=eps)
 
-        psi_components = (
+        psi_component = (
             (actual_pct - expected_pct)
             * np.log(actual_pct / expected_pct)
         )
 
-        return float(psi_components.sum())
+        return float(psi_component.sum())
 
     except (ValueError, TypeError, KeyError):
         return np.nan
@@ -141,7 +133,7 @@ def calculate_psi_categorical(
     eps=0.0001
 ):
     """
-    Calculate PSI for a categorical feature.
+    Calculate PSI for one categorical feature.
     Missing values are treated as a separate category.
     """
 
@@ -182,16 +174,16 @@ def calculate_psi_categorical(
         .clip(lower=eps)
     )
 
-    psi_components = (
+    psi_component = (
         (actual_pct - expected_pct)
         * np.log(actual_pct / expected_pct)
     )
 
-    return float(psi_components.sum())
+    return float(psi_component.sum())
 
 
 # ============================================================
-# 4. RUN PSI FOR ONE YEAR COMPARISON
+# 4. RUN PSI FOR ONE PERIOD COMPARISON
 # ============================================================
 
 def run_psi_for_model(
@@ -203,7 +195,7 @@ def run_psi_for_model(
     bins=10
 ):
     """
-    Calculate PSI for all numeric and categorical columns.
+    Calculate PSI for all supplied features.
     """
 
     numeric_cols = numeric_cols or []
@@ -214,6 +206,7 @@ def run_psi_for_model(
     for col in numeric_cols:
 
         if col not in expected.columns or col not in actual.columns:
+            print(f"Skipping missing numeric column: {col}")
             continue
 
         psi_value = calculate_psi_numeric(
@@ -234,6 +227,7 @@ def run_psi_for_model(
     for col in categorical_cols:
 
         if col not in expected.columns or col not in actual.columns:
+            print(f"Skipping missing categorical column: {col}")
             continue
 
         psi_value = calculate_psi_categorical(
@@ -254,27 +248,145 @@ def run_psi_for_model(
 
 
 # ============================================================
-# 5. YEAR-OVER-YEAR PSI
+# 5. CREATE YEAR / QUARTER PERIOD COLUMN
 # ============================================================
 
-def calculate_yearwise_psi(
+def create_psi_period(
     df,
-    year_col,
-    start_year,
-    end_year,
+    date_col=None,
+    year_col=None,
+    quarter_col=None,
+    annual_years=None,
+    output_col="psi_period"
+):
+    """
+    Create a PSI period column.
+
+    Example required output:
+        2021
+        2022_Q1
+        2022_Q2
+        2022_Q3
+        2022_Q4
+
+    You can provide either:
+
+    1. date_col
+
+    OR
+
+    2. year_col and quarter_col
+
+    annual_years:
+        Years that should be treated as full-year periods.
+        Example: [2021]
+    """
+
+    data = df.copy()
+
+    annual_years = annual_years or []
+
+    if date_col is not None:
+
+        if date_col not in data.columns:
+            raise KeyError(
+                f"Date column '{date_col}' is not present."
+            )
+
+        data[date_col] = pd.to_datetime(
+            data[date_col],
+            errors="coerce"
+        )
+
+        data["_psi_year"] = data[date_col].dt.year
+        data["_psi_quarter"] = data[date_col].dt.quarter
+
+    else:
+
+        if year_col is None or quarter_col is None:
+            raise ValueError(
+                "Provide date_col, or both year_col and quarter_col."
+            )
+
+        if year_col not in data.columns:
+            raise KeyError(
+                f"Year column '{year_col}' is not present."
+            )
+
+        if quarter_col not in data.columns:
+            raise KeyError(
+                f"Quarter column '{quarter_col}' is not present."
+            )
+
+        data["_psi_year"] = pd.to_numeric(
+            data[year_col],
+            errors="coerce"
+        )
+
+        quarter_text = (
+            data[quarter_col]
+            .astype(str)
+            .str.upper()
+            .str.strip()
+            .str.replace("QUARTER", "", regex=False)
+            .str.replace("Q", "", regex=False)
+        )
+
+        data["_psi_quarter"] = pd.to_numeric(
+            quarter_text,
+            errors="coerce"
+        )
+
+    data[output_col] = np.where(
+        data["_psi_year"].isin(annual_years),
+        data["_psi_year"].astype("Int64").astype(str),
+        (
+            data["_psi_year"].astype("Int64").astype(str)
+            + "_Q"
+            + data["_psi_quarter"].astype("Int64").astype(str)
+        )
+    )
+
+    invalid_mask = (
+        data["_psi_year"].isna()
+        | (
+            ~data["_psi_year"].isin(annual_years)
+            & ~data["_psi_quarter"].isin([1, 2, 3, 4])
+        )
+    )
+
+    data.loc[invalid_mask, output_col] = np.nan
+
+    return data
+
+
+# ============================================================
+# 6. PREVIOUS-PERIOD PSI
+# ============================================================
+
+def calculate_previous_period_psi(
+    df,
+    period_col,
+    periods,
     numeric_cols=None,
     categorical_cols=None,
     model_name="model",
     bins=10,
-    multiply_by_100=True
+    multiply_by_100=True,
+    include_first_period=True
 ):
     """
-    Calculate PSI for every year compared with its previous year.
+    Calculate PSI where each period is compared with the
+    immediately previous period.
 
-    Example:
-        2016 = PSI of 2016 compared with 2015
-        2017 = PSI of 2017 compared with 2016
-        2018 = PSI of 2018 compared with 2017
+    For periods:
+        2021, 2022_Q1, 2022_Q2, 2022_Q3, 2022_Q4
+
+    Comparisons:
+        2022_Q1 vs 2021
+        2022_Q2 vs 2022_Q1
+        2022_Q3 vs 2022_Q2
+        2022_Q4 vs 2022_Q3
 
     Returns
     -------
@@ -282,60 +394,47 @@ def calculate_yearwise_psi(
         Long-format PSI results.
 
     wide_df:
-        Features as rows, comparison years as columns,
-        and PSI percentage-style values in cells.
+        Features as rows and periods as columns.
     """
 
-    if year_col not in df.columns:
+    if period_col not in df.columns:
         raise KeyError(
-            f"Year column '{year_col}' is not present in dataframe."
+            f"Period column '{period_col}' is not present."
         )
 
-    if start_year >= end_year:
+    if len(periods) < 2:
         raise ValueError(
-            "start_year must be smaller than end_year."
+            "At least two periods are required."
         )
 
     numeric_cols = numeric_cols or []
     categorical_cols = categorical_cols or []
 
-    data = df.copy()
-
-    # Support either a year number or a datetime column
-    if pd.api.types.is_datetime64_any_dtype(data[year_col]):
-        data["_psi_year"] = data[year_col].dt.year
-    else:
-        data["_psi_year"] = pd.to_numeric(
-            data[year_col],
-            errors="coerce"
-        )
-
-    data = data[
-        data["_psi_year"].between(start_year, end_year)
-    ].copy()
+    data = df[df[period_col].isin(periods)].copy()
 
     all_results = []
 
-    for current_year in range(start_year + 1, end_year + 1):
+    for i in range(1, len(periods)):
 
-        previous_year = current_year - 1
+        previous_period = periods[i - 1]
+        current_period = periods[i]
 
         expected = data[
-            data["_psi_year"] == previous_year
+            data[period_col] == previous_period
         ].copy()
 
         actual = data[
-            data["_psi_year"] == current_year
+            data[period_col] == current_period
         ].copy()
 
         if expected.empty or actual.empty:
             print(
-                f"Skipping {previous_year} vs {current_year}: "
-                "data is missing for one or both years."
+                f"Skipping {previous_period} vs {current_period}: "
+                "data is missing for one or both periods."
             )
             continue
 
-        year_result = run_psi_for_model(
+        period_result = run_psi_for_model(
             expected=expected,
             actual=actual,
             model_name=model_name,
@@ -344,23 +443,23 @@ def calculate_yearwise_psi(
             bins=bins
         )
 
-        if year_result.empty:
+        if period_result.empty:
             continue
 
-        year_result["previous_year"] = previous_year
-        year_result["year"] = current_year
-        year_result["comparison"] = (
-            str(previous_year) + " vs " + str(current_year)
+        period_result["previous_period"] = previous_period
+        period_result["period"] = current_period
+        period_result["comparison"] = (
+            f"{previous_period}_vs_{current_period}"
         )
 
-        # PSI is not technically a percentage.
-        # This creates a percentage-style presentation.
         if multiply_by_100:
-            year_result["psi_pct"] = year_result["psi"] * 100
+            period_result["psi_pct"] = (
+                period_result["psi"] * 100
+            )
         else:
-            year_result["psi_pct"] = year_result["psi"]
+            period_result["psi_pct"] = period_result["psi"]
 
-        all_results.append(year_result)
+        all_results.append(period_result)
 
     if not all_results:
         return pd.DataFrame(), pd.DataFrame()
@@ -372,64 +471,127 @@ def calculate_yearwise_psi(
 
     wide_df = detailed_df.pivot_table(
         index=["feature", "type"],
-        columns="year",
+        columns="period",
         values="psi_pct",
         aggfunc="first"
     ).reset_index()
 
     wide_df.columns.name = None
 
-    # Rename year columns to clearly show previous-year comparison
-    rename_columns = {
-        year: f"{year - 1}_vs_{year}_pct"
-        for year in range(start_year + 1, end_year + 1)
-        if year in wide_df.columns
-    }
+    # Add the first period as a blank reference column
+    if include_first_period:
+        first_period = periods[0]
 
-    wide_df = wide_df.rename(columns=rename_columns)
+        if first_period not in wide_df.columns:
+            wide_df.insert(
+                loc=2,
+                column=first_period,
+                value=np.nan
+            )
+
+    # Force columns into the requested order
+    ordered_period_columns = [
+        period
+        for period in periods
+        if period in wide_df.columns
+    ]
+
+    wide_df = wide_df[
+        ["feature", "type"] + ordered_period_columns
+    ]
 
     return detailed_df, wide_df
 
 
 # ============================================================
-# 6. EXAMPLE COLUMN LISTS
+# 7. DEFINE YOUR FEATURE COLUMNS
 # ============================================================
 
 numeric_cols = [
     "CRD_SCORE_bin",
     "CRD_OPEN_TRADE_TU",
     "CRD_PUBLIC_DEROG_TU"
-    # Add remaining numeric columns here
+    # Add the remaining numeric columns here
 ]
 
 categorical_cols = [
     # "STATE",
     # "PRODUCT_TYPE",
     # "CHANNEL"
-    # Add categorical columns here
+    # Add the remaining categorical columns here
 ]
 
 
 # ============================================================
-# 7. RUN FROM 2015 TO 2021
+# 8A. CREATE PERIOD USING A DATE COLUMN
 # ============================================================
 
-psi_detailed, psi_yearwise = calculate_yearwise_psi(
+# Use this section when your dataframe has a date column.
+#
+# Replace "APPLICATION_DATE" with your actual date column.
+
+df_psi = create_psi_period(
     df=df,
-    year_col="YEAR",             # Replace with your year column
-    start_year=2015,
-    end_year=2021,
+    date_col="APPLICATION_DATE",
+    annual_years=[2021],
+    output_col="psi_period"
+)
+
+
+# ============================================================
+# 8B. ALTERNATIVE: USE YEAR AND QUARTER COLUMNS
+# ============================================================
+
+# Comment out section 8A and use this instead when your
+# dataframe already has YEAR and QUARTER columns.
+#
+# df_psi = create_psi_period(
+#     df=df,
+#     year_col="YEAR",
+#     quarter_col="QUARTER",
+#     annual_years=[2021],
+#     output_col="psi_period"
+# )
+
+
+# ============================================================
+# 9. PERIODS TO COMPARE
+# ============================================================
+
+periods = [
+    "2021",
+    "2022_Q1",
+    "2022_Q2",
+    "2022_Q3",
+    "2022_Q4"
+]
+
+
+# ============================================================
+# 10. RUN PSI
+# ============================================================
+
+psi_detailed, psi_wide = calculate_previous_period_psi(
+    df=df_psi,
+    period_col="psi_period",
+    periods=periods,
     numeric_cols=numeric_cols,
     categorical_cols=categorical_cols,
     model_name="funded_model",
     bins=10,
-    multiply_by_100=True
+    multiply_by_100=True,
+    include_first_period=True
 )
 
 
-# Wide output: years as columns
-display(psi_yearwise)
+# ============================================================
+# 11. DISPLAY OUTPUT
+# ============================================================
+
+# Main output:
+# Features as rows and periods as columns
+display(psi_wide)
 
 
-# Optional: detailed output
+# Optional detailed output
 display(psi_detailed)
