@@ -1,573 +1,72 @@
-import numpy as np
-import pandas as pd
-
-
-# ============================================================
-# 1. PSI INTERPRETATION
-# ============================================================
-
-def psi_interpretation(psi):
-
-    if pd.isna(psi):
-        return "Not calculated"
-    elif psi < 0.10:
-        return "Stable"
-    elif psi < 0.25:
-        return "Moderate shift"
-    else:
-        return "Significant shift"
-
-
-# ============================================================
-# 2. NUMERIC PSI
-# ============================================================
-
-def calculate_psi_numeric(
-    expected,
-    actual,
-    feature,
-    bins=10,
-    eps=0.0001
-):
-
-    expected_data = (
-        pd.to_numeric(expected[feature], errors="coerce")
-        .replace([np.inf, -np.inf], np.nan)
-        .dropna()
-    )
-
-    actual_data = (
-        pd.to_numeric(actual[feature], errors="coerce")
-        .replace([np.inf, -np.inf], np.nan)
-        .dropna()
-    )
-
-    if expected_data.empty or actual_data.empty:
-        return np.nan
-
-    if expected_data.nunique() < 2:
-        return np.nan
-
-    try:
-
-        _, bin_edges = pd.qcut(
-            expected_data,
-            q=bins,
-            retbins=True,
-            duplicates="drop"
-        )
-
-        bin_edges = np.unique(bin_edges)
-
-        if len(bin_edges) < 2:
-            return np.nan
-
-        bin_edges[0] = -np.inf
-        bin_edges[-1] = np.inf
-
-        expected_bins = pd.cut(
-            expected_data,
-            bins=bin_edges,
-            include_lowest=True
-        )
-
-        actual_bins = pd.cut(
-            actual_data,
-            bins=bin_edges,
-            include_lowest=True
-        )
-
-        expected_pct = expected_bins.value_counts(
-            normalize=True,
-            sort=False
-        )
-
-        actual_pct = actual_bins.value_counts(
-            normalize=True,
-            sort=False
-        )
-
-        all_bins = expected_pct.index.union(actual_pct.index)
-
-        expected_pct = expected_pct.reindex(
-            all_bins,
-            fill_value=0
-        )
-
-        actual_pct = actual_pct.reindex(
-            all_bins,
-            fill_value=0
-        )
-
-        expected_pct = expected_pct.clip(lower=eps)
-        actual_pct = actual_pct.clip(lower=eps)
-
-        psi_component = (
-            (actual_pct - expected_pct)
-            * np.log(actual_pct / expected_pct)
-        )
-
-        return float(psi_component.sum())
-
-    except (ValueError, TypeError, KeyError):
-        return np.nan
-
-
-# ============================================================
-# 3. CATEGORICAL PSI
-# ============================================================
-
-def calculate_psi_categorical(
-    expected,
-    actual,
-    feature,
-    eps=0.0001
-):
-
-    expected_data = (
-        expected[feature]
-        .astype("object")
-        .where(expected[feature].notna(), "MISSING")
-        .astype(str)
-    )
-
-    actual_data = (
-        actual[feature]
-        .astype("object")
-        .where(actual[feature].notna(), "MISSING")
-        .astype(str)
-    )
-
-    if expected_data.empty or actual_data.empty:
-        return np.nan
-
-    levels = sorted(
-        set(expected_data.unique()).union(
-            set(actual_data.unique())
-        )
-    )
-
-    expected_pct = (
-        expected_data
-        .value_counts(normalize=True)
-        .reindex(levels, fill_value=0)
-        .clip(lower=eps)
-    )
-
-    actual_pct = (
-        actual_data
-        .value_counts(normalize=True)
-        .reindex(levels, fill_value=0)
-        .clip(lower=eps)
-    )
-
-    psi_component = (
-        (actual_pct - expected_pct)
-        * np.log(actual_pct / expected_pct)
-    )
-
-    return float(psi_component.sum())
-
-
-# ============================================================
-# 4. RUN PSI FOR ALL FEATURES
-# ============================================================
-
-def run_psi_for_model(
-    expected,
-    actual,
-    model_name,
-    numeric_cols=None,
-    categorical_cols=None,
-    bins=10
-):
-
-    numeric_cols = numeric_cols or []
-    categorical_cols = categorical_cols or []
-
-    results = []
-
-    for col in numeric_cols:
-
-        if col not in expected.columns or col not in actual.columns:
-            print(f"Skipping missing numeric column: {col}")
-            continue
-
-        psi_value = calculate_psi_numeric(
-            expected=expected,
-            actual=actual,
-            feature=col,
-            bins=bins
-        )
-
-        results.append({
-            "model": model_name,
-            "feature": col,
-            "type": "numeric",
-            "psi": psi_value,
-            "interpretation": psi_interpretation(psi_value)
-        })
-
-    for col in categorical_cols:
-
-        if col not in expected.columns or col not in actual.columns:
-            print(f"Skipping missing categorical column: {col}")
-            continue
-
-        psi_value = calculate_psi_categorical(
-            expected=expected,
-            actual=actual,
-            feature=col
-        )
-
-        results.append({
-            "model": model_name,
-            "feature": col,
-            "type": "categorical",
-            "psi": psi_value,
-            "interpretation": psi_interpretation(psi_value)
-        })
-
-    return pd.DataFrame(results)
-
-
-# ============================================================
-# 5. CREATE PERIOD FROM DATE COLUMN
-# ============================================================
-
-def create_period_from_date(
-    df,
-    date_col,
-    output_col="psi_period"
-):
-    """
-    Creates:
-        2021
-        2022_Q1
-        2022_Q2
-        2022_Q3
-        2022_Q4
-
-    All 2021 records are combined into one annual period.
-    All 2022 records are divided by quarter.
-    """
-
-    data = df.copy()
-
-    if date_col not in data.columns:
-        raise KeyError(
-            f"Date column '{date_col}' does not exist."
-        )
-
-    data[date_col] = pd.to_datetime(
-        data[date_col],
-        errors="coerce"
-    )
-
-    data["_psi_year"] = data[date_col].dt.year
-    data["_psi_quarter"] = data[date_col].dt.quarter
-
-    data[output_col] = pd.NA
-
-    # Full year 2021
-    mask_2021 = data["_psi_year"] == 2021
-
-    data.loc[
-        mask_2021,
-        output_col
-    ] = "2021"
-
-    # Quarterly periods for 2022
-    mask_2022 = data["_psi_year"] == 2022
-
-    data.loc[
-        mask_2022,
-        output_col
-    ] = (
-        "2022_Q"
-        + data.loc[
-            mask_2022,
-            "_psi_quarter"
-        ].astype("Int64").astype(str)
-    )
-
-    return data
-
-
-# ============================================================
-# 6. ALTERNATIVE: CREATE PERIOD FROM YEAR AND QUARTER COLUMNS
-# ============================================================
-
-def create_period_from_year_quarter(
-    df,
-    year_col,
-    quarter_col,
-    output_col="psi_period"
-):
-
-    data = df.copy()
-
-    data["_psi_year"] = pd.to_numeric(
-        data[year_col],
-        errors="coerce"
-    ).astype("Int64")
-
-    quarter_clean = (
-        data[quarter_col]
-        .astype(str)
-        .str.upper()
-        .str.strip()
-        .str.replace("QUARTER", "", regex=False)
-        .str.replace("Q", "", regex=False)
-        .str.replace(".0", "", regex=False)
-    )
-
-    data["_psi_quarter"] = pd.to_numeric(
-        quarter_clean,
-        errors="coerce"
-    ).astype("Int64")
-
-    data[output_col] = pd.NA
-
-    # Full year 2021
-    mask_2021 = data["_psi_year"] == 2021
-
-    data.loc[
-        mask_2021,
-        output_col
-    ] = "2021"
-
-    # Quarterly periods for 2022
-    mask_2022 = data["_psi_year"] == 2022
-
-    data.loc[
-        mask_2022,
-        output_col
-    ] = (
-        "2022_Q"
-        + data.loc[
-            mask_2022,
-            "_psi_quarter"
-        ].astype(str)
-    )
-
-    return data
-
-
-# ============================================================
-# 7. CALCULATE PREVIOUS-PERIOD PSI
-# ============================================================
-
-def calculate_previous_period_psi(
+def psi_by_period(
     df,
     period_col,
     periods,
-    numeric_cols=None,
-    categorical_cols=None,
-    model_name="model",
-    bins=10,
-    multiply_by_100=True
+    numeric_cols,
+    categorical_cols
 ):
-
-    numeric_cols = numeric_cols or []
-    categorical_cols = categorical_cols or []
-
-    if period_col not in df.columns:
-        raise KeyError(
-            f"Period column '{period_col}' does not exist."
-        )
-
-    # Standardize period values
-    data = df.copy()
-
-    data[period_col] = (
-        data[period_col]
-        .astype("string")
-        .str.strip()
-        .str.upper()
-    )
-
-    print("Available period counts:")
-
-    print(
-        data[period_col]
-        .value_counts(dropna=False)
-        .sort_index()
-    )
-
-    all_results = []
+    results = []
 
     for i in range(1, len(periods)):
-
         previous_period = periods[i - 1]
         current_period = periods[i]
 
-        expected = data[
-            data[period_col] == previous_period
-        ].copy()
-
-        actual = data[
-            data[period_col] == current_period
-        ].copy()
-
-        print(
-            f"\n{previous_period} rows: {len(expected):,}"
-        )
-
-        print(
-            f"{current_period} rows: {len(actual):,}"
-        )
+        expected = df[df[period_col] == previous_period]
+        actual = df[df[period_col] == current_period]
 
         if expected.empty or actual.empty:
-
-            print(
-                f"Skipping {previous_period} vs "
-                f"{current_period}: missing data."
-            )
-
+            print(f"Missing data: {previous_period} vs {current_period}")
             continue
 
-        period_result = run_psi_for_model(
+        temp = run_psi_for_model(
             expected=expected,
             actual=actual,
-            model_name=model_name,
+            model_name="funded_model",
             numeric_cols=numeric_cols,
-            categorical_cols=categorical_cols,
-            bins=bins
+            categorical_cols=categorical_cols
         )
 
-        if period_result.empty:
-            continue
+        temp["period"] = current_period
+        results.append(temp)
 
-        period_result["previous_period"] = previous_period
-        period_result["period"] = current_period
+    result = pd.concat(results, ignore_index=True)
 
-        period_result["comparison"] = (
-            f"{previous_period}_vs_{current_period}"
-        )
-
-        if multiply_by_100:
-            period_result["psi_pct"] = (
-                period_result["psi"] * 100
-            )
-        else:
-            period_result["psi_pct"] = period_result["psi"]
-
-        all_results.append(period_result)
-
-    if not all_results:
-        return pd.DataFrame(), pd.DataFrame()
-
-    detailed_df = pd.concat(
-        all_results,
-        ignore_index=True
-    )
-
-    wide_df = detailed_df.pivot_table(
-        index=["feature", "type"],
+    # PSI values with periods as columns
+    psi_wide = result.pivot(
+        index="feature",
         columns="period",
-        values="psi_pct",
-        aggfunc="first"
+        values="psi"
     ).reset_index()
 
-    wide_df.columns.name = None
+    # Percentage change in PSI value
+    period_columns = [
+        col for col in periods
+        if col in psi_wide.columns
+    ]
 
-    # Insert 2021 as the reference column
-    wide_df.insert(
-        loc=2,
-        column="2021",
-        value=np.nan
+    psi_pct_diff = psi_wide.copy()
+
+    psi_pct_diff[period_columns] = (
+        psi_pct_diff[period_columns]
+        .pct_change(axis=1)
+        .mul(100)
     )
 
-    requested_columns = [
-        "feature",
-        "type",
-        "2021",
-        "2022_Q1",
-        "2022_Q2",
-        "2022_Q3",
-        "2022_Q4"
-    ]
+    return psi_wide, psi_pct_diff
 
-    existing_columns = [
-        col
-        for col in requested_columns
-        if col in wide_df.columns
-    ]
+=============================
 
-    wide_df = wide_df[existing_columns]
+df["DATE"] = pd.to_datetime(df["DATE"])
 
-    return detailed_df, wide_df
-
-
-# ============================================================
-# 8. DEFINE FEATURES
-# ============================================================
-
-numeric_cols = [
-    "CRD_SCORE_bin",
-    "CRD_OPEN_TRADE_TU",
-    "CRD_PUBLIC_DEROG_TU"
-    # Add other numeric features
-]
-
-categorical_cols = [
-    # "STATE",
-    # "PRODUCT_TYPE"
-    # Add categorical features
-]
-
-
-# ============================================================
-# 9A. USE THIS WHEN YOU HAVE A DATE COLUMN
-# ============================================================
-
-# Replace APPLICATION_DATE with your actual date column.
-
-df_psi = create_period_from_date(
-    df=df,
-    date_col="APPLICATION_DATE",
-    output_col="psi_period"
+df["period"] = np.where(
+    df["DATE"].dt.year == 2021,
+    "2021",
+    df["DATE"].dt.year.astype(str)
+    + "_Q"
+    + df["DATE"].dt.quarter.astype(str)
 )
 
-
-# ============================================================
-# 9B. USE THIS INSTEAD IF YOU HAVE YEAR AND QUARTER COLUMNS
-# ============================================================
-
-# Comment section 9A and uncomment this:
-#
-# df_psi = create_period_from_year_quarter(
-#     df=df,
-#     year_col="YEAR",
-#     quarter_col="QUARTER",
-#     output_col="psi_period"
-# )
-
-
-# ============================================================
-# 10. CHECK PERIODS BEFORE CALCULATING PSI
-# ============================================================
-
-print(
-    df_psi["psi_period"]
-    .value_counts(dropna=False)
-    .sort_index()
-)
-
-
-# The result must contain:
-#
-# 2021
-# 2022_Q1
-# 2022_Q2
-# 2022_Q3
-# 2022_Q4
-
-
-# ============================================================
-# 11. PERIOD ORDER
-# ============================================================
+===================================
 
 periods = [
     "2021",
@@ -577,27 +76,13 @@ periods = [
     "2022_Q4"
 ]
 
-
-# ============================================================
-# 12. RUN PSI
-# ============================================================
-
-psi_detailed, psi_wide = calculate_previous_period_psi(
-    df=df_psi,
-    period_col="psi_period",
+psi_values, psi_pct_diff = psi_by_period(
+    df=df,
+    period_col="period",
     periods=periods,
     numeric_cols=numeric_cols,
-    categorical_cols=categorical_cols,
-    model_name="funded_model",
-    bins=10,
-    multiply_by_100=True
+    categorical_cols=categorical_cols
 )
 
-
-# ============================================================
-# 13. DISPLAY RESULTS
-# ============================================================
-
-display(psi_wide)
-
-display(psi_detailed)
+display(psi_values)
+display(psi_pct_diff)
