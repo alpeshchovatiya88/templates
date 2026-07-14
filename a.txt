@@ -1,37 +1,43 @@
-# Always start from the original dataframe
+import numpy as np
+import pandas as pd
+
+baseline_year = 2021
+date_col = "EFFECT_SID"   # Your YYYYMM column
+
 df_psi = df.copy()
 
-# Clean YYYYMM, including values such as 202201.0
-df_psi["YYYYMM"] = (
-    df_psi["YYYYMM"]
+# Clean YYYYMM
+df_psi[date_col] = (
+    df_psi[date_col]
     .astype(str)
     .str.replace(".0", "", regex=False)
     .str.strip()
 )
 
+# Extract year and month
 df_psi["year"] = pd.to_numeric(
-    df_psi["YYYYMM"].str[:4],
+    df_psi[date_col].str[:4],
     errors="coerce"
 )
 
 df_psi["month"] = pd.to_numeric(
-    df_psi["YYYYMM"].str[4:6],
+    df_psi[date_col].str[4:6],
     errors="coerce"
 )
 
 # Keep baseline year and later only
-baseline_year = 2021
-
 df_psi = df_psi[
     (df_psi["year"] >= baseline_year)
     & (df_psi["month"].between(1, 12))
 ].copy()
 
+# Create quarter
 df_psi["quarter"] = (
     ((df_psi["month"] - 1) // 3) + 1
 ).astype(int)
 
-# Full-year baseline; quarterly periods afterward
+# 2021 is full-year baseline.
+# Later years use their actual year and quarter.
 df_psi["period"] = np.where(
     df_psi["year"] == baseline_year,
     str(baseline_year),
@@ -42,55 +48,46 @@ df_psi["period"] = np.where(
     )
 )
 
-# Verify that records are assigned correctly
+=============================================
+
 print(
-    df_psi.groupby("period")
-    .size()
+    df_psi["period"]
+    .value_counts()
     .sort_index()
 )
-=================================================
+
+===================================\
+
+display(
+    df_psi.loc[
+        df_psi["period"] == "2022_Q1",
+        [date_col, "year", "month", "quarter", "period"]
+    ]
+    .drop_duplicates()
+    .sort_values(date_col)
+)
+
+============================================
 
 periods = [str(baseline_year)]
 
 future_periods = (
-    df_psi.loc[df_psi["year"] > baseline_year, "period"]
-    .dropna()
-    .unique()
+    df_psi.loc[
+        df_psi["year"] > baseline_year,
+        "period"
+    ]
+    .drop_duplicates()
     .tolist()
 )
 
 future_periods = sorted(
     future_periods,
-    key=lambda x: (
-        int(x.split("_Q")[0]),
-        int(x.split("_Q")[1])
+    key=lambda p: (
+        int(p.split("_Q")[0]),
+        int(p.split("_Q")[1])
     )
 )
 
 periods += future_periods
 
 print(periods)
-
-====================================
-
-psi_values, psi_pct_diff = psi_by_period(
-    df=df_psi,
-    period_col="period",
-    periods=periods,
-    numeric_cols=numeric_cols,
-    categorical_cols=categorical_cols
-)
-
-display(psi_values)
-display(psi_pct_diff) 
-
-=================================================
-
-print(df_psi["period"].value_counts().sort_index())
-
-print(
-    df_psi.loc[
-        df_psi["period"].isin(["2021", "2022_Q1"]),
-        ["YYYYMM", "year", "month", "quarter", "period"]
-    ].drop_duplicates().sort_values("YYYYMM")
-)
