@@ -1,52 +1,78 @@
-# Copy original dataframe
-df_year = df.copy()
+df_psi = df.copy()
 
-# Convert YYYYMM to string
-df_year["EFFECT_SID"] = (
-    df_year["EFFECT_SID"]
-    .astype(str)
-    .str.replace(".0", "", regex=False)
-    .str.strip()
+df_psi["EFFECT_SID"] = df_psi["EFFECT_SID"].astype(str)
+
+df_psi["year"] = df_psi["EFFECT_SID"].str[:4].astype(int)
+df_psi["month"] = df_psi["EFFECT_SID"].str[4:6].astype(int)
+
+df_psi["quarter"] = ((df_psi["month"] - 1) // 3 + 1)
+
+df_psi["period"] = (
+    df_psi["year"].astype(str)
+    + "_Q"
+    + df_psi["quarter"].astype(str)
 )
 
-# Extract year
-df_year["year"] = pd.to_numeric(
-    df_year["EFFECT_SID"].str[:4],
-    errors="coerce"
-)
+===================================================================
 
-# Keep only required years
-start_year = 2015
-end_year = 2023
+def psi_yoy_quarter(
+    df,
+    period_col,
+    numeric_cols,
+    categorical_cols,
+    start_year,
+    end_year
+):
 
-df_year = df_year[
-    df_year["year"].between(start_year, end_year)
-].copy()
+    results = []
 
-# Period will be year only
-df_year["period"] = (
-    df_year["year"]
-    .astype(int)
-    .astype(str)
-)
+    for year in range(start_year + 1, end_year + 1):
 
-# Create ordered year list
-periods = [
-    str(year)
-    for year in range(start_year, end_year + 1)
-    if year in df_year["year"].unique()
-]
+        for q in [1, 2, 3, 4]:
 
-print(periods)
+            previous_period = f"{year-1}_Q{q}"
+            current_period = f"{year}_Q{q}"
 
-===========================
-psi_values_yearly, psi_pct_diff_yearly = psi_by_period(
-    df=df_year,
+            expected = df[df[period_col] == previous_period]
+            actual = df[df[period_col] == current_period]
+
+            if expected.empty or actual.empty:
+                print(
+                    f"Skipping {previous_period} vs {current_period}"
+                )
+                continue
+
+            temp = run_psi_for_model(
+                expected=expected,
+                actual=actual,
+                model_name="funded_model",
+                numeric_cols=numeric_cols,
+                categorical_cols=categorical_cols
+            )
+
+            temp["period"] = current_period
+
+            results.append(temp)
+
+    result = pd.concat(results, ignore_index=True)
+
+    psi_wide = result.pivot(
+        index="feature",
+        columns="period",
+        values="psi"
+    ).reset_index()
+
+    return result, psi_wide
+
+===============================================
+
+psi_detailed, psi_wide = psi_yoy_quarter(
+    df=df_psi,
     period_col="period",
-    periods=periods,
     numeric_cols=numeric_cols,
-    categorical_cols=categorical_cols
+    categorical_cols=categorical_cols,
+    start_year=2021,
+    end_year=2023
 )
 
-display(psi_values_yearly)
-display(psi_pct_diff_yearly)
+display(psi_wide)
