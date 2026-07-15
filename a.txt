@@ -1,3 +1,7 @@
+# Smart Mortgage Insurance (SMI3.0)
+
+## Repository Structure
+
 ```text
 Smart-Mortgage-Insurance/
 │
@@ -19,120 +23,50 @@ Smart-Mortgage-Insurance/
 └── README.md
 ```
 
-# Exploratory Data Analysis (EDA)
-
-## Overview
-
-This folder contains the exploratory data analysis performed for the **Smart Mortgage Insurance (SMI)** project.
-
-The objective of this analysis is to understand the characteristics of mortgage loans, identify key risk drivers, assess feature relationships, detect potential bias, and generate insights that support predictive model development.
-
 ---
 
-## Analysis Performed
+### Exploratory Data Analysis
 
-### 1. Initial Exploratory Data Analysis
-**File:** `smi3_EDA.html`
+This phase focuses on understanding the mortgage insurance dataset through:
 
-This report provides:
-
-- Dataset overview
 - Data quality assessment
 - Missing value analysis
-- Distribution analysis
-- Summary statistics
-- Feature-level exploration
-- Preliminary business insights
+- Feature distribution analysis
+- Bad rate analysis
+- Feature correlation analysis
+- Bias and fairness assessment
+- Business insight generation
+
+### Model Development and Evaluation
+
+This phase focuses on building and validating predictive models through:
+
+- Feature engineering
+- Feature selection
+- Model training
+- Hyperparameter tuning
+- Cross-validation
+- Model evaluation and comparison
 
 ---
 
-### 2. Bad Rate Summary Analysis
-**File:** `smi3_BadRate_summary.ipynb`
+## Key Deliverables
 
-This notebook evaluates:
+### Exploratory Data Analysis
 
-- Bad rate distribution across different segments
-- Risk patterns within borrower and loan characteristics
-- Identification of high-risk groups
-- Business interpretation of bad-rate trends
+- Dataset profiling
+- Risk segmentation analysis
+- Bad rate summaries
+- Correlation analysis
+- Bias assessment reports
+- Visualizations and dashboards
 
----
+### Model Development and Evaluation
 
-### 3. Potential Bias Feature Analysis
-**File:** `smi3_bias_feature_analysis_funded.ipynb`
-
-This notebook investigates:
-
-- Potentially sensitive variables
-- Feature bias assessment
-- Fairness considerations
-- Correlation between demographic and risk-related variables
-- Identification of features requiring additional governance review
+- Trained machine learning models
+- Model performance reports
+- Validation results
 
 ---
 
-### 4. Feature Correlation Analysis
-**File:** `smi3_feature_correlation_funded.ipynb`
 
-This notebook analyzes:
-
-- Relationships among predictor variables
-- Multicollinearity detection
-- Correlation heatmaps
-- Feature dependency analysis
-- Candidate feature selection considerations
-
----
-
-## Key Objectives
-
-The EDA phase supports:
-
-- Understanding mortgage portfolio characteristics
-- Identifying data quality issues
-- Detecting risk-driving variables
-- Evaluating potential bias in features
-- Preparing inputs for machine learning models
-- Supporting feature engineering decisions
-
----
-
-## Tools and Technologies
-
-- Python
-- Pandas
-- NumPy
-- Matplotlib
-- Seaborn
-- Plotly
-- Jupyter Notebook
-
----
-
-## Outputs
-
-The outputs from this folder include:
-
-- Data quality insights
-- Statistical summaries
-- Risk segment analysis
-- Correlation studies
-- Bias assessment findings
-- Visualizations and reports
-
----
-
-## Next Steps
-
-Insights generated from this analysis are used in the **Model Development and Evaluation** phase to:
-
-1. Select relevant features.
-2. Engineer new predictive variables.
-3. Train mortgage insurance risk models.
-4. Evaluate model performance and fairness.
-
----
-
-## Author
-
-Smart Mortgage Insurance Project Team
