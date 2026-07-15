@@ -12,12 +12,9 @@ Smart-Mortgage-Insurance/
 │   └── README.md
 │
 ├── Model Development and Evaluation/
-│   ├── data_preprocessing/
 │   ├── feature_engineering/
 │   ├── model_training/
 │   ├── model_evaluation/
-│   ├── saved_models/
-│   └── README.md
 │
 ├── requirements.txt
 └── README.md
