@@ -1,94 +1,112 @@
-# Summary dataframe by BOOKYEAR
-df_bookyear = (
-    df.groupby("BOOKYEAR")
+df["decile_8020_num"] = (
+    df["DECILE_8020"]
+    .str.extract(r"(\d+)")
+    .astype(int)
+)
+
+df["decile_ts_num"] = (
+    df["DECILE_ts"]
+    .str.extract(r"(\d+)")
+    .astype(int)
+)
+================
+swap_matrix = pd.crosstab(
+    df["decile_8020_num"],
+    df["decile_ts_num"],
+    margins=True
+)
+
+swap_matrix
+
+=======================
+
+df["decile_change"] = (
+    df["decile_ts_num"] - df["decile_8020_num"]
+)
+
+df["abs_decile_change"] = df["decile_change"].abs()
+
+===================
+
+import numpy as np
+
+df["swap_type"] = np.select(
+    [
+        df["decile_change"] == 0,
+        df["decile_change"] > 0,
+        df["decile_change"] < 0
+    ],
+    [
+        "No Swap",
+        "Moved to Higher Decile",
+        "Moved to Lower Decile"
+    ]
+)
+
+===============
+df["swap_type"].value_counts()
+
+======
+df["swap_type"].value_counts(normalize=True).mul(100)
+
+===============
+
+cutoff = 10
+
+df["decision_8020"] = np.where(
+    df["decile_8020_num"] <= cutoff,
+    "A",
+    "B"
+)
+
+df["decision_ts"] = np.where(
+    df["decile_ts_num"] <= cutoff,
+    "A",
+    "B"
+)
+
+====================
+df["swap_set"] = np.select(
+    [
+        (df["decision_8020"] == "A") &
+        (df["decision_ts"] == "A"),
+
+        (df["decision_8020"] == "A") &
+        (df["decision_ts"] == "B"),
+
+        (df["decision_8020"] == "B") &
+        (df["decision_ts"] == "A"),
+
+        (df["decision_8020"] == "B") &
+        (df["decision_ts"] == "B")
+    ],
+    [
+        "A -> A",
+        "A -> B",
+        "B -> A",
+        "B -> B"
+    ]
+)
+
+=============================
+pd.crosstab(
+    df["decision_8020"],
+    df["decision_ts"],
+    margins=True
+)
+
+==========================
+swap_analysis = (
+    df.groupby("swap_set")
       .agg(
-          TOTAL_FILES=("TARGET", "size"),
-          TOTAL_BAD=("TARGET", "sum"),
-          TOTAL_DELQ=("DELQ_BAD", "sum"),
-          TOTAL_CLAIM=("CLAIM_BAD", "sum")
+          applications=("APPLICATION_NUMBER", "count"),
+          bads=("BAD_FLAG", "sum"),
+          bad_rate=("BAD_FLAG", "mean"),
+          avg_8020_score=("SMI3_LR_8020", "mean"),
+          avg_ts_score=("SMI3_LR_ts", "mean")
       )
       .reset_index()
 )
 
-# Rates out of total files
-df_bookyear["BAD_RATE"] = (
-    df_bookyear["TOTAL_BAD"] / df_bookyear["TOTAL_FILES"]
-)
-
-df_bookyear["DELQ_RATE"] = (
-    df_bookyear["TOTAL_DELQ"] / df_bookyear["TOTAL_FILES"]
-)
-
-df_bookyear["CLAIM_RATE"] = (
-    df_bookyear["TOTAL_CLAIM"] / df_bookyear["TOTAL_FILES"]
-)
-
-df_bookyear
-
-
-==================================================================
-
-import numpy as np
-import matplotlib.pyplot as plt
-
-plot_df = df_bookyear.sort_values("BOOKYEAR").copy()
-
-x = np.arange(len(plot_df))
-width = 0.35
-
-fig, ax = plt.subplots(figsize=(14, 7))
-
-bars1 = ax.bar(
-    x - width/2,
-    plot_df["DELQ_RATE"],
-    width,
-    label="Delq_Only"
-)
-
-bars2 = ax.bar(
-    x + width/2,
-    plot_df["CLAIM_RATE"],
-    width,
-    label="Delq_Claim"
-)
-
-ax.set_xlabel("BOOKYEAR")
-ax.set_ylabel("Rate (%)")
-ax.set_title("Delinquency vs Claim Rate by BOOKYEAR")
-
-ax.set_xticks(x)
-ax.set_xticklabels(plot_df["BOOKYEAR"], rotation=45)
-
-ax.legend()
-
-for bar, rate, count in zip(
-    bars1,
-    plot_df["DELQ_RATE"],
-    plot_df["TOTAL_DELQ"]
-):
-    ax.text(
-        bar.get_x() + bar.get_width()/2,
-        bar.get_height(),
-        f"{rate:.2f}%\n(n={count:,})",
-        ha="center",
-        va="bottom",
-        fontsize=8
-    )
-
-for bar, rate, count in zip(
-    bars2,
-    plot_df["CLAIM_RATE"],
-    plot_df["TOTAL_CLAIM"]
-):
-    ax.text(
-        bar.get_x() + bar.get_width()/2,
-        bar.get_height(),
-        f"{rate:.2f}%\n(n={count:,})",
-        ha="center",
-        va="bottom",
-        fontsize=8
-    )
-
-plt.tight_layout()
-plt.show()
+swap_analysis
 
