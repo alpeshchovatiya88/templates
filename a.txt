@@ -28,3 +28,67 @@ df_bookyear
 
 ==================================================================
 
+import numpy as np
+import matplotlib.pyplot as plt
+
+plot_df = df_bookyear.sort_values("BOOKYEAR").copy()
+
+x = np.arange(len(plot_df))
+width = 0.35
+
+fig, ax = plt.subplots(figsize=(14, 7))
+
+bars1 = ax.bar(
+    x - width/2,
+    plot_df["DELQ_RATE"],
+    width,
+    label="Delq_Only"
+)
+
+bars2 = ax.bar(
+    x + width/2,
+    plot_df["CLAIM_RATE"],
+    width,
+    label="Delq_Claim"
+)
+
+ax.set_xlabel("BOOKYEAR")
+ax.set_ylabel("Rate (%)")
+ax.set_title("Delinquency vs Claim Rate by BOOKYEAR")
+
+ax.set_xticks(x)
+ax.set_xticklabels(plot_df["BOOKYEAR"], rotation=45)
+
+ax.legend()
+
+for bar, rate, count in zip(
+    bars1,
+    plot_df["DELQ_RATE"],
+    plot_df["TOTAL_DELQ"]
+):
+    ax.text(
+        bar.get_x() + bar.get_width()/2,
+        bar.get_height(),
+        f"{rate:.2f}%\n(n={count:,})",
+        ha="center",
+        va="bottom",
+        fontsize=8
+    )
+
+for bar, rate, count in zip(
+    bars2,
+    plot_df["CLAIM_RATE"],
+    plot_df["TOTAL_CLAIM"]
+):
+    ax.text(
+        bar.get_x() + bar.get_width()/2,
+        bar.get_height(),
+        f"{rate:.2f}%\n(n={count:,})",
+        ha="center",
+        va="bottom",
+        fontsize=8
+    )
+
+plt.tight_layout()
+plt.show()
+
