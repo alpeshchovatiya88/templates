@@ -1,81 +1,30 @@
-import matplotlib.pyplot as plt
-
-plt.figure(figsize=(12, 6))
-
-# TS lines
-plt.plot(
-    df['BOOKYEAR'],
-    df['SMI3_LR_TS'],
-    marker='o',
-    linewidth=2,
-    label='SMI3 LR - TS'
+# Summary dataframe by BOOKYEAR
+df_bookyear = (
+    df.groupby("BOOKYEAR")
+      .agg(
+          TOTAL_FILES=("TARGET", "size"),
+          TOTAL_BAD=("TARGET", "sum"),
+          TOTAL_DELQ=("DELQ_BAD", "sum"),
+          TOTAL_CLAIM=("CLAIM_BAD", "sum")
+      )
+      .reset_index()
 )
 
-plt.plot(
-    df['BOOKYEAR'],
-    df['ACTUAL_LR_TS'],
-    marker='o',
-    linewidth=2,
-    label='Actual LR - TS'
+# Rates out of total files
+df_bookyear["BAD_RATE"] = (
+    df_bookyear["TOTAL_BAD"] / df_bookyear["TOTAL_FILES"]
 )
 
-# 80/20 lines
-plt.plot(
-    df['BOOKYEAR'],
-    df['SMI3_LR_8020'],
-    marker='s',
-    linestyle='--',
-    linewidth=2,
-    label='SMI3 LR - 80/20'
+df_bookyear["DELQ_RATE"] = (
+    df_bookyear["TOTAL_DELQ"] / df_bookyear["TOTAL_FILES"]
 )
 
-plt.plot(
-    df['BOOKYEAR'],
-    df['ACTUAL_LR_8020'],
-    marker='s',
-    linestyle='--',
-    linewidth=2,
-    label='Actual LR - 80/20'
+df_bookyear["CLAIM_RATE"] = (
+    df_bookyear["TOTAL_CLAIM"] / df_bookyear["TOTAL_FILES"]
 )
 
-# Formatting
-plt.xlabel('Book Year')
-plt.ylabel('Loss Ratio (LR)')
-plt.title('Actual LR vs SMI3 LR by Book Year')
+df_bookyear
 
-plt.xticks(df['BOOKYEAR'])
-plt.legend()
-plt.grid(True, alpha=0.3)
 
-plt.tight_layout()
-plt.show()
+==================================================================
 
----------------------------------------------------------
-
-Yes — analyzing the screenshot, the table compares two sets of SMI3 Loss Ratio (LR) estimates against Actual LR across book years 2009–2021:
-
-TS comparison: SMI3_LR_TS vs ACTUAL_LR_TS
-80/20 comparison: SMI3_LR_8020 vs ACTUAL_LR_8020
-What the data shows
-
-The strongest pattern is that SMI3 generally overestimates the Actual LR, especially for the TS series.
-
-For TS, the gap is very large in the early years. For example, in 2009, SMI3 LR is about 46.7% compared with an Actual LR of only 19.4%, a difference of roughly 27.3 percentage points. The gap peaks around 2010 at 30.3 points and remains substantial through 2013.
-
-The gap then narrows through 2014–2017, but interestingly widens again in 2018 and 2019. In 2019, for example, SMI3 TS is about 23.5%, while Actual TS is only 0.65%, creating a gap of approximately 22.9 points.
-
-80/20 performs closer to Actual
-
-The 80/20 approach appears substantially closer to Actual LR than TS for most book years.
-
-In the early years, it still overestimates Actual—for example, 2009 is 33.2% SMI3 versus 19.5% Actual—but the differences are generally smaller than under TS.
-
-The fit becomes particularly close in 2017–2019. In 2019, SMI3 80/20 is about 3.42% versus Actual at 0.94%, only about a 2.48 percentage-point difference.
-
-There is, however, some deterioration in 2021, where the 80/20 difference rises again to about 7.13 points.
-
-Overall interpretation
-
-If the purpose of this analysis is to assess which SMI3 methodology better approximates the Actual LR, the screenshot strongly suggests that SMI3 80/20 is the better-performing estimate.
-
-A 4-line chart will make this especially clear: I would expect the two 80/20 lines (SMI3_LR_8020 and ACTUAL_LR_8020) to sit considerably closer together, particularly in recent book years, while the TS SMI3 line remains well above Actual TS in many years.
