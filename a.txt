@@ -1,89 +1,402 @@
-# HPI information from 2009-2015
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+
+
+# =========================================================
+# 1. COPY MAIN ANALYSIS DATA
+#    df_new = your 2009-2015 application population
+#    df_2016_2025 = later data used only for HPI lookup
+# =========================================================
+
+df_new = df_new.copy()
+df_2016_2025 = df_2016_2025.copy()
+
+
+# =========================================================
+# 2. CLEAN KEY COLUMNS
+# =========================================================
+
+# Economic region
+df_new["ECON_REGION"] = (
+    df_new["ECON_REGION"]
+    .astype(str)
+    .str.strip()
+)
+
+df_2016_2025["ECON_REGION"] = (
+    df_2016_2025["ECON_REGION"]
+    .astype(str)
+    .str.strip()
+)
+
+# EFFECT_SID should be YYYYMM
+df_new["EFFECT_SID"] = pd.to_numeric(
+    df_new["EFFECT_SID"],
+    errors="coerce"
+).astype("Int64")
+
+df_2016_2025["EFFECT_SID"] = pd.to_numeric(
+    df_2016_2025["EFFECT_SID"],
+    errors="coerce"
+).astype("Int64")
+
+# HPI numeric
+df_new["HPI"] = pd.to_numeric(
+    df_new["HPI"],
+    errors="coerce"
+)
+
+df_2016_2025["HPI"] = pd.to_numeric(
+    df_2016_2025["HPI"],
+    errors="coerce"
+)
+
+
+# =========================================================
+# 3. BUILD COMPLETE HPI HISTORY: 2009-2025
+# =========================================================
+
 hpi_old = df_new[
     ["ECON_REGION", "EFFECT_SID", "HPI"]
 ].copy()
 
-# HPI information from 2016-2025
 hpi_new = df_2016_2025[
     ["ECON_REGION", "EFFECT_SID", "HPI"]
 ].copy()
 
-# Combine ONLY for building HPI history
 hpi_all = pd.concat(
     [hpi_old, hpi_new],
     ignore_index=True
 )
 
-# One HPI per economic region/month
-hpi_all = hpi_all.drop_duplicates(
-    ["ECON_REGION", "EFFECT_SID"]
+# Remove missing lookup keys
+hpi_all = hpi_all.dropna(
+    subset=["ECON_REGION", "EFFECT_SID", "HPI"]
 )
 
-===================================================
-
+# Verify one HPI per ECON_REGION + month
 check = (
     hpi_all
     .groupby(["ECON_REGION", "EFFECT_SID"])["HPI"]
     .nunique()
 )
 
+print("Unique HPI counts per region/month:")
 print(check.value_counts())
 
-============================================
+# Optional safety check
+if (check > 1).any():
+    print(
+        "\nWARNING: Some ECON_REGION + EFFECT_SID "
+        "combinations contain more than one HPI."
+    )
 
-hpi_map = hpi_all.set_index(
-    ["ECON_REGION", "EFFECT_SID"]
-)["HPI"]
+# One row per region/month
+hpi_all = (
+    hpi_all
+    .drop_duplicates(
+        subset=["ECON_REGION", "EFFECT_SID"],
+        keep="first"
+    )
+)
 
-=============================================
+print(
+    "\nHPI lookup period:",
+    hpi_all["EFFECT_SID"].min(),
+    "to",
+    hpi_all["EFFECT_SID"].max()
+)
+
+
+# =========================================================
+# 4. CONVERT EVENT DATES
+# =========================================================
+
+df_new["DELQ90_IND_DATE"] = pd.to_datetime(
+    df_new["DELQ90_IND_DATE"],
+    errors="coerce"
+)
+
+df_new["CLAIM_IND_DATE"] = pd.to_datetime(
+    df_new["CLAIM_IND_DATE"],
+    errors="coerce"
+)
+
+
+# =========================================================
+# 5. CREATE EVENT MONTH YYYYMM
+# =========================================================
+
 df_new["DELQ_MONTH"] = (
-    pd.to_datetime(df_new["DELQ90_IND_DATE"], errors="coerce")
+    df_new["DELQ90_IND_DATE"]
     .dt.strftime("%Y%m")
-    .astype(float)
+    .astype("Int64")
 )
 
 df_new["CLAIM_MONTH"] = (
-    pd.to_datetime(df_new["CLAIM_IND_DATE"], errors="coerce")
+    df_new["CLAIM_IND_DATE"]
     .dt.strftime("%Y%m")
-    .astype(float)
+    .astype("Int64")
 )
 
-=======================================
+
+# =========================================================
+# 6. CREATE HPI LOOKUP
+# =========================================================
+
+hpi_map = (
+    hpi_all
+    .set_index(["ECON_REGION", "EFFECT_SID"])["HPI"]
+)
+
+
+# =========================================================
+# 7. FIND HPI AT DELINQUENCY
+# =========================================================
 
 df_new["HPI_AT_DELQ"] = [
     hpi_map.get((region, month), np.nan)
+    if pd.notna(month)
+    else np.nan
+
     for region, month in zip(
         df_new["ECON_REGION"],
         df_new["DELQ_MONTH"]
     )
 ]
 
+
+# =========================================================
+# 8. FIND HPI AT CLAIM
+# =========================================================
+
 df_new["HPI_AT_CLAIM"] = [
     hpi_map.get((region, month), np.nan)
+    if pd.notna(month)
+    else np.nan
+
     for region, month in zip(
         df_new["ECON_REGION"],
         df_new["CLAIM_MONTH"]
     )
 ]
 
-================================
+
+# =========================================================
+# 9. ORIGINAL HPI
+# =========================================================
+
+df_new["HPI_ORIGINAL"] = df_new["HPI"]
+
+
+# =========================================================
+# 10. HPI RATIOS
+# =========================================================
+
 df_new["HPI_RATIO_DELQ"] = (
-    df_new["HPI_AT_DELQ"] / df_new["HPI"]
+    df_new["HPI_AT_DELQ"]
+    / df_new["HPI_ORIGINAL"]
 )
 
 df_new["HPI_RATIO_CLAIM"] = (
-    df_new["HPI_AT_CLAIM"] / df_new["HPI"]
+    df_new["HPI_AT_CLAIM"]
+    / df_new["HPI_ORIGINAL"]
 )
 
-==============================
+
+# =========================================================
+# 11. CLAIM PRIORITY
+#
+# If both DELQ90_IND = 1 and CLAIM_IND = 1,
+# consider it a CLAIM only.
+# =========================================================
+
 df_new.loc[
     df_new["CLAIM_IND"] == 1.0,
-    "HPI_RATIO_DELQ"
+    ["HPI_AT_DELQ", "HPI_RATIO_DELQ"]
 ] = np.nan
 
 
+# =========================================================
+# 12. YEAR BUCKETS
+#
+# ceil:
+# 0-1 year   -> Year 1
+# 1-2 years  -> Year 2
+# etc.
+# =========================================================
+
+df_new["DELQ_YEAR"] = np.ceil(
+    df_new["TIME_TO_DELQ_YR"]
+)
+
+df_new["CLAIM_YEAR"] = np.ceil(
+    df_new["TIME_TO_CLAIM_YR"]
+)
 
 
+# =========================================================
+# 13. CHECK EVENTS BY YEAR
+# =========================================================
+
+print("\nDELQ events by year:")
+
+print(
+    df_new.loc[
+        (df_new["DELQ90_IND"] == 1.0) &
+        (df_new["CLAIM_IND"] != 1.0),
+        "DELQ_YEAR"
+    ]
+    .value_counts()
+    .sort_index()
+)
 
 
+print("\nCLAIM events by year:")
 
+print(
+    df_new.loc[
+        df_new["CLAIM_IND"] == 1.0,
+        "CLAIM_YEAR"
+    ]
+    .value_counts()
+    .sort_index()
+)
+
+
+# =========================================================
+# 14. CHECK HPI COVERAGE BY YEAR
+# =========================================================
+
+check_delq = (
+    df_new.loc[
+        (df_new["DELQ90_IND"] == 1.0) &
+        (df_new["CLAIM_IND"] != 1.0) &
+        (df_new["DELQ_YEAR"].between(1, 17))
+    ]
+    .groupby("DELQ_YEAR")
+    .agg(
+        EVENTS=("DELQ90_IND", "size"),
+        HPI_FOUND=("HPI_AT_DELQ", "count")
+    )
+)
+
+check_delq["HPI_MISSING"] = (
+    check_delq["EVENTS"]
+    - check_delq["HPI_FOUND"]
+)
+
+print("\nDelinquency HPI coverage:")
+print(check_delq)
+
+
+check_claim = (
+    df_new.loc[
+        (df_new["CLAIM_IND"] == 1.0) &
+        (df_new["CLAIM_YEAR"].between(1, 17))
+    ]
+    .groupby("CLAIM_YEAR")
+    .agg(
+        EVENTS=("CLAIM_IND", "size"),
+        HPI_FOUND=("HPI_AT_CLAIM", "count")
+    )
+)
+
+check_claim["HPI_MISSING"] = (
+    check_claim["EVENTS"]
+    - check_claim["HPI_FOUND"]
+)
+
+print("\nClaim HPI coverage:")
+print(check_claim)
+
+
+# =========================================================
+# 15. AVERAGE HPI RATIO BY YEARS FROM ORIGINATION
+# =========================================================
+
+years = np.arange(1, 18)
+
+delq_hpi_ratio = (
+    df_new.loc[
+        (df_new["DELQ90_IND"] == 1.0) &
+        (df_new["CLAIM_IND"] != 1.0) &
+        (df_new["DELQ_YEAR"].between(1, 17))
+    ]
+    .groupby("DELQ_YEAR")["HPI_RATIO_DELQ"]
+    .mean()
+    .reindex(years)
+)
+
+
+claim_hpi_ratio = (
+    df_new.loc[
+        (df_new["CLAIM_IND"] == 1.0) &
+        (df_new["CLAIM_YEAR"].between(1, 17))
+    ]
+    .groupby("CLAIM_YEAR")["HPI_RATIO_CLAIM"]
+    .mean()
+    .reindex(years)
+)
+
+
+# =========================================================
+# 16. PRINT RATIOS
+# =========================================================
+
+ratio_table = pd.DataFrame({
+    "YEAR": years,
+    "DELQ_HPI_RATIO": delq_hpi_ratio.values,
+    "CLAIM_HPI_RATIO": claim_hpi_ratio.values
+})
+
+print("\nHPI ratio by year:")
+print(ratio_table)
+
+
+# =========================================================
+# 17. PLOT
+# =========================================================
+
+plt.figure(figsize=(12, 6))
+
+plt.plot(
+    years,
+    delq_hpi_ratio.values,
+    marker="o",
+    label="Delinquency"
+)
+
+plt.plot(
+    years,
+    claim_hpi_ratio.values,
+    marker="o",
+    label="Claim"
+)
+
+# HPI ratio = 1 means no change from origination
+plt.axhline(
+    y=1.0,
+    linestyle="--",
+    alpha=0.5
+)
+
+plt.xticks(years)
+plt.xlim(1, 17)
+
+plt.xlabel("Years from Effective Date")
+
+plt.ylabel(
+    "Average HPI at Event / HPI at Origination"
+)
+
+plt.title(
+    "HPI Ratio at Delinquency and Claim"
+)
+
+plt.legend()
+plt.grid(alpha=0.3)
+
+plt.tight_layout()
+plt.show()
