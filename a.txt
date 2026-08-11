@@ -1,17 +1,115 @@
-summary_table = pd.DataFrame({
-    "YEAR": years,
-    "DELQ_COUNT": delq_count.values,
-    "CLAIM_COUNT": claim_count.values,
-    "DELQ_HPI_RATIO": delq_ratio.values,
-    "CLAIM_HPI_RATIO": claim_ratio.values
-})
+import plotly.graph_objects as go
 
-summary_table["DELQ_HPI_CHANGE_%"] = (
-    (summary_table["DELQ_HPI_RATIO"] - 1) * 100
-)
+def create_swapset_html(df, filename="swapset_by_region.html"):
 
-summary_table["CLAIM_HPI_CHANGE_%"] = (
-    (summary_table["CLAIM_HPI_RATIO"] - 1) * 100
-)
+    regions = sorted(df["ECON_REGION"].dropna().unique())
 
-print(summary_table.round(3))
+    fig = go.Figure()
+
+    # -------------------------
+    # ALL REGIONS
+    # -------------------------
+    swap = pd.crosstab(
+        df["decile_hpi4_num"],
+        df["decile_hpi3_num"],
+        margins=True
+    )
+
+    fig.add_trace(
+        go.Table(
+            header=dict(
+                values=["HPI +4"] + list(swap.columns)
+            ),
+            cells=dict(
+                values=[
+                    swap.index
+                ] + [
+                    swap[col] for col in swap.columns
+                ]
+            ),
+            visible=True
+        )
+    )
+
+    # -------------------------
+    # EACH ECON REGION
+    # -------------------------
+    for region in regions:
+
+        temp = df[df["ECON_REGION"] == region]
+
+        swap = pd.crosstab(
+            temp["decile_hpi4_num"],
+            temp["decile_hpi3_num"],
+            margins=True
+        )
+
+        fig.add_trace(
+            go.Table(
+                header=dict(
+                    values=["HPI +4"] + list(swap.columns)
+                ),
+                cells=dict(
+                    values=[
+                        swap.index
+                    ] + [
+                        swap[col] for col in swap.columns
+                    ]
+                ),
+                visible=False
+            )
+        )
+
+    # -------------------------
+    # DROPDOWN
+    # -------------------------
+    buttons = []
+
+    buttons.append(
+        dict(
+            label="ALL",
+            method="update",
+            args=[
+                {"visible": [True] + [False] * len(regions)},
+                {"title": "Swapset: HPI +4 vs HPI +3 — ALL"}
+            ]
+        )
+    )
+
+    for i, region in enumerate(regions):
+
+        visible = [False] * (len(regions) + 1)
+        visible[i + 1] = True
+
+        buttons.append(
+            dict(
+                label=str(region),
+                method="update",
+                args=[
+                    {"visible": visible},
+                    {
+                        "title":
+                        f"Swapset: HPI +4 vs HPI +3 — {region}"
+                    }
+                ]
+            )
+        )
+
+    fig.update_layout(
+        title="Swapset: HPI +4 vs HPI +3 — ALL",
+
+        updatemenus=[
+            dict(
+                buttons=buttons,
+                direction="down",
+                showactive=True,
+                x=0,
+                y=1.15
+            )
+        ]
+    )
+
+    # Save interactive HTML
+    fig.write_html(filename)
+
+    fig.show()
