@@ -1,37 +1,52 @@
-import pandas as pd
 import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
 
-# Convert effective date: 20150908 -> 2015-09-08
-df_new["EFFECT_DATE"] = pd.to_datetime(
-    df_new["EFFECT_DAY_SID"].astype("Int64").astype(str),
-    format="%Y%m%d",
-    errors="coerce"
+# Convert continuous time to completed-year bucket
+df_final["DELQ_YEAR"] = np.floor(df_final["TIME_TO_DELQ_YR"])
+df_final["CLAIM_YEAR"] = np.floor(df_final["TIME_TO_CLAIM_YR"])
+
+# Keep 0-17 years
+years = np.arange(0, 18)
+
+# Count events in each year
+delq_count = (
+    df_final.loc[df_final["DELQ_YEAR"].between(0, 17), "DELQ_YEAR"]
+    .value_counts()
+    .reindex(years, fill_value=0)
+    .sort_index()
 )
 
-# Convert event dates
-df_new["DELQ90_IND_DATE"] = pd.to_datetime(
-    df_new["DELQ90_IND_DATE"],
-    errors="coerce"
+claim_count = (
+    df_final.loc[df_final["CLAIM_YEAR"].between(0, 17), "CLAIM_YEAR"]
+    .value_counts()
+    .reindex(years, fill_value=0)
+    .sort_index()
 )
 
-df_new["CLAIM_IND_DATE"] = pd.to_datetime(
-    df_new["CLAIM_IND_DATE"],
-    errors="coerce"
+# Plot
+plt.figure(figsize=(12, 6))
+
+plt.plot(
+    years,
+    delq_count.values,
+    marker="o",
+    label="90+ Delinquency"
 )
 
-# Time to delinquency:
-# only DELQ=1 and CLAIM != 1
-df_new["TIME_TO_DELQ_YR"] = np.where(
-    (df_new["DELQ90_IND"] == 1.0) &
-    (df_new["CLAIM_IND"] != 1.0),
-    (df_new["DELQ90_IND_DATE"] - df_new["EFFECT_DATE"]).dt.days / 365.25,
-    np.nan
+plt.plot(
+    years,
+    claim_count.values,
+    marker="o",
+    label="Claim"
 )
 
-# Time to claim:
-# CLAIM takes priority if both indicators = 1
-df_new["TIME_TO_CLAIM_YR"] = np.where(
-    df_new["CLAIM_IND"] == 1.0,
-    (df_new["CLAIM_IND_DATE"] - df_new["EFFECT_DATE"]).dt.days / 365.25,
-    np.nan
-)
+plt.xticks(years)
+plt.xlabel("Years from Effective Date")
+plt.ylabel("Number of Applications")
+plt.title("Time to Delinquency and Claim")
+plt.legend()
+plt.grid(alpha=0.3)
+
+plt.tight_layout()
+plt.show()
