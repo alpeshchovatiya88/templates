@@ -1,52 +1,121 @@
-import numpy as np
-import pandas as pd
-import matplotlib.pyplot as plt
+# Make sure EFFECT_SID is numeric/integer-like YYYYMM
+df_new["EFFECT_SID"] = pd.to_numeric(df_new["EFFECT_SID"], errors="coerce")
 
-# Convert continuous time to completed-year bucket
-df_final["DELQ_YEAR"] = np.floor(df_final["TIME_TO_DELQ_YR"])
-df_final["CLAIM_YEAR"] = np.floor(df_final["TIME_TO_CLAIM_YR"])
-
-# Keep 0-17 years
-years = np.arange(0, 18)
-
-# Count events in each year
-delq_count = (
-    df_final.loc[df_final["DELQ_YEAR"].between(0, 17), "DELQ_YEAR"]
-    .value_counts()
-    .reindex(years, fill_value=0)
-    .sort_index()
+# Build monthly HPI lookup
+hpi_lookup = (
+    df_new[["ECON_REGION", "EFFECT_SID", "HPI"]]
+    .dropna()
+    .drop_duplicates(["ECON_REGION", "EFFECT_SID"])
 )
 
-claim_count = (
-    df_final.loc[df_final["CLAIM_YEAR"].between(0, 17), "CLAIM_YEAR"]
-    .value_counts()
-    .reindex(years, fill_value=0)
-    .sort_index()
+=================================================
+
+df_new["DELQ_MONTH"] = (
+    pd.to_datetime(df_new["DELQ90_IND_DATE"], errors="coerce")
+    .dt.strftime("%Y%m")
+    .astype("float")
 )
 
-# Plot
+df_new["CLAIM_MONTH"] = (
+    pd.to_datetime(df_new["CLAIM_IND_DATE"], errors="coerce")
+    .dt.strftime("%Y%m")
+    .astype("float")
+)
+
+==================================================
+
+hpi_map = hpi_lookup.set_index(
+    ["ECON_REGION", "EFFECT_SID"]
+)["HPI"]
+
+=================================
+
+df_new["HPI_AT_DELQ"] = [
+    hpi_map.get((region, month), np.nan)
+    for region, month in zip(
+        df_new["ECON_REGION"],
+        df_new["DELQ_MONTH"]
+    )
+]
+
+df_new["HPI_AT_CLAIM"] = [
+    hpi_map.get((region, month), np.nan)
+    for region, month in zip(
+        df_new["ECON_REGION"],
+        df_new["CLAIM_MONTH"]
+    )
+]
+
+=======================================
+
+df_new["HPI_ORIGINAL"] = df_new["HPI"]
+
+==================================
+
+df_new["HPI_RATIO_DELQ"] = (
+    df_new["HPI_AT_DELQ"] / df_new["HPI_ORIGINAL"]
+)
+
+df_new["HPI_RATIO_CLAIM"] = (
+    df_new["HPI_AT_CLAIM"] / df_new["HPI_ORIGINAL"]
+)
+
+=======================================
+
+df_new.loc[
+    df_new["CLAIM_IND"] == 1.0,
+    ["HPI_AT_DELQ", "HPI_RATIO_DELQ"]
+] = np.nan
+
+=========================
+years = np.arange(1, 18)
+
+delq_hpi_ratio = (
+    df_new[df_new["DELQ_YEAR"].between(1, 17)]
+    .groupby("DELQ_YEAR")["HPI_RATIO_DELQ"]
+    .mean()
+    .reindex(years)
+)
+
+claim_hpi_ratio = (
+    df_new[df_new["CLAIM_YEAR"].between(1, 17)]
+    .groupby("CLAIM_YEAR")["HPI_RATIO_CLAIM"]
+    .mean()
+    .reindex(years)
+)
+
+====================================
+
 plt.figure(figsize=(12, 6))
 
 plt.plot(
     years,
-    delq_count.values,
+    delq_hpi_ratio,
     marker="o",
-    label="90+ Delinquency"
+    label="Delinquency"
 )
 
 plt.plot(
     years,
-    claim_count.values,
+    claim_hpi_ratio,
     marker="o",
     label="Claim"
 )
 
+plt.axhline(1.0, linestyle="--", alpha=0.5)
+
 plt.xticks(years)
+plt.xlim(1, 17)
+
 plt.xlabel("Years from Effective Date")
-plt.ylabel("Number of Applications")
-plt.title("Time to Delinquency and Claim")
+plt.ylabel("HPI at Event / HPI at Origination")
+plt.title("HPI Ratio at Delinquency and Claim")
+
 plt.legend()
 plt.grid(alpha=0.3)
-
 plt.tight_layout()
 plt.show()
+
+=============================================
+print(df_new["HPI_AT_DELQ"].isna().sum())
+print(df_new["HPI_AT_CLAIM"].isna().sum())
