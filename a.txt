@@ -1,112 +1,37 @@
-df["decile_8020_num"] = (
-    df["DECILE_8020"]
-    .str.extract(r"(\d+)")
-    .astype(int)
-)
-
-df["decile_ts_num"] = (
-    df["DECILE_ts"]
-    .str.extract(r"(\d+)")
-    .astype(int)
-)
-================
-swap_matrix = pd.crosstab(
-    df["decile_8020_num"],
-    df["decile_ts_num"],
-    margins=True
-)
-
-swap_matrix
-
-=======================
-
-df["decile_change"] = (
-    df["decile_ts_num"] - df["decile_8020_num"]
-)
-
-df["abs_decile_change"] = df["decile_change"].abs()
-
-===================
-
+import pandas as pd
 import numpy as np
 
-df["swap_type"] = np.select(
-    [
-        df["decile_change"] == 0,
-        df["decile_change"] > 0,
-        df["decile_change"] < 0
-    ],
-    [
-        "No Swap",
-        "Moved to Higher Decile",
-        "Moved to Lower Decile"
-    ]
+# Convert effective date: 20150908 -> 2015-09-08
+df_new["EFFECT_DATE"] = pd.to_datetime(
+    df_new["EFFECT_DAY_SID"].astype("Int64").astype(str),
+    format="%Y%m%d",
+    errors="coerce"
 )
 
-===============
-df["swap_type"].value_counts()
-
-======
-df["swap_type"].value_counts(normalize=True).mul(100)
-
-===============
-
-cutoff = 10
-
-df["decision_8020"] = np.where(
-    df["decile_8020_num"] <= cutoff,
-    "A",
-    "B"
+# Convert event dates
+df_new["DELQ90_IND_DATE"] = pd.to_datetime(
+    df_new["DELQ90_IND_DATE"],
+    errors="coerce"
 )
 
-df["decision_ts"] = np.where(
-    df["decile_ts_num"] <= cutoff,
-    "A",
-    "B"
+df_new["CLAIM_IND_DATE"] = pd.to_datetime(
+    df_new["CLAIM_IND_DATE"],
+    errors="coerce"
 )
 
-====================
-df["swap_set"] = np.select(
-    [
-        (df["decision_8020"] == "A") &
-        (df["decision_ts"] == "A"),
-
-        (df["decision_8020"] == "A") &
-        (df["decision_ts"] == "B"),
-
-        (df["decision_8020"] == "B") &
-        (df["decision_ts"] == "A"),
-
-        (df["decision_8020"] == "B") &
-        (df["decision_ts"] == "B")
-    ],
-    [
-        "A -> A",
-        "A -> B",
-        "B -> A",
-        "B -> B"
-    ]
+# Time to delinquency:
+# only DELQ=1 and CLAIM != 1
+df_new["TIME_TO_DELQ_YR"] = np.where(
+    (df_new["DELQ90_IND"] == 1.0) &
+    (df_new["CLAIM_IND"] != 1.0),
+    (df_new["DELQ90_IND_DATE"] - df_new["EFFECT_DATE"]).dt.days / 365.25,
+    np.nan
 )
 
-=============================
-pd.crosstab(
-    df["decision_8020"],
-    df["decision_ts"],
-    margins=True
+# Time to claim:
+# CLAIM takes priority if both indicators = 1
+df_new["TIME_TO_CLAIM_YR"] = np.where(
+    df_new["CLAIM_IND"] == 1.0,
+    (df_new["CLAIM_IND_DATE"] - df_new["EFFECT_DATE"]).dt.days / 365.25,
+    np.nan
 )
-
-==========================
-swap_analysis = (
-    df.groupby("swap_set")
-      .agg(
-          applications=("APPLICATION_NUMBER", "count"),
-          bads=("BAD_FLAG", "sum"),
-          bad_rate=("BAD_FLAG", "mean"),
-          avg_8020_score=("SMI3_LR_8020", "mean"),
-          avg_ts_score=("SMI3_LR_ts", "mean")
-      )
-      .reset_index()
-)
-
-swap_analysis
-
