@@ -1,63 +1,17 @@
-years = np.arange(1, 18)
-
-delq_count = (
-    df_new.loc[
-        (df_new["DELQ90_IND"] == 1.0) &
-        (df_new["CLAIM_IND"] != 1.0) &
-        (df_new["DELQ_YEAR"].between(1, 17)),
-        "DELQ_YEAR"
-    ]
-    .value_counts()
-    .reindex(years, fill_value=0)
-    .sort_index()
-)
-
-claim_count = (
-    df_new.loc[
-        (df_new["CLAIM_IND"] == 1.0) &
-        (df_new["CLAIM_YEAR"].between(1, 17)),
-        "CLAIM_YEAR"
-    ]
-    .value_counts()
-    .reindex(years, fill_value=0)
-    .sort_index()
-)
-
-count_table = pd.DataFrame({
+summary_table = pd.DataFrame({
     "YEAR": years,
     "DELQ_COUNT": delq_count.values,
-    "CLAIM_COUNT": claim_count.values
+    "CLAIM_COUNT": claim_count.values,
+    "DELQ_HPI_RATIO": delq_ratio.values,
+    "CLAIM_HPI_RATIO": claim_ratio.values
 })
 
-print(count_table)
-
-===============================
-
-plt.figure(figsize=(12, 6))
-
-plt.plot(
-    years,
-    delq_count.values,
-    marker="o",
-    label="90+ Delinquency"
+summary_table["DELQ_HPI_CHANGE_%"] = (
+    (summary_table["DELQ_HPI_RATIO"] - 1) * 100
 )
 
-plt.plot(
-    years,
-    claim_count.values,
-    marker="o",
-    label="Claim"
+summary_table["CLAIM_HPI_CHANGE_%"] = (
+    (summary_table["CLAIM_HPI_RATIO"] - 1) * 100
 )
 
-plt.xticks(years)
-plt.xlim(1, 17)
-
-plt.xlabel("Years from Effective Date")
-plt.ylabel("Number of Applications")
-plt.title("Time to Delinquency and Claim")
-
-plt.legend()
-plt.grid(alpha=0.3)
-
-plt.tight_layout()
-plt.show()
+print(summary_table.round(3))
