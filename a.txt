@@ -1,90 +1,100 @@
 import pandas as pd
 import numpy as np
 
-# Make sure year buckets exist
-df_new["DELQ_YEAR"] = np.ceil(df_new["TIME_TO_DELQ_YR"])
-df_new["CLAIM_YEAR"] = np.ceil(df_new["TIME_TO_CLAIM_YR"])
+years = np.arange(1, 18)
 
+def create_timing_summary(df):
 
-def regional_event_summary(df):
+    results = []
 
-    rows = []
+    regions = ["ALL"] + sorted(
+        df["ECON_REGION"].dropna().unique()
+    )
 
-    # Include ALL + each region
-    region_list = ["ALL"] + sorted(df["ECON_REGION"].dropna().unique())
-
-    for region in region_list:
+    for region in regions:
 
         if region == "ALL":
             temp = df.copy()
         else:
-            temp = df[df["ECON_REGION"] == region].copy()
+            temp = df[
+                df["ECON_REGION"] == region
+            ].copy()
 
         # -------------------------
-        # Delinquency population
+        # Delinquency
         # Claim takes priority
         # -------------------------
-        delq = temp.loc[
+        delq = temp[
             (temp["DELQ90_IND"] == 1.0) &
             (temp["CLAIM_IND"] != 1.0) &
             (temp["DELQ_YEAR"].between(1, 17))
         ].copy()
 
         # -------------------------
-        # Claim population
+        # Claim
         # -------------------------
-        claim = temp.loc[
+        claim = temp[
             (temp["CLAIM_IND"] == 1.0) &
             (temp["CLAIM_YEAR"].between(1, 17))
         ].copy()
-
-        # Peak year
-        delq_peak = (
-            delq["DELQ_YEAR"].value_counts().idxmax()
-            if len(delq) > 0 else np.nan
-        )
-
-        claim_peak = (
-            claim["CLAIM_YEAR"].value_counts().idxmax()
-            if len(claim) > 0 else np.nan
-        )
-
-        # Median event year
-        delq_median = (
-            delq["DELQ_YEAR"].median()
-            if len(delq) > 0 else np.nan
-        )
-
-        claim_median = (
-            claim["CLAIM_YEAR"].median()
-            if len(claim) > 0 else np.nan
-        )
-
-        # Average deterministic HPI +4
-        hpi_plus4_avg = temp["HPI_+4"].mean()
 
         # Counts
         delq_count = len(delq)
         claim_count = len(claim)
 
-        rows.append({
+        # Peak years
+        delq_peak = (
+            delq["DELQ_YEAR"].mode().iloc[0]
+            if delq_count > 0 else np.nan
+        )
+
+        claim_peak = (
+            claim["CLAIM_YEAR"].mode().iloc[0]
+            if claim_count > 0 else np.nan
+        )
+
+        # Median years
+        delq_median = (
+            delq["DELQ_YEAR"].median()
+            if delq_count > 0 else np.nan
+        )
+
+        claim_median = (
+            claim["CLAIM_YEAR"].median()
+            if claim_count > 0 else np.nan
+        )
+
+        # % of events occurring Years 3-5
+        delq_pct_3_5 = (
+            delq["DELQ_YEAR"].between(3, 5).mean() * 100
+            if delq_count > 0 else np.nan
+        )
+
+        claim_pct_3_5 = (
+            claim["CLAIM_YEAR"].between(3, 5).mean() * 100
+            if claim_count > 0 else np.nan
+        )
+
+        results.append({
             "ECON_REGION": region,
             "DELQ_COUNT": delq_count,
-            "CLAIM_COUNT": claim_count,
             "DELQ_PEAK_YEAR": delq_peak,
-            "CLAIM_PEAK_YEAR": claim_peak,
             "DELQ_MEDIAN_YEAR": delq_median,
+            "CLAIM_COUNT": claim_count,
+            "CLAIM_PEAK_YEAR": claim_peak,
             "CLAIM_MEDIAN_YEAR": claim_median,
-            "AVG_HPI_+4": hpi_plus4_avg
+            "DELQ_%_YR3_5": delq_pct_3_5,
+            "CLAIM_%_YR3_5": claim_pct_3_5
         })
 
-    return pd.DataFrame(rows)
+    return pd.DataFrame(results)
 
 
-summary = regional_event_summary(df_new)
+timing_summary = create_timing_summary(df_new)
 
-summary
+timing_summary = timing_summary.round(1)
 
+timing_summary
 ==========================
 
 summary["DELQ_DIFF_FROM_4"] = (
