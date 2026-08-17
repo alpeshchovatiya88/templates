@@ -1,115 +1,98 @@
-import plotly.graph_objects as go
+import pandas as pd
+import numpy as np
 
-def create_swapset_html(df, filename="swapset_by_region.html"):
+# Make sure year buckets exist
+df_new["DELQ_YEAR"] = np.ceil(df_new["TIME_TO_DELQ_YR"])
+df_new["CLAIM_YEAR"] = np.ceil(df_new["TIME_TO_CLAIM_YR"])
 
-    regions = sorted(df["ECON_REGION"].dropna().unique())
 
-    fig = go.Figure()
+def regional_event_summary(df):
 
-    # -------------------------
-    # ALL REGIONS
-    # -------------------------
-    swap = pd.crosstab(
-        df["decile_hpi4_num"],
-        df["decile_hpi3_num"],
-        margins=True
-    )
+    rows = []
 
-    fig.add_trace(
-        go.Table(
-            header=dict(
-                values=["HPI +4"] + list(swap.columns)
-            ),
-            cells=dict(
-                values=[
-                    swap.index
-                ] + [
-                    swap[col] for col in swap.columns
-                ]
-            ),
-            visible=True
-        )
-    )
+    # Include ALL + each region
+    region_list = ["ALL"] + sorted(df["ECON_REGION"].dropna().unique())
 
-    # -------------------------
-    # EACH ECON REGION
-    # -------------------------
-    for region in regions:
+    for region in region_list:
 
-        temp = df[df["ECON_REGION"] == region]
+        if region == "ALL":
+            temp = df.copy()
+        else:
+            temp = df[df["ECON_REGION"] == region].copy()
 
-        swap = pd.crosstab(
-            temp["decile_hpi4_num"],
-            temp["decile_hpi3_num"],
-            margins=True
-        )
+        # -------------------------
+        # Delinquency population
+        # Claim takes priority
+        # -------------------------
+        delq = temp.loc[
+            (temp["DELQ90_IND"] == 1.0) &
+            (temp["CLAIM_IND"] != 1.0) &
+            (temp["DELQ_YEAR"].between(1, 17))
+        ].copy()
 
-        fig.add_trace(
-            go.Table(
-                header=dict(
-                    values=["HPI +4"] + list(swap.columns)
-                ),
-                cells=dict(
-                    values=[
-                        swap.index
-                    ] + [
-                        swap[col] for col in swap.columns
-                    ]
-                ),
-                visible=False
-            )
+        # -------------------------
+        # Claim population
+        # -------------------------
+        claim = temp.loc[
+            (temp["CLAIM_IND"] == 1.0) &
+            (temp["CLAIM_YEAR"].between(1, 17))
+        ].copy()
+
+        # Peak year
+        delq_peak = (
+            delq["DELQ_YEAR"].value_counts().idxmax()
+            if len(delq) > 0 else np.nan
         )
 
-    # -------------------------
-    # DROPDOWN
-    # -------------------------
-    buttons = []
-
-    buttons.append(
-        dict(
-            label="ALL",
-            method="update",
-            args=[
-                {"visible": [True] + [False] * len(regions)},
-                {"title": "Swapset: HPI +4 vs HPI +3 — ALL"}
-            ]
-        )
-    )
-
-    for i, region in enumerate(regions):
-
-        visible = [False] * (len(regions) + 1)
-        visible[i + 1] = True
-
-        buttons.append(
-            dict(
-                label=str(region),
-                method="update",
-                args=[
-                    {"visible": visible},
-                    {
-                        "title":
-                        f"Swapset: HPI +4 vs HPI +3 — {region}"
-                    }
-                ]
-            )
+        claim_peak = (
+            claim["CLAIM_YEAR"].value_counts().idxmax()
+            if len(claim) > 0 else np.nan
         )
 
-    fig.update_layout(
-        title="Swapset: HPI +4 vs HPI +3 — ALL",
+        # Median event year
+        delq_median = (
+            delq["DELQ_YEAR"].median()
+            if len(delq) > 0 else np.nan
+        )
 
-        updatemenus=[
-            dict(
-                buttons=buttons,
-                direction="down",
-                showactive=True,
-                x=0,
-                y=1.15
-            )
-        ]
-    )
+        claim_median = (
+            claim["CLAIM_YEAR"].median()
+            if len(claim) > 0 else np.nan
+        )
 
-    # Save interactive HTML
-    fig.write_html(filename)
+        # Average deterministic HPI +4
+        hpi_plus4_avg = temp["HPI_+4"].mean()
 
-    fig.show()
+        # Counts
+        delq_count = len(delq)
+        claim_count = len(claim)
+
+        rows.append({
+            "ECON_REGION": region,
+            "DELQ_COUNT": delq_count,
+            "CLAIM_COUNT": claim_count,
+            "DELQ_PEAK_YEAR": delq_peak,
+            "CLAIM_PEAK_YEAR": claim_peak,
+            "DELQ_MEDIAN_YEAR": delq_median,
+            "CLAIM_MEDIAN_YEAR": claim_median,
+            "AVG_HPI_+4": hpi_plus4_avg
+        })
+
+    return pd.DataFrame(rows)
+
+
+summary = regional_event_summary(df_new)
+
+summary
+
+==========================
+
+summary["DELQ_DIFF_FROM_4"] = (
+    summary["DELQ_MEDIAN_YEAR"] - 4
+)
+
+summary["CLAIM_DIFF_FROM_4"] = (
+    summary["CLAIM_MEDIAN_YEAR"] - 4
+)
+
+summary
