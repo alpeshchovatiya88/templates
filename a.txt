@@ -10,3 +10,54 @@ Please provide:
 • Business rationale for excluding ALTA / EXPIRED and requiring government guarantee.
 • Volume impact of these filters.
 • Confirmation that the filters match the intended scope of SMI3.
+
+
+import os
+
+from pipelines.smi3.preprocess import (
+    build_policy_query,
+    build_borrower_query,
+)
+from pipelines.smi3.util import load_data_from_snowflake
+
+
+# Use the SAME dt_model as your pipeline
+DT_MODEL = "202606"
+
+REGION = "ca-central-1"
+
+OUTPUT_DIR = "raw_data"
+
+os.makedirs(OUTPUT_DIR, exist_ok=True)
+
+
+print("Loading POLICY from Snowflake...")
+
+policy = load_data_from_snowflake(
+    build_policy_query(dt_model=DT_MODEL),
+    region=REGION,
+)
+
+policy.to_csv(
+    os.path.join(OUTPUT_DIR, "policy_raw.csv"),
+    index=False,
+)
+
+print("Policy shape:", policy.shape)
+
+
+print("Loading BORROWER from Snowflake...")
+
+borrower = load_data_from_snowflake(
+    build_borrower_query(dt_model=DT_MODEL),
+    region=REGION,
+)
+
+borrower.to_csv(
+    os.path.join(OUTPUT_DIR, "borrower_raw.csv"),
+    index=False,
+)
+
+print("Borrower shape:", borrower.shape)
+
+print("DONE")
