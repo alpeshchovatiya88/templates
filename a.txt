@@ -1,186 +1,322 @@
-FEATURE_RANGES = {
-    "POD_INSURANCE_IN_FORCE": [10_000, 2_700_000],
-    "PRK_PROPERTY_VALUE": [0, 3_000_000],
-    "ACTLTV": [0, 100],
-    "PRK_PROPERTY_AGE": [0, 150],
-    "PRD_LOAN_TERM": [1, 120],
-    "TDSR": [0, 48],
-    "GDSR": [0, 42],
-    "TOTAL_INCOME": [0, 450_000],
-    "BORYREMP": [0, 40],
-    "PRD_AMORTIZATION": [1, 480],
-    "CRD_OPEN_TRADE_TU": [0, 20],
-    "CRD_OPEN_TRADE_EQ": [0, 20],
-    "CRD_PUBLIC_DEROG_TU": [0, 10],
-    "CRD_PUBLIC_DEROG_EQ": [0, 10],
-}
+for col in ["CLAIM_IND", "DELQ90_IND"]:
+    if col in policy_stage7.columns:
+        policy_stage7[col] = (
+            policy_stage7[col]
+            .fillna(0)
+        )
 
-========
+=========
 
-policy_clip = policy_product
+claim_ind = policy_stage7.get(
+    "CLAIM_IND",
+    0
+)
 
-clip_rows = []
-
-for col, (lo, hi) in FEATURE_RANGES.items():
-
-    if col not in policy_clip.columns:
-        print("Missing column, skipped:", col)
-        continue
-
-    x = pd.to_numeric(
-        policy_clip[col],
-        errors="coerce"
-    )
-
-    valid = x.notna()
-    below = valid & (x < lo)
-    above = valid & (x > hi)
-
-    clip_rows.append({
-        "column": col,
-        "lower_bound": lo,
-        "upper_bound": hi,
-        "below": below.sum(),
-        "above": above.sum(),
-        "total_clipped": below.sum() + above.sum(),
-    })
-
-    policy_clip.loc[below, col] = lo
-    policy_clip.loc[above, col] = hi
-
-clip_summary = pd.DataFrame(clip_rows)
-
-clip_summary.sort_values(
-    "total_clipped",
-    ascending=False
+delq90_ind = policy_stage7.get(
+    "DELQ90_IND",
+    0
 )
 
 ==========
 
-policy_clip["CRA_COLLECTION"] = np.where(
-    policy_clip["CRA_SATISFIED_COLLECTION"].eq("Y")
-    | policy_clip["CRA_UNSATISFIED_COLLECTION"].eq("Y"),
-    "Y",
-    "N"
+policy_stage7["category"] = np.select(
+    [
+        policy_stage7["STATUS"] == "Declined",
+        policy_stage7["STATUS"] == "Others",
+
+        (claim_ind == 1)
+        & (delq90_ind == 1),
+
+        (claim_ind == 1)
+        & (delq90_ind == 0),
+
+        (claim_ind == 0)
+        & (delq90_ind == 1),
+    ],
+    [
+        "Declined",
+        "Others",
+        "Delq_Claim",
+        "Claim_Only",
+        "Delq_Only",
+    ],
+    default="No_Event",
 )
 
-policy_clip["CRA_JUDGEMENT"] = np.where(
-    policy_clip["CRA_SATISFIED_JUDGEMENT"].eq("Y")
-    | policy_clip["CRA_UNSATISFIED_JUDGEMENT"].eq("Y"),
-    "Y",
-    "N"
-)
+==========
 
-=========
-
-if "PRK_CONDO_FEE" in policy_clip.columns:
-    policy_clip["PRK_CONDO_FEE"] = (
-        pd.to_numeric(
-            policy_clip["PRK_CONDO_FEE"],
-            errors="coerce"
-        )
-        .fillna(0)
-    )
-
-===========
-
-if {"TDSR", "GDSR"}.issubset(policy_clip.columns):
-
-    tdsr = pd.to_numeric(
-        policy_clip["TDSR"],
-        errors="coerce"
-    )
-
-    gdsr = pd.to_numeric(
-        policy_clip["GDSR"],
-        errors="coerce"
-    )
-
-    policy_clip["DSR_DIFF"] = (
-        tdsr - gdsr
-    ).abs()
-
-=========
-
-refi_remove = (
-    policy_clip["PRD_LOAN_PURPOSE"].eq("R")
-    & (
-        pd.to_numeric(
-            policy_clip["PRD_OUTSTANDING_BAL"],
-            errors="coerce"
-        ) > 3000
-    )
-)
-
-print("Rows before:", len(policy_clip))
-print("Refinance rows to remove:", refi_remove.sum())
-
-=======
-
-policy_derived = policy_clip.loc[
-    ~refi_remove
-].copy()
-
-print("Rows after:", len(policy_derived))
+policy_stage7[
+    "category"
+].value_counts(dropna=False)
 
 ========
 
-funded_status = ["C", "L", "R", "M", "T"]
-valid_lru_funded_status = ["X", "A", "E"]
-declined_status = ["D"]
-
-=======
-
-funded_status = ["C", "L", "R", "M", "T"]
-valid_lru_funded_status = ["X", "A", "E"]
-
-funded_condition = (
-    policy_derived["LATEST_PFP_POLICY_STATUS"].isin(
-        funded_status
-    )
-    |
-    (
-        policy_derived[
-            "LATEST_PFP_POLICY_STATUS"
-        ].isin(valid_lru_funded_status)
-        & policy_derived[
-            "LOB_RENAMED"
-        ].eq("LRUPLUS")
-    )
-)
-
-declined_condition = (
-    policy_derived[
-        "LATEST_PFP_POLICY_STATUS"
-    ].eq("D")
-)
-
-policy_derived["STATUS"] = np.select(
+policy_stage7["target"] = np.select(
     [
-        funded_condition,
-        declined_condition,
+        policy_stage7["category"] == "Others",
+        policy_stage7["category"] == "No_Event",
     ],
     [
-        "Funded",
-        "Declined",
+        np.nan,
+        0,
     ],
-    default="Others"
+    default=1,
 )
 
-=======
+========
 
-policy_derived[
-    "STATUS"
+policy_stage7[
+    ["category", "target"]
+].value_counts(dropna=False)
+
+=========
+
+policy_stage7.groupby(
+    "category",
+    dropna=False
+)["target"].value_counts(
+    dropna=False
+)
+
+========
+
+NB_URBAN_WHITELIST = {
+    "FREDERICTON",
+    "SAINT JOHN",
+    "MONCTON",
+}
+
+=====
+
+postal_code = (
+    policy_stage7["POSTAL_CODE"]
+    .astype(str)
+    .fillna("")
+    .str.replace(
+        " ",
+        "",
+        regex=False
+    )
+    .str.upper()
+)
+
+========
+
+policy_stage7["RURAL_IND"] = np.where(
+    postal_code.str[1:2] == "0",
+    "Y",
+    "N"
+)
+
+========
+
+is_nb = (
+    policy_stage7["PROVINCE"]
+    .astype(str)
+    .str.upper()
+    .eq("NB")
+)
+
+city = (
+    policy_stage7.get(
+        "CITY",
+        pd.Series(
+            pd.NA,
+            index=policy_stage7.index
+        )
+    )
+    .astype(str)
+    .str.upper()
+)
+
+========
+
+policy_stage7.loc[
+    is_nb
+    & ~city.isin(NB_URBAN_WHITELIST),
+    "RURAL_IND"
+] = "Y"
+
+==========
+
+policy_stage7[
+    "RURAL_IND"
 ].value_counts(dropna=False)
 
 =======
 
-policy_derived.to_parquet(
-    RAW / "policy_stage6_derived.parquet",
-    index=False
+policy_stage7.loc[
+    policy_stage7["PROVINCE"]
+    .astype(str)
+    .str.upper()
+    .eq("NB"),
+    [
+        "CITY",
+        "POSTAL_CODE",
+        "RURAL_IND"
+    ]
+].head(30)
+
+=====
+
+audit_stage7 = pd.DataFrame({
+    "metric": [
+        "rows",
+        "target_1",
+        "target_0",
+        "target_missing",
+        "rural_Y",
+        "rural_N",
+    ],
+    "value": [
+        len(policy_stage7),
+        (policy_stage7["target"] == 1).sum(),
+        (policy_stage7["target"] == 0).sum(),
+        policy_stage7["target"].isna().sum(),
+        (policy_stage7["RURAL_IND"] == "Y").sum(),
+        (policy_stage7["RURAL_IND"] == "N").sum(),
+    ]
+})
+
+audit_stage7
+
+=====
+
+effect_day = policy_stage8["EFFECT_DAY_SID"].replace(-1, np.nan)
+
+policy_stage8["EFFECT_DAY_SID"] = (
+    effect_day.fillna(
+        policy_stage8["RECEIVED_DAY_SID"]
+    )
 )
 
-clip_summary.to_csv(
-    RAW / "policy_stage6_clip_summary.csv",
-    index=False
+policy_stage8["EFFECT_SID"] = (
+    policy_stage8["EFFECT_DAY_SID"] // 100
+).astype("Int64")
+
+======
+
+missing_rate = (
+    policy_stage8["PRD_CONTRACT_RATE"].isna()
 )
+
+policy_stage8.loc[
+    missing_rate,
+    "filled_PRD_CONTRACT_RATE_by"
+] = "PRD_QUAL_INT_RATE"
+
+policy_stage8["PRD_CONTRACT_RATE"] = (
+    policy_stage8["PRD_CONTRACT_RATE"]
+    .fillna(
+        policy_stage8["PRD_QUAL_INT_RATE"]
+    )
+    .astype(float)
+)
+
+========
+
+policy_stage8["ACTLTV_lgd"] = (
+    policy_stage8["ACTLTV"] / 100
+)
+
+========
+
+missing_iif = (
+    policy_stage8["POD_INSURANCE_IN_FORCE"].isna()
+)
+
+iif_from_purchase_price = (
+    policy_stage8["PRK_PURCHASE_PRICE"].notna()
+    & policy_stage8["ACTLTV_lgd"].notna()
+)
+
+========
+
+policy_stage8.loc[
+    missing_iif & iif_from_purchase_price,
+    "filled_POD_INSURANCE_IN_FORCE_by"
+] = "PRK_PURCHASE_PRICE * ACTLTV_lgd"
+
+policy_stage8.loc[
+    missing_iif & ~iif_from_purchase_price,
+    "filled_POD_INSURANCE_IN_FORCE_by"
+] = "PRD_BASE_LOAN_AMT"
+
+========
+
+policy_stage8["POD_INSURANCE_IN_FORCE"] = (
+    policy_stage8["POD_INSURANCE_IN_FORCE"]
+    .fillna(
+        policy_stage8["PRK_PURCHASE_PRICE"]
+        * policy_stage8["ACTLTV_lgd"]
+    )
+    .fillna(
+        policy_stage8["PRD_BASE_LOAN_AMT"]
+    )
+    .astype(float)
+)
+
+========
+
+missing_property_value = (
+    policy_stage8["PRK_PROPERTY_VALUE"].isna()
+)
+
+policy_stage8.loc[
+    missing_property_value
+    & policy_stage8["PRK_PURCHASE_PRICE"].notna(),
+    "filled_PRK_PROPERTY_VALUE_by"
+] = "PRK_PURCHASE_PRICE"
+
+policy_stage8.loc[
+    missing_property_value
+    & policy_stage8["PRK_PURCHASE_PRICE"].isna(),
+    "filled_PRK_PROPERTY_VALUE_by"
+] = "PRK_DECLARED_VALUE"
+
+========
+
+policy_stage8["PRK_PROPERTY_VALUE"] = (
+    policy_stage8["PRK_PROPERTY_VALUE"]
+    .fillna(
+        policy_stage8["PRK_PURCHASE_PRICE"]
+    )
+    .fillna(
+        policy_stage8["PRK_DECLARED_VALUE"]
+    )
+    .astype(float)
+)
+
+=======
+
+print(
+    policy_stage8[
+        "filled_PRD_CONTRACT_RATE_by"
+    ].value_counts(dropna=False)
+)
+
+print(
+    policy_stage8[
+        "filled_POD_INSURANCE_IN_FORCE_by"
+    ].value_counts(dropna=False)
+)
+
+print(
+    policy_stage8[
+        "filled_PRK_PROPERTY_VALUE_by"
+    ].value_counts(dropna=False)
+)
+
+========
+
+policy_stage8[
+    [
+        "EFFECT_DAY_SID",
+        "PRD_CONTRACT_RATE",
+        "POD_INSURANCE_IN_FORCE",
+        "PRK_PROPERTY_VALUE",
+    ]
+].isna().sum()
+
+========
+
