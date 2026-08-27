@@ -1,156 +1,186 @@
-code = df["POD_SPL_PROG_CODE"]
-frgn = df["PRD_FOREIGN_BORROWER"]
-
-actltv = pd.to_numeric(
-    df["ACTLTV"],
-    errors="coerce"
-)
-
-df["PRODUCT_GROUP"] = np.select(
-    [
-        actltv > 97,
-        code.isin(["ALAU", "ALAM"]),
-        code.isin(["HELF", "HELP"]),
-        code.isin(["BDWN"]),
-        code.isin(["CHBK"]),
-        code.isin(["VACP"]),
-        code.isin(["FE01"]) | (frgn == "Y"),
-        code.isin(["CPSI", "CPPI"]),
-    ],
-    [
-        "HB100",
-        "ALTA",
-        "HELOC",
-        "BORROWED DOWN",
-        "CASHBACK",
-        "VACATION/SECOND",
-        "NEW TO CAN",
-        "CREDIT_ASSIST",
-    ],
-    default="REGULAR",
-)
-
-==========
-
-df["PRODUCT_GROUP"].value_counts(dropna=False)
-
-==========
-
-df["PRODUCT_GROUP_2"] = np.where(
-    df["PRODUCT_GROUP"].isin(
-        [
-            "CASHBACK",
-            "CREDIT_ASSIST",
-            "HB100",
-            "HELOC",
-        ]
-    ),
-    "EXPIRED",
-    np.where(
-        df["PRODUCT_GROUP"].isin(
-            [
-                "VACATION/SECOND",
-                "NEW TO CAN",
-            ]
-        ),
-        "REGULAR",
-        df["PRODUCT_GROUP"],
-    ),
-)
-
-=========
-
-pd.crosstab(
-    df["PRODUCT_GROUP"],
-    df["PRODUCT_GROUP_2"],
-    dropna=False
-)
-=======
-
-rows_before = len(df)
-
-print("Rows before product filter:", rows_before)
-
-print(
-    df["PRODUCT_GROUP_2"]
-    .value_counts(dropna=False)
-)
+FEATURE_RANGES = {
+    "POD_INSURANCE_IN_FORCE": [10_000, 2_700_000],
+    "PRK_PROPERTY_VALUE": [0, 3_000_000],
+    "ACTLTV": [0, 100],
+    "PRK_PROPERTY_AGE": [0, 150],
+    "PRD_LOAN_TERM": [1, 120],
+    "TDSR": [0, 48],
+    "GDSR": [0, 42],
+    "TOTAL_INCOME": [0, 450_000],
+    "BORYREMP": [0, 40],
+    "PRD_AMORTIZATION": [1, 480],
+    "CRD_OPEN_TRADE_TU": [0, 20],
+    "CRD_OPEN_TRADE_EQ": [0, 20],
+    "CRD_PUBLIC_DEROG_TU": [0, 10],
+    "CRD_PUBLIC_DEROG_EQ": [0, 10],
+}
 
 ========
 
-bad_product = df["PRODUCT_GROUP_2"].isin(
-    ["ALTA", "EXPIRED"]
-)
+policy_clip = policy_product
 
-not_govt_guaranteed = (
-    df["PRD_GOVT_GUARANTEE"] != "Y"
-)
+clip_rows = []
 
-print("ALTA/EXPIRED:",
-      bad_product.sum())
+for col, (lo, hi) in FEATURE_RANGES.items():
 
-print("Not govt guaranteed:",
-      not_govt_guaranteed.sum())
+    if col not in policy_clip.columns:
+        print("Missing column, skipped:", col)
+        continue
 
-print(
-    "Fail either condition:",
-    (bad_product | not_govt_guaranteed).sum()
-)
+    x = pd.to_numeric(
+        policy_clip[col],
+        errors="coerce"
+    )
 
-=========
+    valid = x.notna()
+    below = valid & (x < lo)
+    above = valid & (x > hi)
 
-df_product = df[
-    (~df["PRODUCT_GROUP_2"].isin(
-        ["ALTA", "EXPIRED"]
-    ))
-    & (df["PRD_GOVT_GUARANTEE"] == "Y")
-].copy()
+    clip_rows.append({
+        "column": col,
+        "lower_bound": lo,
+        "upper_bound": hi,
+        "below": below.sum(),
+        "above": above.sum(),
+        "total_clipped": below.sum() + above.sum(),
+    })
 
-=========
+    policy_clip.loc[below, col] = lo
+    policy_clip.loc[above, col] = hi
 
-print(
-    "Rows before:",
-    rows_before
-)
+clip_summary = pd.DataFrame(clip_rows)
 
-print(
-    "Rows after:",
-    len(df_product)
-)
-
-print(
-    "Rows removed:",
-    rows_before - len(df_product)
-)
-
-=========
-
-print(
-    "Duplicate applications:",
-    df_product
-    .duplicated("APPLICATION_NUMBER")
-    .sum()
+clip_summary.sort_values(
+    "total_clipped",
+    ascending=False
 )
 
 ==========
 
-df_product[
-    "PRODUCT_GROUP_2"
+policy_clip["CRA_COLLECTION"] = np.where(
+    policy_clip["CRA_SATISFIED_COLLECTION"].eq("Y")
+    | policy_clip["CRA_UNSATISFIED_COLLECTION"].eq("Y"),
+    "Y",
+    "N"
+)
+
+policy_clip["CRA_JUDGEMENT"] = np.where(
+    policy_clip["CRA_SATISFIED_JUDGEMENT"].eq("Y")
+    | policy_clip["CRA_UNSATISFIED_JUDGEMENT"].eq("Y"),
+    "Y",
+    "N"
+)
+
+=========
+
+if "PRK_CONDO_FEE" in policy_clip.columns:
+    policy_clip["PRK_CONDO_FEE"] = (
+        pd.to_numeric(
+            policy_clip["PRK_CONDO_FEE"],
+            errors="coerce"
+        )
+        .fillna(0)
+    )
+
+===========
+
+if {"TDSR", "GDSR"}.issubset(policy_clip.columns):
+
+    tdsr = pd.to_numeric(
+        policy_clip["TDSR"],
+        errors="coerce"
+    )
+
+    gdsr = pd.to_numeric(
+        policy_clip["GDSR"],
+        errors="coerce"
+    )
+
+    policy_clip["DSR_DIFF"] = (
+        tdsr - gdsr
+    ).abs()
+
+=========
+
+refi_remove = (
+    policy_clip["PRD_LOAN_PURPOSE"].eq("R")
+    & (
+        pd.to_numeric(
+            policy_clip["PRD_OUTSTANDING_BAL"],
+            errors="coerce"
+        ) > 3000
+    )
+)
+
+print("Rows before:", len(policy_clip))
+print("Refinance rows to remove:", refi_remove.sum())
+
+=======
+
+policy_derived = policy_clip.loc[
+    ~refi_remove
+].copy()
+
+print("Rows after:", len(policy_derived))
+
+========
+
+funded_status = ["C", "L", "R", "M", "T"]
+valid_lru_funded_status = ["X", "A", "E"]
+declined_status = ["D"]
+
+=======
+
+funded_status = ["C", "L", "R", "M", "T"]
+valid_lru_funded_status = ["X", "A", "E"]
+
+funded_condition = (
+    policy_derived["LATEST_PFP_POLICY_STATUS"].isin(
+        funded_status
+    )
+    |
+    (
+        policy_derived[
+            "LATEST_PFP_POLICY_STATUS"
+        ].isin(valid_lru_funded_status)
+        & policy_derived[
+            "LOB_RENAMED"
+        ].eq("LRUPLUS")
+    )
+)
+
+declined_condition = (
+    policy_derived[
+        "LATEST_PFP_POLICY_STATUS"
+    ].eq("D")
+)
+
+policy_derived["STATUS"] = np.select(
+    [
+        funded_condition,
+        declined_condition,
+    ],
+    [
+        "Funded",
+        "Declined",
+    ],
+    default="Others"
+)
+
+=======
+
+policy_derived[
+    "STATUS"
 ].value_counts(dropna=False)
 
 =======
 
-df_product.to_parquet(
-    RAW / "policy_stage5_product_filtered.parquet",
+policy_derived.to_parquet(
+    RAW / "policy_stage6_derived.parquet",
     index=False
 )
-=======
 
-print(df_product.shape)
-
-========
-
-
-
-
-
+clip_summary.to_csv(
+    RAW / "policy_stage6_clip_summary.csv",
+    index=False
+)
