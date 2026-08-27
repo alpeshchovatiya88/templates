@@ -1,17 +1,156 @@
-print("policy_population:", len(policy_population))
-print("policy_econ:", len(policy_econ))
+code = df["POD_SPL_PROG_CODE"]
+frgn = df["PRD_FOREIGN_BORROWER"]
+
+actltv = pd.to_numeric(
+    df["ACTLTV"],
+    errors="coerce"
+)
+
+df["PRODUCT_GROUP"] = np.select(
+    [
+        actltv > 97,
+        code.isin(["ALAU", "ALAM"]),
+        code.isin(["HELF", "HELP"]),
+        code.isin(["BDWN"]),
+        code.isin(["CHBK"]),
+        code.isin(["VACP"]),
+        code.isin(["FE01"]) | (frgn == "Y"),
+        code.isin(["CPSI", "CPPI"]),
+    ],
+    [
+        "HB100",
+        "ALTA",
+        "HELOC",
+        "BORROWED DOWN",
+        "CASHBACK",
+        "VACATION/SECOND",
+        "NEW TO CAN",
+        "CREDIT_ASSIST",
+    ],
+    default="REGULAR",
+)
+
+==========
+
+df["PRODUCT_GROUP"].value_counts(dropna=False)
+
+==========
+
+df["PRODUCT_GROUP_2"] = np.where(
+    df["PRODUCT_GROUP"].isin(
+        [
+            "CASHBACK",
+            "CREDIT_ASSIST",
+            "HB100",
+            "HELOC",
+        ]
+    ),
+    "EXPIRED",
+    np.where(
+        df["PRODUCT_GROUP"].isin(
+            [
+                "VACATION/SECOND",
+                "NEW TO CAN",
+            ]
+        ),
+        "REGULAR",
+        df["PRODUCT_GROUP"],
+    ),
+)
+
+=========
+
+pd.crosstab(
+    df["PRODUCT_GROUP"],
+    df["PRODUCT_GROUP_2"],
+    dropna=False
+)
+=======
+
+rows_before = len(df)
+
+print("Rows before product filter:", rows_before)
 
 print(
-    "policy_population duplicate apps:",
-    policy_population.duplicated("APPLICATION_NUMBER").sum()
+    df["PRODUCT_GROUP_2"]
+    .value_counts(dropna=False)
+)
+
+========
+
+bad_product = df["PRODUCT_GROUP_2"].isin(
+    ["ALTA", "EXPIRED"]
+)
+
+not_govt_guaranteed = (
+    df["PRD_GOVT_GUARANTEE"] != "Y"
+)
+
+print("ALTA/EXPIRED:",
+      bad_product.sum())
+
+print("Not govt guaranteed:",
+      not_govt_guaranteed.sum())
+
+print(
+    "Fail either condition:",
+    (bad_product | not_govt_guaranteed).sum()
+)
+
+=========
+
+df_product = df[
+    (~df["PRODUCT_GROUP_2"].isin(
+        ["ALTA", "EXPIRED"]
+    ))
+    & (df["PRD_GOVT_GUARANTEE"] == "Y")
+].copy()
+
+=========
+
+print(
+    "Rows before:",
+    rows_before
 )
 
 print(
-    "policy_econ duplicate apps:",
-    policy_econ.duplicated("APPLICATION_NUMBER").sum()
+    "Rows after:",
+    len(df_product)
 )
 
 print(
-    "policy_econ unique apps:",
-    policy_econ["APPLICATION_NUMBER"].nunique()
+    "Rows removed:",
+    rows_before - len(df_product)
 )
+
+=========
+
+print(
+    "Duplicate applications:",
+    df_product
+    .duplicated("APPLICATION_NUMBER")
+    .sum()
+)
+
+==========
+
+df_product[
+    "PRODUCT_GROUP_2"
+].value_counts(dropna=False)
+
+=======
+
+df_product.to_parquet(
+    RAW / "policy_stage5_product_filtered.parquet",
+    index=False
+)
+=======
+
+print(df_product.shape)
+
+========
+
+
+
+
+
