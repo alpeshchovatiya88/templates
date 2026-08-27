@@ -1,63 +1,414 @@
-Summary: [Population] Product Filtering Rules and Government Guarantee Restriction
+for name, df in {
+    "policy": policy,
+    "etd": etd,
+    "lru": lru,
+    "toronto_fsa": toronto_fsa,
+    "econ_hist": econ_hist,
+    "econ_future": econ_future,
+}.items():
+    print(name, df.shape)
 
-Description:
-The code excludes product groups mapped to “ALTA” and “EXPIRED” and retains only records 
-where PRD_GOVT_GUARANTEE = "Y". Additional product grouping logic exists (HB100, HELOC, 
-Cashback, etc.).
+============
 
-Please provide:
-• Approved list of products/programs included in the model population.
-• Business rationale for excluding ALTA / EXPIRED and requiring government guarantee.
-• Volume impact of these filters.
-• Confirmation that the filters match the intended scope of SMI3.
+policy1 = policy.copy()
 
+# normalize columns
+policy1.columns = policy1.columns.str.strip()
 
-import os
+required = [
+    "APPLICATION_NUMBER",
+    "RECEIVED_DAY_SID",
+    "EFFECT_DAY_SID",
+    "LOB_CODE",
+    "LRUPLUS_FLAG",
+]
 
-from pipelines.smi3.preprocess import (
-    build_policy_query,
-    build_borrower_query,
-)
-from pipelines.smi3.util import load_data_from_snowflake
+missing = [c for c in required if c not in policy1.columns]
+print("Missing:", missing)
 
+======
 
-# Use the SAME dt_model as your pipeline
-DT_MODEL = "202606"
+print("Starting rows:", len(policy1))
 
-REGION = "ca-central-1"
+policy1 = policy1[
+    policy1["APPLICATION_NUMBER"].notna()
+].copy()
 
-OUTPUT_DIR = "raw_data"
-
-os.makedirs(OUTPUT_DIR, exist_ok=True)
-
-
-print("Loading POLICY from Snowflake...")
-
-policy = load_data_from_snowflake(
-    build_policy_query(dt_model=DT_MODEL),
-    region=REGION,
-)
-
-policy.to_csv(
-    os.path.join(OUTPUT_DIR, "policy_raw.csv"),
-    index=False,
+policy1["APPLICATION_NUMBER"] = (
+    policy1["APPLICATION_NUMBER"]
+    .astype("int64")
 )
 
-print("Policy shape:", policy.shape)
+========
 
-
-print("Loading BORROWER from Snowflake...")
-
-borrower = load_data_from_snowflake(
-    build_borrower_query(dt_model=DT_MODEL),
-    region=REGION,
+policy1["RECEIVED_DAY_SID"] = pd.to_numeric(
+    policy1["RECEIVED_DAY_SID"],
+    errors="coerce"
 )
 
-borrower.to_csv(
-    os.path.join(OUTPUT_DIR, "borrower_raw.csv"),
-    index=False,
+policy1["EFFECT_DAY_SID"] = pd.to_numeric(
+    policy1["EFFECT_DAY_SID"],
+    errors="coerce"
 )
 
-print("Borrower shape:", borrower.shape)
+==========
 
-print("DONE")
+effect_invalid = (
+    policy1["EFFECT_DAY_SID"].isna()
+    | (policy1["EFFECT_DAY_SID"] <= 0)
+)
+
+received_invalid = (
+    policy1["RECEIVED_DAY_SID"].isna()
+    | (policy1["RECEIVED_DAY_SID"] <= 0)
+)
+
+policy1.loc[
+    effect_invalid & ~received_invalid,
+    "EFFECT_DAY_SID"
+] = policy1.loc[
+    effect_invalid & ~received_invalid,
+    "RECEIVED_DAY_SID"
+]
+=============
+
+policy1["EFFECT_SID"] = (
+    policy1["EFFECT_DAY_SID"] // 100
+).astype("Int64")
+
+policy1["BOOKYEAR"] = (
+    policy1["EFFECT_SID"] // 100
+).astype("Int64")
+
+========
+
+print(
+    "Duplicate applications before:",
+    policy1.duplicated("APPLICATION_NUMBER").sum()
+)
+
+policy1 = policy1.drop_duplicates(
+    subset="APPLICATION_NUMBER",
+    keep="last"
+)
+
+print("Clean policy shape:", policy1.shape)
+
+============
+
+etd1 = etd.copy()
+etd1.columns = etd1.columns.str.strip()
+
+required = [
+    "APPLICATION_NUMBER",
+    "PMP_BEST_DATE",
+    "DELQ90_IND",
+    "CLAIM_IND",
+    "TOTAL_INCURED_LOSS",
+]
+
+[c for c in required if c not in etd1.columns]
+
+========
+
+etd1["APPLICATION_NUMBER"] = (
+    etd1["APPLICATION_NUMBER"]
+    .astype("int64")
+)
+
+pmp_date = pd.to_datetime(
+    etd1["PMP_BEST_DATE"],
+    errors="coerce"
+)
+
+etd1["PMP_BEST_DATE"] = (
+    pmp_date
+    .dt.strftime("%Y%m%d")
+    .astype("Int64")
+)
+
+============
+print("Rows before removing 2020:", len(etd1))
+
+etd1 = etd1[
+    pmp_date.dt.year.ne(2020)
+].copy()
+
+print("Rows after:", len(etd1))
+
+=========
+
+print(
+    "Duplicate rows:",
+    etd1.duplicated("APPLICATION_NUMBER").sum()
+)
+
+print(
+    "Applications with duplicate episodes:",
+    etd1.loc[
+        etd1.duplicated("APPLICATION_NUMBER"),
+        "APPLICATION_NUMBER"
+    ].nunique()
+)
+
+=========
+
+etd_app = (
+    etd1
+    .groupby("APPLICATION_NUMBER", as_index=False)
+    .agg(
+        DELQ90_IND=("DELQ90_IND", "max"),
+        CLAIM_IND=("CLAIM_IND", "max"),
+        TOTAL_INCURED_LOSS=("TOTAL_INCURED_LOSS", "sum"),
+    )
+)
+
+print(etd_app.shape)
+
+=========
+
+policy2 = policy1.merge(
+    etd_app,
+    on="APPLICATION_NUMBER",
+    how="left"
+)
+
+print(policy1.shape)
+print(policy2.shape)
+
+==========
+
+EFFECT_SID between 200900 and 202512
+LOB_CODE == "MI"
+LRUPLUS_FLAG != "Y"
+
+====
+LOB_RENAMED = "MI"
+=====
+mi = policy2[
+    policy2["EFFECT_SID"].between(200900, 202512)
+    & policy2["LOB_CODE"].eq("MI")
+    & policy2["LRUPLUS_FLAG"].ne("Y")
+].copy()
+
+mi["LOB_RENAMED"] = "MI"
+
+print("MI shape:", mi.shape)
+print(
+    "MI duplicate APPLICATION_NUMBER:",
+    mi.duplicated("APPLICATION_NUMBER").sum()
+)
+
+=======
+
+audit = {}
+
+audit["policy_raw"] = len(policy)
+audit["policy_clean"] = len(policy1)
+audit["policy_after_etd_merge"] = len(policy2)
+audit["mi"] = len(mi)
+
+audit
+
+======
+
+lru1 = lru.copy()
+lru1.columns = lru1.columns.str.strip()
+
+======
+
+policy_lru = policy2.copy()
+
+policy_lru["APPLICATION_NUMBER"] = pd.to_numeric(
+    policy_lru["APPLICATION_NUMBER"],
+    errors="coerce"
+).astype("Int64")
+
+lru1["LRU_REF_#"] = pd.to_numeric(
+    lru1["LRU_REF_#"],
+    errors="coerce"
+).astype("Int64")
+
+lru1["BULK_REF_#"] = pd.to_numeric(
+    lru1["BULK_REF_#"],
+    errors="coerce"
+).astype("Int64")
+
+======
+lru1 = (
+    lru1
+    .dropna(subset=["LRU_REF_#"])
+    .drop_duplicates(
+        subset=["LRU_REF_#", "BULK_REF_#"]
+    )
+    .copy()
+)
+
+====
+policy_lru = (
+    policy_lru
+    .dropna(subset=["APPLICATION_NUMBER"])
+    .drop_duplicates(
+        subset=["APPLICATION_NUMBER"],
+        keep="last"
+    )
+    .copy()
+)
+
+=======
+
+df_lru = lru1.merge(
+    policy_lru,
+    left_on="LRU_REF_#",
+    right_on="APPLICATION_NUMBER",
+    how="left",
+    validate="many_to_one"
+)
+
+======
+bulk_status = (
+    policy_lru[
+        ["APPLICATION_NUMBER", "LATEST_PFP_POLICY_STATUS"]
+    ]
+    .rename(
+        columns={
+            "APPLICATION_NUMBER": "BULK_REF_#",
+            "LATEST_PFP_POLICY_STATUS": "BULK_STATUS",
+        }
+    )
+    .drop_duplicates(
+        subset=["BULK_REF_#"],
+        keep="last"
+    )
+)
+
+====
+df_lru = df_lru.merge(
+    bulk_status,
+    on="BULK_REF_#",
+    how="left",
+    validate="many_to_one"
+)
+
+=====
+funded_status = ["C", "L", "R", "M", "T"]
+
+valid_lru_funded_status = ["X", "A", "E"]
+
+====
+funded_status = ["C", "L", "R", "M", "T"]
+valid_lru_funded_status = ["X", "A", "E"]
+
+cond_rule1 = (
+    df_lru["LRU_REF_#"].notna()
+    & df_lru["BULK_REF_#"].notna()
+    & df_lru["LATEST_PFP_POLICY_STATUS"].isin(
+        valid_lru_funded_status + ["D"]
+    )
+    & df_lru["BULK_STATUS"].isin(funded_status)
+)
+
+=====
+cond_rule2 = (
+    df_lru["LRU_REF_#"].notna()
+    & df_lru["BULK_REF_#"].isna()
+    & df_lru["LATEST_PFP_POLICY_STATUS"].isin(
+        funded_status
+    )
+)
+
+======
+df_lru = df_lru[
+    df_lru["EFFECT_SID"].between(200901, 202512)
+    & (cond_rule1 | cond_rule2)
+].copy()
+
+====
+df_lru = df_lru.drop(
+    columns=[
+        "LRU_REF_#",
+        "BULK_REF_#",
+        "BULK_STATUS"
+    ],
+    errors="ignore"
+)
+
+=====
+bulk_refs = set(
+    lru1["BULK_REF_#"]
+    .dropna()
+    .astype("int64")
+    .unique()
+)
+
+etd_apps_on_bulk_side = set(
+    etd_app.loc[
+        etd_app["APPLICATION_NUMBER"].isin(bulk_refs),
+        "APPLICATION_NUMBER"
+    ]
+    .dropna()
+    .astype("int64")
+    .unique()
+)
+
+lru_plus_extra = policy_lru[
+    policy_lru["APPLICATION_NUMBER"]
+    .isin(etd_apps_on_bulk_side)
+].copy()
+
+=====
+lru_final = pd.concat(
+    [df_lru, lru_plus_extra],
+    ignore_index=True,
+    sort=False
+)
+
+lru_final["LOB_RENAMED"] = "LRUPLUS"
+
+lru_final = lru_final.drop_duplicates(
+    subset=["APPLICATION_NUMBER"],
+    keep="last"
+)
+
+print("LRUPLUS:", lru_final.shape)
+
+====
+
+policy_population = pd.concat(
+    [mi, lru_final],
+    ignore_index=True
+)
+
+policy_population = (
+    policy_population
+    .drop_duplicates(
+        subset=["APPLICATION_NUMBER"],
+        keep="last"
+    )
+)
+
+print(policy_population.shape)
+======
+
+audit = pd.DataFrame({
+    "stage": [
+        "raw_policy",
+        "clean_policy",
+        "after_etd_merge",
+        "mi_population",
+        "lru_population",
+        "combined_policy_population",
+    ],
+    "rows": [
+        len(policy),
+        len(policy1),
+        len(policy2),
+        len(mi),
+        len(lru_final),
+        len(policy_population),
+    ],
+})
+
+audit
+
+
