@@ -1,322 +1,260 @@
-for col in ["CLAIM_IND", "DELQ90_IND"]:
-    if col in policy_stage7.columns:
-        policy_stage7[col] = (
-            policy_stage7[col]
-            .fillna(0)
-        )
+borrower_clean = borrower.copy()
+
+borrower_clean.columns = (
+    borrower_clean.columns
+    .str.strip()
+)
 
 =========
 
-claim_ind = policy_stage7.get(
-    "CLAIM_IND",
-    0
-)
+required = [
+    "APPLICATION_NUMBER",
+    "BOR_ID",
+    "BORROWER_SID",
+]
 
-delq90_ind = policy_stage7.get(
-    "DELQ90_IND",
-    0
-)
+missing = [
+    c for c in required
+    if c not in borrower_clean.columns
+]
 
-==========
-
-policy_stage7["category"] = np.select(
-    [
-        policy_stage7["STATUS"] == "Declined",
-        policy_stage7["STATUS"] == "Others",
-
-        (claim_ind == 1)
-        & (delq90_ind == 1),
-
-        (claim_ind == 1)
-        & (delq90_ind == 0),
-
-        (claim_ind == 0)
-        & (delq90_ind == 1),
-    ],
-    [
-        "Declined",
-        "Others",
-        "Delq_Claim",
-        "Claim_Only",
-        "Delq_Only",
-    ],
-    default="No_Event",
-)
-
-==========
-
-policy_stage7[
-    "category"
-].value_counts(dropna=False)
-
-========
-
-policy_stage7["target"] = np.select(
-    [
-        policy_stage7["category"] == "Others",
-        policy_stage7["category"] == "No_Event",
-    ],
-    [
-        np.nan,
-        0,
-    ],
-    default=1,
-)
-
-========
-
-policy_stage7[
-    ["category", "target"]
-].value_counts(dropna=False)
+print("Missing:", missing)
 
 =========
 
-policy_stage7.groupby(
-    "category",
-    dropna=False
-)["target"].value_counts(
-    dropna=False
+rows_before = len(borrower_clean)
+
+borrower_clean = borrower_clean[
+    borrower_clean["APPLICATION_NUMBER"].notna()
+].copy()
+
+===========
+
+borrower_clean["APPLICATION_NUMBER"] = (
+    borrower_clean["APPLICATION_NUMBER"]
+    .astype("int64")
 )
 
-========
-
-NB_URBAN_WHITELIST = {
-    "FREDERICTON",
-    "SAINT JOHN",
-    "MONCTON",
-}
-
-=====
-
-postal_code = (
-    policy_stage7["POSTAL_CODE"]
-    .astype(str)
-    .fillna("")
-    .str.replace(
-        " ",
-        "",
-        regex=False
-    )
-    .str.upper()
+borrower_clean["BOR_ID"] = (
+    borrower_clean["BOR_ID"]
+    .astype("int64")
 )
-
-========
-
-policy_stage7["RURAL_IND"] = np.where(
-    postal_code.str[1:2] == "0",
-    "Y",
-    "N"
-)
-
-========
-
-is_nb = (
-    policy_stage7["PROVINCE"]
-    .astype(str)
-    .str.upper()
-    .eq("NB")
-)
-
-city = (
-    policy_stage7.get(
-        "CITY",
-        pd.Series(
-            pd.NA,
-            index=policy_stage7.index
-        )
-    )
-    .astype(str)
-    .str.upper()
-)
-
-========
-
-policy_stage7.loc[
-    is_nb
-    & ~city.isin(NB_URBAN_WHITELIST),
-    "RURAL_IND"
-] = "Y"
 
 ==========
 
-policy_stage7[
-    "RURAL_IND"
-].value_counts(dropna=False)
+object_cols = borrower_clean.select_dtypes(
+    include="object"
+).columns
 
-=======
-
-policy_stage7.loc[
-    policy_stage7["PROVINCE"]
-    .astype(str)
-    .str.upper()
-    .eq("NB"),
-    [
-        "CITY",
-        "POSTAL_CODE",
-        "RURAL_IND"
-    ]
-].head(30)
-
-=====
-
-audit_stage7 = pd.DataFrame({
-    "metric": [
-        "rows",
-        "target_1",
-        "target_0",
-        "target_missing",
-        "rural_Y",
-        "rural_N",
-    ],
-    "value": [
-        len(policy_stage7),
-        (policy_stage7["target"] == 1).sum(),
-        (policy_stage7["target"] == 0).sum(),
-        policy_stage7["target"].isna().sum(),
-        (policy_stage7["RURAL_IND"] == "Y").sum(),
-        (policy_stage7["RURAL_IND"] == "N").sum(),
-    ]
-})
-
-audit_stage7
-
-=====
-
-effect_day = policy_stage8["EFFECT_DAY_SID"].replace(-1, np.nan)
-
-policy_stage8["EFFECT_DAY_SID"] = (
-    effect_day.fillna(
-        policy_stage8["RECEIVED_DAY_SID"]
-    )
-)
-
-policy_stage8["EFFECT_SID"] = (
-    policy_stage8["EFFECT_DAY_SID"] // 100
-).astype("Int64")
-
-======
-
-missing_rate = (
-    policy_stage8["PRD_CONTRACT_RATE"].isna()
-)
-
-policy_stage8.loc[
-    missing_rate,
-    "filled_PRD_CONTRACT_RATE_by"
-] = "PRD_QUAL_INT_RATE"
-
-policy_stage8["PRD_CONTRACT_RATE"] = (
-    policy_stage8["PRD_CONTRACT_RATE"]
-    .fillna(
-        policy_stage8["PRD_QUAL_INT_RATE"]
-    )
-    .astype(float)
-)
+for col in object_cols:
+    try:
+        borrower_clean[col] = (
+            borrower_clean[col]
+            .replace({
+                " ": np.nan,
+                "*": np.nan,
+                "": np.nan,
+            })
+            .astype("float64")
+        )
+    except Exception:
+        continue
 
 ========
 
-policy_stage8["ACTLTV_lgd"] = (
-    policy_stage8["ACTLTV"] / 100
+print("Rows before:", rows_before)
+print("Rows after :", len(borrower_clean))
+print("Shape      :", borrower_clean.shape)
+
+===========
+
+tu_clean = tu.copy()
+
+tu_clean.columns = tu_clean.columns.str.strip()
+
+============
+
+required = [
+    "UNIQUE_RECORD_ID",
+    "CRD_SCORE_TV",
+    "CRD_SCORE_10",
+]
+
+missing = [
+    c for c in required
+    if c not in tu_clean.columns
+]
+
+print("Missing:", missing)
+
+===========
+
+tu_clean["TV_SOURCE"] = (
+    tu_clean["CRD_SCORE_TV"]
+    .notna()
+    .map({
+        True: "credit_tv",
+        False: np.nan
+    })
 )
 
-========
-
-missing_iif = (
-    policy_stage8["POD_INSURANCE_IN_FORCE"].isna()
+tu_clean["FICO10_SOURCE"] = (
+    tu_clean["CRD_SCORE_10"]
+    .notna()
+    .map({
+        True: "credit_10",
+        False: np.nan
+    })
 )
 
-iif_from_purchase_price = (
-    policy_stage8["PRK_PURCHASE_PRICE"].notna()
-    & policy_stage8["ACTLTV_lgd"].notna()
-)
+===========
 
-========
-
-policy_stage8.loc[
-    missing_iif & iif_from_purchase_price,
-    "filled_POD_INSURANCE_IN_FORCE_by"
-] = "PRK_PURCHASE_PRICE * ACTLTV_lgd"
-
-policy_stage8.loc[
-    missing_iif & ~iif_from_purchase_price,
-    "filled_POD_INSURANCE_IN_FORCE_by"
-] = "PRD_BASE_LOAN_AMT"
-
-========
-
-policy_stage8["POD_INSURANCE_IN_FORCE"] = (
-    policy_stage8["POD_INSURANCE_IN_FORCE"]
-    .fillna(
-        policy_stage8["PRK_PURCHASE_PRICE"]
-        * policy_stage8["ACTLTV_lgd"]
+tu_clean = (
+    tu_clean
+    .replace("*", np.nan)
+    .apply(
+        pd.to_numeric,
+        errors="coerce"
     )
-    .fillna(
-        policy_stage8["PRD_BASE_LOAN_AMT"]
+    .mask(
+        lambda x: x < 0,
+        np.nan
     )
-    .astype(float)
-)
-
-========
-
-missing_property_value = (
-    policy_stage8["PRK_PROPERTY_VALUE"].isna()
-)
-
-policy_stage8.loc[
-    missing_property_value
-    & policy_stage8["PRK_PURCHASE_PRICE"].notna(),
-    "filled_PRK_PROPERTY_VALUE_by"
-] = "PRK_PURCHASE_PRICE"
-
-policy_stage8.loc[
-    missing_property_value
-    & policy_stage8["PRK_PURCHASE_PRICE"].isna(),
-    "filled_PRK_PROPERTY_VALUE_by"
-] = "PRK_DECLARED_VALUE"
-
-========
-
-policy_stage8["PRK_PROPERTY_VALUE"] = (
-    policy_stage8["PRK_PROPERTY_VALUE"]
-    .fillna(
-        policy_stage8["PRK_PURCHASE_PRICE"]
-    )
-    .fillna(
-        policy_stage8["PRK_DECLARED_VALUE"]
-    )
-    .astype(float)
 )
 
 =======
 
-print(
-    policy_stage8[
-        "filled_PRD_CONTRACT_RATE_by"
-    ].value_counts(dropna=False)
-)
+print(tu_clean.shape)
+tu_clean.head()
+
+===========
+
+CV_SCORE_COLS = [
+    "CV_CREDIT_SCORE_2017",
+    "CV_CREDIT_SCORE_2019",
+    "CV_CREDIT_SCORE_2022",
+    "CV_CREDIT_SCORE_2023",
+]
+
+EQ_SCORE_COLS = [
+    "EQ_CREDIT_SCORE_2017",
+    "EQ_CREDIT_SCORE_2019",
+    "EQ_CREDIT_SCORE_2022",
+    "EQ_CREDIT_SCORE_2023",
+]
+
+==========
+
+cv_clean = cv.copy()
+cv_clean.columns = cv_clean.columns.str.strip()
 
 print(
-    policy_stage8[
-        "filled_POD_INSURANCE_IN_FORCE_by"
-    ].value_counts(dropna=False)
+    "BORROWER_SID present:",
+    "BORROWER_SID" in cv_clean.columns
 )
 
-print(
-    policy_stage8[
-        "filled_PRK_PROPERTY_VALUE_by"
-    ].value_counts(dropna=False)
-)
+============
 
-========
+def extract_hit_score(
+    df,
+    score_cols,
+    output_col
+):
 
-policy_stage8[
-    [
-        "EFFECT_DAY_SID",
-        "PRD_CONTRACT_RATE",
-        "POD_INSURANCE_IN_FORCE",
-        "PRK_PROPERTY_VALUE",
+    hit_cols = [
+        f"{c}_HIT"
+        for c in score_cols
     ]
-].isna().sum()
 
-========
+    available_score_cols = [
+        c for c in score_cols
+        if c in df.columns
+    ]
+
+    available_hit_cols = [
+        c for c in hit_cols
+        if c in df.columns
+    ]
+
+    if (
+        not available_score_cols
+        or not available_hit_cols
+    ):
+        return pd.DataFrame(
+            columns=[
+                "BORROWER_SID",
+                output_col
+            ]
+        )
+
+    mask = (
+        df[available_hit_cols]
+        .eq("hit")
+        .any(axis=1)
+    )
+
+    out = df.loc[
+        mask,
+        (
+            ["BORROWER_SID"]
+            + available_score_cols
+            + available_hit_cols
+        )
+    ].copy()
+
+    out[output_col] = np.nan
+
+    for score_col in available_score_cols:
+
+        hit_col = f"{score_col}_HIT"
+
+        if hit_col not in out.columns:
+            continue
+
+        m = out[hit_col].eq("hit")
+
+        out.loc[
+            m,
+            output_col
+        ] = out.loc[
+            m,
+            score_col
+        ]
+
+    out = out[
+        ["BORROWER_SID", output_col]
+    ].copy()
+
+    out[output_col] = pd.to_numeric(
+        out[output_col],
+        errors="coerce"
+    )
+
+    return out
+
+==============
+
+credit_vision_old = extract_hit_score(
+    cv_clean,
+    score_cols=CV_SCORE_COLS,
+    output_col="CRD_SCORE_CV_old"
+)
+
+eq_beacon9 = extract_hit_score(
+    cv_clean,
+    score_cols=EQ_SCORE_COLS,
+    output_col="CRD_SCORE_BEACON9"
+)
+
+print(
+    "credit_vision_old:",
+    credit_vision_old.shape
+)
+
+print(
+    "eq_beacon9:",
+    eq_beacon9.shape
+)
+
+==========
 
