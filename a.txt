@@ -1,134 +1,374 @@
-train_mask_declined = (
-    df_all["STATUS"].eq("Declined")
-    & df_all["CRD_SCORE"].lt(700)
-    & df_all["RAS_OMNI"].eq("F")
-    & df_all["EFFECT_SID"].between(200900, 201512)
-)
-
-======
-
-mask_keep = (
-    (~df_all["STATUS"].isin(["Declined", "Others"]))
-    | train_mask_declined
-)
-
-df_training = df_all.loc[mask_keep].copy()
-
-df_training = df_training[
-    df_training["CRD_SCORE"].notna()
-]
-
-df_training = df_training[
-    df_training["BOOKYEAR"].between(2009, 2015)
-].copy()
-
-df_training = df_training[
-    df_training["STATUS"] == "Funded"
-]
-
-======
-
-df_training = df_training[
-    df_training["STATUS"] == "Funded"
-]
-
-=====
-
-print("Training shape:", df_training.shape)
+print("policy_df :", policy_df.shape)
+print("borrower_df:", borrower_df.shape)
+print("df_all     :", df_all.shape)
 
 print(
-    df_training["STATUS"]
-    .value_counts(dropna=False)
+    "Policy unique applications:",
+    policy_df["APPLICATION_NUMBER"].nunique()
 )
 
 print(
-    df_training["BOOKYEAR"]
-    .value_counts(dropna=False)
-    .sort_index()
+    "Borrower unique applications:",
+    borrower_df["APPLICATION_NUMBER"].nunique()
 )
 
 print(
-    df_training["category"]
-    .value_counts(dropna=False)
+    "Merged unique applications:",
+    df_all["APPLICATION_NUMBER"].nunique()
 )
 
 =======
 
-FINAL_COLUMNS = [
+borrower_matched = df_all["NUM_OF_BOR"].notna()
+
+print(
+    borrower_matched.value_counts(dropna=False)
+)
+
+print(
+    "Borrower match rate:",
+    borrower_matched.mean()
+)
+======
+
+missing_summary = pd.DataFrame({
+    "missing_n": df_all.isna().sum(),
+    "missing_pct": df_all.isna().mean() * 100
+})
+
+missing_summary = (
+    missing_summary
+    .sort_values("missing_pct", ascending=False)
+)
+
+missing_summary
+
+======
+
+numeric_cols = df_all.select_dtypes(
+    include="number"
+).columns
+
+outlier_summary = df_all[numeric_cols].describe(
+    percentiles=[
+        0.01,
+        0.05,
+        0.25,
+        0.50,
+        0.75,
+        0.95,
+        0.99
+    ]
+).T
+
+outlier_summary
+
+======
+
+check_cols = [
+    "CRD_SCORE",
     "CRD_SCORE_bin",
     "CRD_OPEN_TRADE_TU",
-    "CRA_COLLECTION",
-    "CRA_JUDGEMENT",
-    "CRA_BANKRUPTCY_FORECLOSURE_IND",
-    "HPI_+4",
-    "UE_+4",
     "ACTLTV",
     "TDSR",
     "GDSR",
     "NUM_OF_BOR",
     "PRD_AMORTIZATION",
     "PRK_PROPERTY_AGE",
-    "PRK_PROPERTY_TYPE",
-    "PRD_PORT",
     "PRK_NUM_OF_UNITS",
-    "POD_MARKET_CODE",
-    "PRD_LOAN_PURPOSE",
-    "target",
-    "APPLICATION_NUMBER",
-    "EFFECT_SID",
-    "EFFECT_DAY_SID",
-    "ECON_REGION",
-    "RURAL_IND",
-    "REG_REGION_CODE",
-    "BOOKYEAR",
-    "category",
-    "STATUS",
-    "LOB_RENAMED",
-    "CRD_SCORE",
     "POD_INSURANCE_IN_FORCE",
     "PRD_CONTRACT_RATE",
-    "TOTAL_INCURED_LOSS",
-    "lgd",
-    "LGD_BT",
-    "MONTH",
     "PRK_PROPERTY_VALUE",
-    "PRK_TENURE",
-    "HPI_change",
+    "HPI_+4",
+    "UE_+4",
 ]
+
+df_all[
+    [c for c in check_cols if c in df_all.columns]
+].describe(
+    percentiles=[.01, .05, .50, .95, .99]
+).T
+
+=======
+
+train_missing = pd.DataFrame({
+    "missing_n": train_df.isna().sum(),
+    "missing_pct": train_df.isna().mean() * 100
+}).sort_values(
+    "missing_pct",
+    ascending=False
+)
+
+train_missing
 
 ========
 
-missing = [
-    col
-    for col in FINAL_COLUMNS
-    if col not in df_training.columns
+population_summary = pd.DataFrame({
+    "Dataset": ["Train", "Validation", "Test"],
+    "Rows": [
+        len(train_df),
+        len(validation_df),
+        len(test_df),
+    ]
+})
+
+population_summary
+
+========
+
+target_summary = pd.DataFrame({
+    "Dataset": ["Train", "Validation", "Test"],
+    "N": [
+        len(train_df),
+        len(validation_df),
+        len(test_df),
+    ],
+    "Target_Rate": [
+        train_df["target"].mean(),
+        validation_df["target"].mean(),
+        test_df["target"].mean(),
+    ],
+})
+
+target_summary
+
+========
+
+missing_compare = pd.DataFrame({
+    "Train_missing_%":
+        train_df[model_features].isna().mean() * 100,
+
+    "Validation_missing_%":
+        validation_df[model_features].isna().mean() * 100,
+
+    "Test_missing_%":
+        test_df[model_features].isna().mean() * 100,
+})
+
+missing_compare["Val_minus_Train_pp"] = (
+    missing_compare["Validation_missing_%"]
+    - missing_compare["Train_missing_%"]
+)
+
+missing_compare["Test_minus_Train_pp"] = (
+    missing_compare["Test_missing_%"]
+    - missing_compare["Train_missing_%"]
+)
+
+missing_compare.sort_values(
+    "Test_minus_Train_pp",
+    key=abs,
+	    ascending=False
+)
+
+=========
+
+numeric_features = [
+    c for c in model_features
+    if pd.api.types.is_numeric_dtype(train_df[c])
 ]
 
-print("Missing columns:", missing)
-print("Number missing:", len(missing))
+categorical_features = [
+    c for c in model_features
+    if c not in numeric_features
+]
 
-=======
+print("Numeric:", numeric_features)
+print("Categorical:", categorical_features)
 
-if missing:
-    raise KeyError(
-        f"Final dataset missing required columns: {missing}"
+========
+
+def numeric_summary(df, features, sample_name):
+
+    x = df[features]
+
+    result = pd.DataFrame({
+        "N": x.count(),
+        "Missing_%": x.isna().mean() * 100,
+        "Mean": x.mean(),
+        "Std": x.std(),
+        "Min": x.min(),
+        "P01": x.quantile(0.01),
+        "P05": x.quantile(0.05),
+        "P25": x.quantile(0.25),
+        "Median": x.median(),
+        "P75": x.quantile(0.75),
+        "P95": x.quantile(0.95),
+        "P99": x.quantile(0.99),
+        "Max": x.max(),
+    })
+
+    result["Dataset"] = sample_name
+
+    return result.reset_index(
+        names="Feature"
     )
 
+=======
+
+numeric_compare = pd.concat(
+    [
+        numeric_summary(
+            train_df,
+            numeric_features,
+            "Train"
+        ),
+        numeric_summary(
+            validation_df,
+            numeric_features,
+            "Validation"
+        ),
+        numeric_summary(
+            test_df,
+            numeric_features,
+            "Test"
+        ),
+    ],
+    ignore_index=True
+)
+
+numeric_compare
+
 ======
 
-train_df = df_training[
-    FINAL_COLUMNS
-].copy()
+numeric_compare[
+    numeric_compare["Feature"] == "ACTLTV"
+]
 
-=====
+======
 
-print("Full training:", df_training.shape)
-print("Final train_df:", train_df.shape)
+def category_compare(feature):
 
-print(train_df.columns.tolist())
+    train = (
+        train_df[feature]
+        .fillna("MISSING")
+        .value_counts(normalize=True)
+        .mul(100)
+        .rename("Train_%")
+    )
+
+    val = (
+        validation_df[feature]
+        .fillna("MISSING")
+        .value_counts(normalize=True)
+        .mul(100)
+        .rename("Validation_%")
+    )
+
+    test = (
+        test_df[feature]
+        .fillna("MISSING")
+        .value_counts(normalize=True)
+        .mul(100)
+        .rename("Test_%")
+    )
+
+    result = pd.concat(
+        [train, val, test],
+        axis=1
+    ).fillna(0)
+
+    result["Val_minus_Train_pp"] = (
+        result["Validation_%"]
+        - result["Train_%"]
+    )
+
+    result["Test_minus_Train_pp"] = (
+        result["Test_%"]
+        - result["Train_%"]
+    )
+
+    return result.sort_values(
+        "Test_%",
+        ascending=False
+    )
 
 =======
 
-len(train_df.columns)
+category_compare(
+    "PRK_PROPERTY_TYPE"
+)
 
-======
+=======
+
+for col in categorical_features:
+
+    print("\n", "=" * 80)
+    print(col)
+    print("=" * 80)
+
+    display(
+        category_compare(col)
+    )
+
+========
+
+unseen_summary = []
+
+for col in categorical_features:
+
+    train_levels = set(
+        train_df[col].dropna().unique()
+    )
+
+    val_levels = set(
+        validation_df[col].dropna().unique()
+    )
+
+    test_levels = set(
+        test_df[col].dropna().unique()
+    )
+
+    unseen_summary.append({
+        "Feature": col,
+        "Train_levels": len(train_levels),
+        "Validation_unseen":
+            len(val_levels - train_levels),
+        "Test_unseen":
+            len(test_levels - train_levels),
+        "Test_unseen_values":
+            sorted(test_levels - train_levels),
+    })
+
+unseen_summary = pd.DataFrame(
+    unseen_summary
+)
+
+unseen_summary
+
+=========
+
+outlier_results = []
+
+for col in numeric_features:
+
+    q01 = train_df[col].quantile(0.01)
+    q99 = train_df[col].quantile(0.99)
+
+    for name, df in [
+        ("Train", train_df),
+        ("Validation", validation_df),
+        ("Test", test_df),
+    ]:
+
+        valid = df[col].dropna()
+
+        outlier_results.append({
+            "Feature": col,
+            "Dataset": name,
+            "Train_P01": q01,
+            "Train_P99": q99,
+            "Below_Train_P01_%":
+                (valid < q01).mean() * 100,
+            "Above_Train_P99_%":
+                (valid > q99).mean() * 100,
+        })
+
+outlier_compare = pd.DataFrame(
+    outlier_results
+)
+
+outlier_compare
+
+========
+
