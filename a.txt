@@ -1,260 +1,179 @@
-borrower_clean = borrower.copy()
+if "CRD_SCORE_FICO8" in borrower_clean.columns:
 
-borrower_clean.columns = (
-    borrower_clean.columns
-    .str.strip()
-)
-
-=========
-
-required = [
-    "APPLICATION_NUMBER",
-    "BOR_ID",
-    "BORROWER_SID",
-]
-
-missing = [
-    c for c in required
-    if c not in borrower_clean.columns
-]
-
-print("Missing:", missing)
-
-=========
-
-rows_before = len(borrower_clean)
-
-borrower_clean = borrower_clean[
-    borrower_clean["APPLICATION_NUMBER"].notna()
-].copy()
-
-===========
-
-borrower_clean["APPLICATION_NUMBER"] = (
-    borrower_clean["APPLICATION_NUMBER"]
-    .astype("int64")
-)
-
-borrower_clean["BOR_ID"] = (
-    borrower_clean["BOR_ID"]
-    .astype("int64")
-)
-
-==========
-
-object_cols = borrower_clean.select_dtypes(
-    include="object"
-).columns
-
-for col in object_cols:
-    try:
-        borrower_clean[col] = (
-            borrower_clean[col]
-            .replace({
-                " ": np.nan,
-                "*": np.nan,
-                "": np.nan,
-            })
-            .astype("float64")
+    frames.append(
+        borrower_clean.loc[
+            borrower_clean["CRD_SCORE_FICO8"].notna(),
+            [
+                "BORROWER_SID",
+                "CRD_SCORE_FICO8"
+            ],
+        ]
+        .rename(
+            columns={
+                "CRD_SCORE_FICO8":
+                "CRD_SCORE_CV"
+            }
         )
-    except Exception:
-        continue
+        .assign(
+            CV_SOURCE="BR1_F8"
+        )
+    )
+
+======
+
+if not credit_vision_old.empty:
+
+    frames.append(
+        credit_vision_old[
+            [
+                "BORROWER_SID",
+                "CRD_SCORE_CV_old"
+            ]
+        ]
+        .rename(
+            columns={
+                "CRD_SCORE_CV_old":
+                "CRD_SCORE_CV"
+            }
+        )
+        .assign(
+            CV_SOURCE="202306_FLAT"
+        )
+    )
 
 ========
 
-print("Rows before:", rows_before)
-print("Rows after :", len(borrower_clean))
-print("Shape      :", borrower_clean.shape)
+if not frames:
 
-===========
+    credit_vision_all = pd.DataFrame(
+        columns=[
+            "BORROWER_SID",
+            "CRD_SCORE_CV",
+            "CV_SOURCE"
+        ]
+    )
 
-tu_clean = tu.copy()
+else:
 
-tu_clean.columns = tu_clean.columns.str.strip()
+    credit_vision_all = (
+        pd.concat(
+            frames,
+            ignore_index=True
+        )
+        .sort_values(
+            "CRD_SCORE_CV",
+            ascending=False
+        )
+        .drop_duplicates(
+            "BORROWER_SID",
+            keep="first"
+        )
+        .reset_index(drop=True)
+    )
 
-============
+=========
 
-required = [
-    "UNIQUE_RECORD_ID",
-    "CRD_SCORE_TV",
-    "CRD_SCORE_10",
-]
+print("credit_vision_all:", credit_vision_all.shape)
 
-missing = [
-    c for c in required
-    if c not in tu_clean.columns
-]
-
-print("Missing:", missing)
-
-===========
-
-tu_clean["TV_SOURCE"] = (
-    tu_clean["CRD_SCORE_TV"]
-    .notna()
-    .map({
-        True: "credit_tv",
-        False: np.nan
-    })
+print(
+    credit_vision_all[
+        "CV_SOURCE"
+    ].value_counts(
+        dropna=False
+    )
 )
 
-tu_clean["FICO10_SOURCE"] = (
-    tu_clean["CRD_SCORE_10"]
-    .notna()
-    .map({
-        True: "credit_10",
-        False: np.nan
-    })
+========
+
+print(
+    "Duplicate BORROWER_SID:",
+    credit_vision_all
+    .duplicated("BORROWER_SID")
+    .sum()
 )
 
-===========
+=========
 
-tu_clean = (
-    tu_clean
-    .replace("*", np.nan)
-    .apply(
-        pd.to_numeric,
-        errors="coerce"
-    )
-    .mask(
-        lambda x: x < 0,
-        np.nan
-    )
+borrower_tu = borrower_clean.merge(
+    tu_clean,
+    left_on="BOR_ID",
+    right_on="UNIQUE_RECORD_ID",
+    how="left"
+).drop(
+    columns=["UNIQUE_RECORD_ID"],
+    errors="ignore"
+)
+
+print("borrower_tu:", borrower_tu.shape)
+
+=========
+
+b = borrower_tu.merge(
+    credit_vision_all,
+    on="BORROWER_SID",
+    how="left"
+)
+
+========
+
+b = b.merge(
+    eq_beacon9,
+    on="BORROWER_SID",
+    how="left"
+)
+
+print("after all credit merges:", b.shape)
+
+========
+
+b["NUM_OF_BOR"] = b["APPLICATION_NUMBER"].map(
+    b.groupby("APPLICATION_NUMBER").size()
 )
 
 =======
 
-print(tu_clean.shape)
-tu_clean.head()
+b = b.rename(
+    columns={
+        "CRD_SCORE_10": "CRD_SCORE_FICO10",
+        "CRD_SCORE_EQ": "CRD_SCORE_BEACON4",
+    }
+)
 
-===========
+======
 
-CV_SCORE_COLS = [
-    "CV_CREDIT_SCORE_2017",
-    "CV_CREDIT_SCORE_2019",
-    "CV_CREDIT_SCORE_2022",
-    "CV_CREDIT_SCORE_2023",
+print("shape:", b.shape)
+
+print(
+    "applications:",
+    b["APPLICATION_NUMBER"].nunique()
+)
+
+print(
+    "borrower rows:",
+    len(b)
+)
+
+print(
+    b["NUM_OF_BOR"]
+    .value_counts(dropna=False)
+    .sort_index()
+    .head(20)
+)
+========
+
+print(
+    "Duplicate borrower/application pairs:",
+    b.duplicated(
+        ["APPLICATION_NUMBER", "BORROWER_SID"]
+    ).sum()
+)
+
+===
+
+[
+    c for c in b.columns
+    if "CRD_SCORE" in c
 ]
 
-EQ_SCORE_COLS = [
-    "EQ_CREDIT_SCORE_2017",
-    "EQ_CREDIT_SCORE_2019",
-    "EQ_CREDIT_SCORE_2022",
-    "EQ_CREDIT_SCORE_2023",
-]
-
-==========
-
-cv_clean = cv.copy()
-cv_clean.columns = cv_clean.columns.str.strip()
-
-print(
-    "BORROWER_SID present:",
-    "BORROWER_SID" in cv_clean.columns
-)
-
-============
-
-def extract_hit_score(
-    df,
-    score_cols,
-    output_col
-):
-
-    hit_cols = [
-        f"{c}_HIT"
-        for c in score_cols
-    ]
-
-    available_score_cols = [
-        c for c in score_cols
-        if c in df.columns
-    ]
-
-    available_hit_cols = [
-        c for c in hit_cols
-        if c in df.columns
-    ]
-
-    if (
-        not available_score_cols
-        or not available_hit_cols
-    ):
-        return pd.DataFrame(
-            columns=[
-                "BORROWER_SID",
-                output_col
-            ]
-        )
-
-    mask = (
-        df[available_hit_cols]
-        .eq("hit")
-        .any(axis=1)
-    )
-
-    out = df.loc[
-        mask,
-        (
-            ["BORROWER_SID"]
-            + available_score_cols
-            + available_hit_cols
-        )
-    ].copy()
-
-    out[output_col] = np.nan
-
-    for score_col in available_score_cols:
-
-        hit_col = f"{score_col}_HIT"
-
-        if hit_col not in out.columns:
-            continue
-
-        m = out[hit_col].eq("hit")
-
-        out.loc[
-            m,
-            output_col
-        ] = out.loc[
-            m,
-            score_col
-        ]
-
-    out = out[
-        ["BORROWER_SID", output_col]
-    ].copy()
-
-    out[output_col] = pd.to_numeric(
-        out[output_col],
-        errors="coerce"
-    )
-
-    return out
-
-==============
-
-credit_vision_old = extract_hit_score(
-    cv_clean,
-    score_cols=CV_SCORE_COLS,
-    output_col="CRD_SCORE_CV_old"
-)
-
-eq_beacon9 = extract_hit_score(
-    cv_clean,
-    score_cols=EQ_SCORE_COLS,
-    output_col="CRD_SCORE_BEACON9"
-)
-
-print(
-    "credit_vision_old:",
-    credit_vision_old.shape
-)
-
-print(
-    "eq_beacon9:",
-    eq_beacon9.shape
-)
-
-==========
+======
 
