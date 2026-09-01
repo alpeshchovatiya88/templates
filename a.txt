@@ -1,413 +1,49 @@
-import pandas as pd
-import numpy as np
-import matplotlib.pyplot as plt
-import seaborn as sns
-import math
-
-
-def plot_feature_by_bookyear(
-    df,
-    feature,
-    bad_col="BAD",
-    year_col="BOOKYEAR",
-    start_year=2009,
-    end_year=2025,
-    ncols=3,
-    include_missing=False
-):
-
-    # =========================================================
-    # PREPARE DATA
-    # =========================================================
-    data = df[[year_col, feature, bad_col]].copy()
-
-    if include_missing:
-        data[feature] = data[feature].fillna("Missing")
-    else:
-        data = data[data[feature].notna()]
-
-    years = list(range(start_year, end_year + 1))
-
-
-    # =========================================================
-    # INTERNAL SUMMARY FUNCTION
-    # =========================================================
-    def create_summary(temp_data, label):
-
-        result = (
-            temp_data
-            .groupby(feature, dropna=False)
-            .agg(
-                T=(bad_col, "size"),
-                B=(bad_col, "sum")
-            )
-            .reset_index()
-        )
-
-        result["Bad_Rate"] = (
-            result["B"] / result["T"]
-        ) * 100
-
-        result["BOOKYEAR_LABEL"] = str(label)
-
-        return result
-
-
-    # =========================================================
-    # OVERALL + EACH YEAR
-    # =========================================================
-    summary_list = [
-        create_summary(data, "overall")
-    ]
-
-    for year in years:
-
-        temp_year = data[
-            data[year_col] == year
-        ]
-
-        if not temp_year.empty:
-            summary_list.append(
-                create_summary(
-                    temp_year,
-                    year
-                )
-            )
-
-    summary = pd.concat(
-        summary_list,
-        ignore_index=True
-    )
-
-
-    # =========================================================
-    # CATEGORY ORDER
-    # =========================================================
-    categories = sorted(
-        data[feature]
-        .dropna()
-        .unique(),
-        key=lambda x: str(x)
-    )
-
-
-    # =========================================================
-    # DISTINCT COLORS
-    # Same category = same color across all years
-    # =========================================================
-    if len(categories) <= 10:
-
-        palette = sns.color_palette(
-            "tab10",
-            n_colors=len(categories)
-        )
-
-    else:
-
-        palette = sns.color_palette(
-            "tab20",
-            n_colors=len(categories)
-        )
-
-    color_dict = dict(
-        zip(categories, palette)
-    )
-
-
-    # =========================================================
-    # PLOT ORDER
-    # =========================================================
-    plot_order = (
-        ["overall"]
-        +
-        [str(year) for year in years]
-    )
-
-    nplots = len(plot_order)
-
-    nrows = math.ceil(
-        nplots / ncols
-    )
-
-
-    # =========================================================
-    # CREATE FIGURE
-    # =========================================================
-    fig, axes = plt.subplots(
-        nrows=nrows,
-        ncols=ncols,
-        figsize=(
-            7 * ncols,
-            5.5 * nrows
-        )
-    )
-
-    axes = np.array(
-        axes
-    ).reshape(-1)
-
-
-    # =========================================================
-    # LOOP THROUGH OVERALL + YEARS
-    # =========================================================
-    for i, year_label in enumerate(plot_order):
-
-        ax = axes[i]
-
-        temp = summary[
-            summary["BOOKYEAR_LABEL"]
-            == year_label
-        ].copy()
-
-
-        # -----------------------------------------------------
-        # NO DATA
-        # -----------------------------------------------------
-        if temp.empty:
-
-            ax.set_title(
-                f"{year_col}: {year_label}",
-                fontsize=13,
-                fontweight="bold"
-            )
-
-            ax.text(
-                0.5,
-                0.5,
-                "No data",
-                ha="center",
-                va="center",
-                fontsize=12,
-                fontweight="bold",
-                transform=ax.transAxes
-            )
-
-            ax.axis("off")
-
-            continue
-
-
-        # =====================================================
-        # SAME CATEGORY ORDER IN EVERY PANEL
-        # =====================================================
-        temp = (
-            temp
-            .set_index(feature)
-            .reindex(categories)
-            .reset_index()
-        )
-
-
-        x = np.arange(
-            len(categories)
-        )
-
-
-        # =====================================================
-        # BAR WIDTH BASED ON TOTAL
-        # =====================================================
-        totals = temp["T"].fillna(0)
-
-        if totals.max() > 0:
-
-            widths = (
-                0.25
-                +
-                0.65
-                * np.sqrt(
-                    totals / totals.max()
-                )
-            )
-
-        else:
-
-            widths = np.repeat(
-                0.7,
-                len(categories)
-            )
-
-
-        # =====================================================
-        # DRAW BARS
-        # Height = Bad Rate
-        # Width  = Total
-        # Color  = Category
-        # =====================================================
-        bars = ax.bar(
-            x,
-            temp["Bad_Rate"].fillna(0),
-            width=widths,
-
-            color=[
-                color_dict[c]
-                for c in categories
-            ],
-
-            edgecolor="black",
-            linewidth=0.8
-        )
-
-
-        # =====================================================
-        # TITLE
-        # =====================================================
-        ax.set_title(
-            f"{year_col}: {year_label}",
-            fontsize=14,
-            fontweight="bold",
-            pad=14
-        )
-
-
-        # =====================================================
-        # AXIS LABELS
-        # =====================================================
-        ax.set_xlabel(
-            feature,
-            fontsize=11,
-            fontweight="bold"
-        )
-
-        ax.set_ylabel(
-            "Bad Rate (%)",
-            fontsize=11,
-            fontweight="bold"
-        )
-
-
-        # =====================================================
-        # X LABELS
-        # =====================================================
-        ax.set_xticks(x)
-
-        ax.set_xticklabels(
-            categories,
-            rotation=45,
-            ha="right",
-            fontsize=10,
-            fontweight="bold"
-        )
-
-
-        # =====================================================
-        # Y LABELS
-        # =====================================================
-        ax.tick_params(
-            axis="y",
-            labelsize=10
-        )
-
-        for label in ax.get_yticklabels():
-            label.set_fontweight("bold")
-
-
-        # =====================================================
-        # GRID
-        # =====================================================
-        ax.grid(
-            axis="y",
-            linestyle="--",
-            alpha=0.30
-        )
-
-        ax.set_axisbelow(True)
-
-
-        # =====================================================
-        # Y AXIS LIMIT
-        # =====================================================
-        max_rate = temp[
-            "Bad_Rate"
-        ].max(skipna=True)
-
-        if pd.isna(max_rate) or max_rate == 0:
-            max_rate = 1
-
-        ax.set_ylim(
-            0,
-            max_rate * 1.50
-        )
-
-
-        # =====================================================
-        # LABELS ABOVE BARS
-        # =====================================================
-        for bar, (_, row) in zip(
-            bars,
-            temp.iterrows()
-        ):
-
-            if pd.isna(row["T"]):
-                continue
-
-            total = int(row["T"])
-            bad = int(row["B"])
-            rate = row["Bad_Rate"]
-
-            label = (
-                f"T: {total:,}\n"
-                f"B: {bad:,}\n"
-                f"{rate:.1f}%"
-            )
-
-            ax.text(
-                bar.get_x()
-                + bar.get_width() / 2,
-
-                rate
-                + max_rate * 0.025,
-
-                label,
-
-                ha="center",
-                va="bottom",
-
-                fontsize=10,
-                fontweight="bold",
-
-                bbox=dict(
-                    facecolor="white",
-                    alpha=0.85,
-                    edgecolor="black",
-                    linewidth=0.3,
-                    pad=2
-                )
-            )
-
-
-    # =========================================================
-    # REMOVE UNUSED SUBPLOTS
-    # =========================================================
-    for j in range(
-        len(plot_order),
-        len(axes)
-    ):
-
-        fig.delaxes(
-            axes[j]
-        )
-
-
-    # =========================================================
-    # MAIN TITLE
-    # =========================================================
-    fig.suptitle(
-        f"{feature} Bad Rate by {year_col}\n"
-        "Bar Height = Bad Rate | "
-        "Bar Width = Total Count | "
-        "Color = Category",
-        fontsize=20,
-        fontweight="bold",
-        y=1.002
-    )
-
-
-    # =========================================================
-    # SPACING
-    # =========================================================
-    plt.tight_layout(
-        h_pad=3.5,
-        w_pad=2.5
-    )
-
-    plt.show()
+import os
+
+from pipelines.smi3.preprocess import (
+    build_policy_query,
+    build_borrower_query,
+)
+from pipelines.smi3.util import load_data_from_snowflake
+
+
+# Use the SAME dt_model as your pipeline
+DT_MODEL = "202606"
+
+REGION = "ca-central-1"
+
+OUTPUT_DIR = "raw_data"
+
+os.makedirs(OUTPUT_DIR, exist_ok=True)
+
+
+print("Loading POLICY from Snowflake...")
+
+policy = load_data_from_snowflake(
+    build_policy_query(dt_model=DT_MODEL),
+    region=REGION,
+)
+
+policy.to_csv(
+    os.path.join(OUTPUT_DIR, "policy_raw.csv"),
+    index=False,
+)
+
+print("Policy shape:", policy.shape)
+
+
+print("Loading BORROWER from Snowflake...")
+
+borrower = load_data_from_snowflake(
+    build_borrower_query(dt_model=DT_MODEL),
+    region=REGION,
+)
+
+borrower.to_csv(
+    os.path.join(OUTPUT_DIR, "borrower_raw.csv"),
+    index=False,
+)
+
+print("Borrower shape:", borrower.shape)
+
+print("DONE")
