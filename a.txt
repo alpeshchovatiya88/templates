@@ -4,77 +4,106 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 import math
 
-# --------------------------------------------------
+# =========================================================
 # SETTINGS
-# --------------------------------------------------
+# =========================================================
 year_col = "BOOKYEAR"
 category_col = "PRD_LOAN_PURPOSE"
-bad_col = "BAD"     # change if your target has another name
 
-# Explicit years
+# Change this to your actual bad/default target column
+bad_col = "BAD"
+
+# Years to display
 years = list(range(2009, 2026))
 
-# --------------------------------------------------
+
+# =========================================================
 # SUMMARY FUNCTION
-# --------------------------------------------------
+# =========================================================
 def get_summary(data, label):
 
     out = (
         data.groupby(category_col, dropna=False)
             .agg(
-                T=(bad_col, "size"),
-                B=(bad_col, "sum")
+                T=(bad_col, "size"),   # Total observations
+                B=(bad_col, "sum")     # Bad observations
             )
             .reset_index()
     )
 
+    # Bad rate in %
     out["Bad_Rate"] = (out["B"] / out["T"]) * 100
+
     out["BOOKYEAR_LABEL"] = str(label)
 
     return out
 
 
-# --------------------------------------------------
-# CREATE OVERALL + YEAR SUMMARIES
-# --------------------------------------------------
+# =========================================================
+# CREATE OVERALL + YEAR-WISE SUMMARY
+# =========================================================
 summary_list = []
 
 # Overall
-summary_list.append(get_summary(df, "overall"))
-
-# 2009 - 2025
-for yr in years:
-    temp = df[df[year_col] == yr]
-
-    if len(temp) > 0:
-        summary_list.append(get_summary(temp, yr))
-
-summary = pd.concat(summary_list, ignore_index=True)
-
-
-# --------------------------------------------------
-# KEEP SAME CATEGORY ORDER AND COLORS
-# --------------------------------------------------
-categories = sorted(
-    df[category_col].dropna().unique()
+summary_list.append(
+    get_summary(df, "overall")
 )
 
-# Different color for each PRD_LOAN_PURPOSE
+# Each year
+for yr in years:
+
+    temp_year = df[df[year_col] == yr]
+
+    if not temp_year.empty:
+        summary_list.append(
+            get_summary(temp_year, yr)
+        )
+
+summary = pd.concat(
+    summary_list,
+    ignore_index=True
+)
+
+
+# =========================================================
+# CATEGORY ORDER
+# =========================================================
+categories = sorted(
+    df[category_col]
+      .dropna()
+      .unique()
+)
+
+
+# =========================================================
+# COLOR FOR EACH CATEGORY
+# =========================================================
 colors = sns.color_palette(
     "Set2",
     n_colors=len(categories)
 )
 
-color_dict = dict(zip(categories, colors))
+color_dict = dict(
+    zip(categories, colors)
+)
 
 
-# --------------------------------------------------
-# PLOT
-# --------------------------------------------------
-plot_order = ["overall"] + [str(y) for y in years]
+# =========================================================
+# PLOT ORDER
+# =========================================================
+plot_order = ["overall"] + [
+    str(y) for y in years
+]
 
+
+# =========================================================
+# FIGURE LAYOUT
+# =========================================================
 ncols = 3
-nrows = math.ceil(len(plot_order) / ncols)
+
+nrows = math.ceil(
+    len(plot_order) / ncols
+)
 
 fig, axes = plt.subplots(
     nrows=nrows,
@@ -85,6 +114,9 @@ fig, axes = plt.subplots(
 axes = np.array(axes).flatten()
 
 
+# =========================================================
+# CREATE EACH CHART
+# =========================================================
 for i, yr in enumerate(plot_order):
 
     ax = axes[i]
@@ -93,119 +125,213 @@ for i, yr in enumerate(plot_order):
         summary["BOOKYEAR_LABEL"] == yr
     ].copy()
 
-    # If no observations for a particular year
+
+    # -----------------------------------------------------
+    # If no data exists for this year
+    # -----------------------------------------------------
     if temp.empty:
-        ax.set_title(f"BOOKYEAR: {yr}")
+
+        ax.set_title(
+            f"BOOKYEAR: {yr}",
+            fontweight="bold"
+        )
+
         ax.text(
-            0.5, 0.5,
+            0.5,
+            0.5,
             "No data",
             ha="center",
             va="center",
             transform=ax.transAxes
         )
+
         ax.axis("off")
+
         continue
 
-    # Reindex so categories always appear
-    # in the SAME ORDER
+
+    # -----------------------------------------------------
+    # Make category order consistent
+    # -----------------------------------------------------
     temp = (
         temp.set_index(category_col)
             .reindex(categories)
             .reset_index()
     )
 
-    # Plot manually so each category
-    # always gets the same color
-    x = np.arange(len(categories))
 
+    # X locations
+    x = np.arange(
+        len(categories)
+    )
+
+
+    # =====================================================
+    # BAR WIDTH BASED ON TOTAL
+    # =====================================================
+    totals = temp["T"].fillna(0)
+
+    if totals.max() > 0:
+
+        # Square-root scaling is useful because
+        # totals can differ a lot
+        widths = (
+            0.25
+            +
+            0.65 *
+            np.sqrt(
+                totals / totals.max()
+            )
+        )
+
+    else:
+
+        widths = np.repeat(
+            0.7,
+            len(totals)
+        )
+
+
+    # =====================================================
+    # BAR PLOT
+    # Height = Bad Rate
+    # Width  = Total
+    # Color  = Loan Purpose
+    # =====================================================
     bars = ax.bar(
         x,
         temp["Bad_Rate"].fillna(0),
-        color=[color_dict[c] for c in categories],
-        width=0.7
+        width=widths,
+        color=[
+            color_dict[c]
+            for c in categories
+        ]
     )
 
-    # X axis
+
+    # =====================================================
+    # AXIS / TITLES
+    # =====================================================
+    ax.set_title(
+        f"BOOKYEAR: {yr}",
+        fontsize=13,
+        fontweight="bold",
+        pad=12
+    )
+
+    ax.set_xlabel(
+        "PRD_LOAN_PURPOSE"
+    )
+
+    ax.set_ylabel(
+        "Bad Rate (%)"
+    )
+
     ax.set_xticks(x)
+
     ax.set_xticklabels(
         categories,
         rotation=0,
         fontsize=9
     )
 
-    # Titles
-    ax.set_title(
-        f"BOOKYEAR: {yr}",
-        fontsize=13,
-        fontweight="bold",
-        pad=10
-    )
 
-    ax.set_xlabel("PRD_LOAN_PURPOSE")
-    ax.set_ylabel("Bad Rate (%)")
-
-    # Grid only on Y axis
+    # =====================================================
+    # GRID
+    # =====================================================
     ax.grid(
         axis="y",
         linestyle="--",
-        alpha=0.3
+        alpha=0.30
     )
 
     ax.set_axisbelow(True)
 
-    # --------------------------------------------------
-    # LABELS ABOVE BARS
-    # --------------------------------------------------
-    max_rate = temp["Bad_Rate"].max(skipna=True)
 
-    if pd.isna(max_rate):
+    # =====================================================
+    # Y-AXIS RANGE
+    # =====================================================
+    max_rate = temp[
+        "Bad_Rate"
+    ].max(skipna=True)
+
+    if pd.isna(max_rate) or max_rate == 0:
         max_rate = 1
 
-    for bar, (_, row) in zip(bars, temp.iterrows()):
+    ax.set_ylim(
+        0,
+        max_rate * 1.35
+    )
 
+
+    # =====================================================
+    # LABEL EACH BAR
+    # =====================================================
+    for bar, (_, row) in zip(
+        bars,
+        temp.iterrows()
+    ):
+
+        # Skip missing category/year combination
         if pd.isna(row["T"]):
             continue
 
-        height = row["Bad_Rate"]
+        total = int(row["T"])
+        bad = int(row["B"])
+        rate = row["Bad_Rate"]
 
         label = (
-            f"T: {int(row['T']):,}\n"
-            f"B: {int(row['B']):,}\n"
-            f"{height:.1f}%"
+            f"T: {total:,}\n"
+            f"B: {bad:,}\n"
+            f"{rate:.1f}%"
         )
 
         ax.text(
-            bar.get_x() + bar.get_width()/2,
-            height + max_rate * 0.03,
+            bar.get_x()
+            + bar.get_width() / 2,
+
+            rate
+            + max_rate * 0.025,
+
             label,
+
             ha="center",
             va="bottom",
             fontsize=8
         )
 
-    # Give labels enough space
-    ax.set_ylim(
-        0,
-        max_rate * 1.30
+
+# =========================================================
+# REMOVE EMPTY SUBPLOTS
+# =========================================================
+for j in range(
+    len(plot_order),
+    len(axes)
+):
+
+    fig.delaxes(
+        axes[j]
     )
 
 
-# --------------------------------------------------
-# REMOVE UNUSED SUBPLOTS
-# --------------------------------------------------
-for j in range(len(plot_order), len(axes)):
-    fig.delaxes(axes[j])
-
-
-# --------------------------------------------------
+# =========================================================
 # MAIN TITLE
-# --------------------------------------------------
+# =========================================================
 fig.suptitle(
-    "PRD_LOAN_PURPOSE Bad Rate by BOOKYEAR",
+    "PRD_LOAN_PURPOSE Bad Rate by BOOKYEAR\n"
+    "Bar Height = Bad Rate | Bar Width = Total Count",
     fontsize=18,
     fontweight="bold",
-    y=1.002
+    y=1.005
 )
 
-plt.tight_layout()
+
+# =========================================================
+# SPACING
+# =========================================================
+plt.tight_layout(
+    h_pad=3.5,
+    w_pad=2.5
+)
+
 plt.show()
