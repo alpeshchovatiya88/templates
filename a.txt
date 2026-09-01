@@ -1,11 +1,15 @@
 import os
+import sys
+
+sys.path.insert(
+    0,
+    os.path.join(os.path.dirname(__file__), "pipelines", "smi3")
+)
 
 from pipelines.smi3.preprocess import (
     build_policy_query,
     build_borrower_query,
 )
-from pipelines.smi3.util import load_data_from_snowflake
-
 
 # Use the SAME dt_model as your pipeline
 DT_MODEL = "202606"
