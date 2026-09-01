@@ -13,79 +13,43 @@ from pipelines.smi3.preprocess import (
 from pipelines.smi3.util import load_data_from_snowflake
 
 
-# ============================================================
-# CHANGE THESE TWO VALUES
-# ============================================================
-
+# Use the SAME dt_model as your pipeline
 DT_MODEL = "202606"
-
-STATIC_DATA_PATH = "PUT_YOUR_S3_STATIC_DATA_PATH_HERE"
 
 REGION = "ca-central-1"
 
 OUTPUT_DIR = "raw_data"
 
-
-# ============================================================
-# CREATE OUTPUT DIRECTORY
-# ============================================================
-
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 
-# ============================================================
-# 1. POLICY RAW DATA - SNOWFLAKE
-# ============================================================
-
-print("Downloading raw policy data from Snowflake...")
+print("Loading POLICY from Snowflake...")
 
 policy = load_data_from_snowflake(
     build_policy_query(dt_model=DT_MODEL),
     region=REGION,
 )
 
-policy_path = os.path.join(OUTPUT_DIR, "policy_raw.csv")
-policy.to_csv(policy_path, index=False)
+policy.to_csv(
+    os.path.join(OUTPUT_DIR, "policy_raw.csv"),
+    index=False,
+)
 
-print(f"Policy saved: {policy_path}")
-print(f"Policy shape: {policy.shape}")
+print("Policy shape:", policy.shape)
 
 
-# ============================================================
-# 2. BORROWER RAW DATA - SNOWFLAKE
-# ============================================================
-
-print("Downloading raw borrower data from Snowflake...")
+print("Loading BORROWER from Snowflake...")
 
 borrower = load_data_from_snowflake(
     build_borrower_query(dt_model=DT_MODEL),
     region=REGION,
 )
 
-borrower_path = os.path.join(OUTPUT_DIR, "borrower_raw.csv")
-borrower.to_csv(borrower_path, index=False)
-
-print(f"Borrower saved: {borrower_path}")
-print(f"Borrower shape: {borrower.shape}")
-
-
-# ============================================================
-# 3. ALL STATIC RAW FILES - S3
-# ============================================================
-
-print("Downloading static raw files from S3...")
-
-subprocess.run(
-    [
-        "aws",
-        "s3",
-        "cp",
-        STATIC_DATA_PATH,
-        OUTPUT_DIR,
-        "--recursive",
-    ],
-    check=True,
+borrower.to_csv(
+    os.path.join(OUTPUT_DIR, "borrower_raw.csv"),
+    index=False,
 )
 
-print("\nDONE")
-print(f"All raw data saved under: {OUTPUT_DIR}/")
+print("Borrower shape:", borrower.shape)
+
+print("DONE")
