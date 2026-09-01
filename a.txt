@@ -1,374 +1,126 @@
-print("policy_df :", policy_df.shape)
-print("borrower_df:", borrower_df.shape)
-print("df_all     :", df_all.shape)
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import seaborn as sns
+import math
 
-print(
-    "Policy unique applications:",
-    policy_df["APPLICATION_NUMBER"].nunique()
-)
+# ---------------------------------------------------
+# SETTINGS
+# ---------------------------------------------------
+year_col = "BOOKYEAR"
+category_col = "PRD_LOAN_PURPOSE"
 
-print(
-    "Borrower unique applications:",
-    borrower_df["APPLICATION_NUMBER"].nunique()
-)
+# If you have a target/bad flag, put the column name here.
+# Example: bad_col = "BAD_FLAG"
+bad_col = "BAD"
 
-print(
-    "Merged unique applications:",
-    df_all["APPLICATION_NUMBER"].nunique()
-)
-
-=======
-
-borrower_matched = df_all["NUM_OF_BOR"].notna()
-
-print(
-    borrower_matched.value_counts(dropna=False)
-)
-
-print(
-    "Borrower match rate:",
-    borrower_matched.mean()
-)
-======
-
-missing_summary = pd.DataFrame({
-    "missing_n": df_all.isna().sum(),
-    "missing_pct": df_all.isna().mean() * 100
-})
-
-missing_summary = (
-    missing_summary
-    .sort_values("missing_pct", ascending=False)
-)
-
-missing_summary
-
-======
-
-numeric_cols = df_all.select_dtypes(
-    include="number"
-).columns
-
-outlier_summary = df_all[numeric_cols].describe(
-    percentiles=[
-        0.01,
-        0.05,
-        0.25,
-        0.50,
-        0.75,
-        0.95,
-        0.99
-    ]
-).T
-
-outlier_summary
-
-======
-
-check_cols = [
-    "CRD_SCORE",
-    "CRD_SCORE_bin",
-    "CRD_OPEN_TRADE_TU",
-    "ACTLTV",
-    "TDSR",
-    "GDSR",
-    "NUM_OF_BOR",
-    "PRD_AMORTIZATION",
-    "PRK_PROPERTY_AGE",
-    "PRK_NUM_OF_UNITS",
-    "POD_INSURANCE_IN_FORCE",
-    "PRD_CONTRACT_RATE",
-    "PRK_PROPERTY_VALUE",
-    "HPI_+4",
-    "UE_+4",
-]
-
-df_all[
-    [c for c in check_cols if c in df_all.columns]
-].describe(
-    percentiles=[.01, .05, .50, .95, .99]
-).T
-
-=======
-
-train_missing = pd.DataFrame({
-    "missing_n": train_df.isna().sum(),
-    "missing_pct": train_df.isna().mean() * 100
-}).sort_values(
-    "missing_pct",
-    ascending=False
-)
-
-train_missing
-
-========
-
-population_summary = pd.DataFrame({
-    "Dataset": ["Train", "Validation", "Test"],
-    "Rows": [
-        len(train_df),
-        len(validation_df),
-        len(test_df),
-    ]
-})
-
-population_summary
-
-========
-
-target_summary = pd.DataFrame({
-    "Dataset": ["Train", "Validation", "Test"],
-    "N": [
-        len(train_df),
-        len(validation_df),
-        len(test_df),
-    ],
-    "Target_Rate": [
-        train_df["target"].mean(),
-        validation_df["target"].mean(),
-        test_df["target"].mean(),
-    ],
-})
-
-target_summary
-
-========
-
-missing_compare = pd.DataFrame({
-    "Train_missing_%":
-        train_df[model_features].isna().mean() * 100,
-
-    "Validation_missing_%":
-        validation_df[model_features].isna().mean() * 100,
-
-    "Test_missing_%":
-        test_df[model_features].isna().mean() * 100,
-})
-
-missing_compare["Val_minus_Train_pp"] = (
-    missing_compare["Validation_missing_%"]
-    - missing_compare["Train_missing_%"]
-)
-
-missing_compare["Test_minus_Train_pp"] = (
-    missing_compare["Test_missing_%"]
-    - missing_compare["Train_missing_%"]
-)
-
-missing_compare.sort_values(
-    "Test_minus_Train_pp",
-    key=abs,
-	    ascending=False
-)
-
-=========
-
-numeric_features = [
-    c for c in model_features
-    if pd.api.types.is_numeric_dtype(train_df[c])
-]
-
-categorical_features = [
-    c for c in model_features
-    if c not in numeric_features
-]
-
-print("Numeric:", numeric_features)
-print("Categorical:", categorical_features)
-
-========
-
-def numeric_summary(df, features, sample_name):
-
-    x = df[features]
-
-    result = pd.DataFrame({
-        "N": x.count(),
-        "Missing_%": x.isna().mean() * 100,
-        "Mean": x.mean(),
-        "Std": x.std(),
-        "Min": x.min(),
-        "P01": x.quantile(0.01),
-        "P05": x.quantile(0.05),
-        "P25": x.quantile(0.25),
-        "Median": x.median(),
-        "P75": x.quantile(0.75),
-        "P95": x.quantile(0.95),
-        "P99": x.quantile(0.99),
-        "Max": x.max(),
-    })
-
-    result["Dataset"] = sample_name
-
-    return result.reset_index(
-        names="Feature"
+# ---------------------------------------------------
+# FUNCTION TO CREATE SUMMARY
+# ---------------------------------------------------
+def get_summary(data, label):
+    out = (
+        data.groupby(category_col, dropna=False)
+            .agg(
+                T=(bad_col, "size"),     # Total
+                B=(bad_col, "sum")       # Bad count
+            )
+            .reset_index()
     )
 
-=======
+    out["Bad_Rate"] = out["B"] / out["T"] * 100
+    out["BOOKYEAR_LABEL"] = label
 
-numeric_compare = pd.concat(
-    [
-        numeric_summary(
-            train_df,
-            numeric_features,
-            "Train"
-        ),
-        numeric_summary(
-            validation_df,
-            numeric_features,
-            "Validation"
-        ),
-        numeric_summary(
-            test_df,
-            numeric_features,
-            "Test"
-        ),
-    ],
-    ignore_index=True
+    return out
+
+
+# ---------------------------------------------------
+# OVERALL + EACH BOOKYEAR
+# ---------------------------------------------------
+summary_list = []
+
+# Overall
+summary_list.append(get_summary(df, "overall"))
+
+# Individual years
+years = sorted(df[year_col].dropna().unique())
+
+for yr in years:
+    temp = df[df[year_col] == yr]
+    summary_list.append(get_summary(temp, str(yr)))
+
+summary = pd.concat(summary_list, ignore_index=True)
+
+
+# ---------------------------------------------------
+# PLOT
+# ---------------------------------------------------
+plot_order = ["overall"] + [str(x) for x in years]
+
+n_plots = len(plot_order)
+ncols = 4
+nrows = math.ceil(n_plots / ncols)
+
+fig, axes = plt.subplots(
+    nrows=nrows,
+    ncols=ncols,
+    figsize=(18, 4.5 * nrows)
 )
 
-numeric_compare
+axes = np.array(axes).flatten()
 
-======
+for i, yr in enumerate(plot_order):
 
-numeric_compare[
-    numeric_compare["Feature"] == "ACTLTV"
-]
+    ax = axes[i]
 
-======
+    temp = summary[
+        summary["BOOKYEAR_LABEL"] == yr
+    ].copy()
 
-def category_compare(feature):
+    # Sort categories if desired
+    temp = temp.sort_values(category_col)
 
-    train = (
-        train_df[feature]
-        .fillna("MISSING")
-        .value_counts(normalize=True)
-        .mul(100)
-        .rename("Train_%")
+    sns.barplot(
+        data=temp,
+        x=category_col,
+        y="Bad_Rate",
+        ax=ax
     )
 
-    val = (
-        validation_df[feature]
-        .fillna("MISSING")
-        .value_counts(normalize=True)
-        .mul(100)
-        .rename("Validation_%")
-    )
+    ax.set_title(f"BOOKYEAR: {yr}", fontweight="bold")
+    ax.set_xlabel("PRD_LOAN_PURPOSE")
+    ax.set_ylabel("Bad Rate (%)")
 
-    test = (
-        test_df[feature]
-        .fillna("MISSING")
-        .value_counts(normalize=True)
-        .mul(100)
-        .rename("Test_%")
-    )
+    # Add T / B / Bad rate above each bar
+    for j, row in temp.reset_index(drop=True).iterrows():
 
-    result = pd.concat(
-        [train, val, test],
-        axis=1
-    ).fillna(0)
+        label = (
+            f"T: {int(row['T'])}\n"
+            f"B: {int(row['B'])}\n"
+            f"{row['Bad_Rate']:.1f}%"
+        )
 
-    result["Val_minus_Train_pp"] = (
-        result["Validation_%"]
-        - result["Train_%"]
-    )
+        ax.text(
+            j,
+            row["Bad_Rate"] + 0.15,
+            label,
+            ha="center",
+            va="bottom",
+            fontsize=8
+        )
 
-    result["Test_minus_Train_pp"] = (
-        result["Test_%"]
-        - result["Train_%"]
-    )
+    ax.tick_params(axis="x", rotation=45)
 
-    return result.sort_values(
-        "Test_%",
-        ascending=False
-    )
+    # Give some room for labels above bars
+    max_rate = temp["Bad_Rate"].max()
 
-=======
+    if pd.notna(max_rate):
+        ax.set_ylim(0, max_rate * 1.30)
 
-category_compare(
-    "PRK_PROPERTY_TYPE"
-)
 
-=======
+# Remove empty panels
+for j in range(n_plots, len(axes)):
+    fig.delaxes(axes[j])
 
-for col in categorical_features:
 
-    print("\n", "=" * 80)
-    print(col)
-    print("=" * 80)
-
-    display(
-        category_compare(col)
-    )
-
-========
-
-unseen_summary = []
-
-for col in categorical_features:
-
-    train_levels = set(
-        train_df[col].dropna().unique()
-    )
-
-    val_levels = set(
-        validation_df[col].dropna().unique()
-    )
-
-    test_levels = set(
-        test_df[col].dropna().unique()
-    )
-
-    unseen_summary.append({
-        "Feature": col,
-        "Train_levels": len(train_levels),
-        "Validation_unseen":
-            len(val_levels - train_levels),
-        "Test_unseen":
-            len(test_levels - train_levels),
-        "Test_unseen_values":
-            sorted(test_levels - train_levels),
-    })
-
-unseen_summary = pd.DataFrame(
-    unseen_summary
-)
-
-unseen_summary
-
-=========
-
-outlier_results = []
-
-for col in numeric_features:
-
-    q01 = train_df[col].quantile(0.01)
-    q99 = train_df[col].quantile(0.99)
-
-    for name, df in [
-        ("Train", train_df),
-        ("Validation", validation_df),
-        ("Test", test_df),
-    ]:
-
-        valid = df[col].dropna()
-
-        outlier_results.append({
-            "Feature": col,
-            "Dataset": name,
-            "Train_P01": q01,
-            "Train_P99": q99,
-            "Below_Train_P01_%":
-                (valid < q01).mean() * 100,
-            "Above_Train_P99_%":
-                (valid > q99).mean() * 100,
-        })
-
-outlier_compare = pd.DataFrame(
-    outlier_results
-)
-
-outlier_compare
-
-========
-
+plt.tight_layout()
+plt.show()
