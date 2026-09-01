@@ -1,55 +1,23 @@
-import os
-import sys
+# ---------------------------------------------------------
+# PRK_PROPERTY_AGE missing-value treatment
+# Exact logic from current policy_processor.py
+# ---------------------------------------------------------
 
-sys.path.insert(
-    0,
-    os.path.join(os.path.dirname(__file__), "pipelines", "smi3")
+# 1. Identify rows where property age is missing
+missing_property_age = policy_df["PRK_PROPERTY_AGE"].isna()
+
+# 2. If AVM_YEAR_BUILT exists, calculate property age
+policy_df.loc[
+    missing_property_age
+    & policy_df["AVM_YEAR_BUILT"].notna(),
+    "PRK_PROPERTY_AGE"
+] = (
+    policy_df["BOOKYEAR"]
+    - policy_df["AVM_YEAR_BUILT"]
 )
 
-from pipelines.smi3.preprocess import (
-    build_policy_query,
-    build_borrower_query,
-)
-from pipelines.smi3.util import load_data_from_snowflake
-
-
-# Use the SAME dt_model as your pipeline
-DT_MODEL = "202606"
-
-REGION = "ca-central-1"
-
-OUTPUT_DIR = "raw_data"
-
-os.makedirs(OUTPUT_DIR, exist_ok=True)
-
-
-print("Loading POLICY from Snowflake...")
-
-policy = load_data_from_snowflake(
-    build_policy_query(dt_model=DT_MODEL),
-    region=REGION,
-)
-
-policy.to_csv(
-    os.path.join(OUTPUT_DIR, "policy_raw.csv"),
-    index=False,
-)
-
-print("Policy shape:", policy.shape)
-
-
-print("Loading BORROWER from Snowflake...")
-
-borrower = load_data_from_snowflake(
-    build_borrower_query(dt_model=DT_MODEL),
-    region=REGION,
-)
-
-borrower.to_csv(
-    os.path.join(OUTPUT_DIR, "borrower_raw.csv"),
-    index=False,
-)
-
-print("Borrower shape:", borrower.shape)
-
-print("DONE")
+# 3. For new construction, always force property age = 1
+policy_df.loc[
+    policy_df["PRK_CONS_TYPE"].eq("N"),
+    "PRK_PROPERTY_AGE"
+] = 1
