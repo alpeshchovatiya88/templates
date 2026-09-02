@@ -1,287 +1,236 @@
-def build_mi_population(policy):
-
-    print("=" * 70)
-    print("BUILDING MI POPULATION")
-    print("=" * 70)
-
-    print(
-        policy["EFFECT_SID"]
-        .value_counts(dropna=False)
-    )
-
-    mi = policy[
-        policy["EFFECT_SID"].between(
-            200900,
-            202512
-        )
-        & policy["LOB_CODE"].eq("MI")
-        & policy["LRUPLUS_FLAG"].ne("Y")
-    ].copy()
-
-    mi["LOB_RENAMED"] = "MI"
-
-    print("MI population shape:", mi.shape)
-
-    print(
-        "MI duplicate APPLICATION_NUMBER count:",
-        mi.duplicated(
-            "APPLICATION_NUMBER"
-        ).sum()
-    )
-
-    return mi
-
-========
-
-mi = build_mi_population(policy_etd)
-
-=======
-
-def build_lru_population(
-    policy,
-    lru_data,
-    etd_claim_file,
+def fill_pol_missing_values(
+    df_pol,
+    divide_actltv_by_100=True
 ):
 
-    print("=" * 70)
-    print("BUILDING LRUPLUS POPULATION")
-    print("=" * 70)
+    df_pol = df_pol.copy()
 
-    policy = policy.copy()
-    lru_data = normalize_columns(lru_data)
-    etd_claim_file = etd_claim_file.copy()
-
-    validate_columns(
-        lru_data,
-        ["LRU_REF_#", "BULK_REF_#"],
-        "lru_data"
-    )
-
-    validate_columns(
-        policy,
-        [
-            "APPLICATION_NUMBER",
-            "LATEST_PFP_POLICY_STATUS",
-            "EFFECT_SID",
-        ],
-        "policy"
-    )
-
-    policy["APPLICATION_NUMBER"] = (
-        pd.to_numeric(
-            policy["APPLICATION_NUMBER"],
-            errors="coerce"
-        ).astype("Int64")
-    )
-
-    lru_data["LRU_REF_#"] = (
-        pd.to_numeric(
-            lru_data["LRU_REF_#"],
-            errors="coerce"
-        ).astype("Int64")
-    )
-
-    lru_data["BULK_REF_#"] = (
-        pd.to_numeric(
-            lru_data["BULK_REF_#"],
-            errors="coerce"
-        ).astype("Int64")
-    )
-
-    etd_claim_file["APPLICATION_NUMBER"] = (
-        pd.to_numeric(
-            etd_claim_file["APPLICATION_NUMBER"],
-            errors="coerce",
-        ).astype("Int64")
-    )
-
-    rows_before = len(lru_data)
-
-    lru_data = (
-        lru_data
-        .dropna(
-            subset=["LRU_REF_#"]
+    # EFFECT_DAY_SID:
+    # use RECEIVED_DAY_SID when -1 or missing
+    effect_day = (
+        df_pol["EFFECT_DAY_SID"]
+        .replace(
+            -1,
+            np.nan
         )
-        .drop_duplicates(
-            subset=[
-                "LRU_REF_#",
-                "BULK_REF_#",
+    )
+
+    df_pol["EFFECT_DAY_SID"] = (
+        effect_day.fillna(
+            df_pol["RECEIVED_DAY_SID"]
+        )
+    )
+
+    df_pol["EFFECT_SID"] = (
+        df_pol["EFFECT_DAY_SID"]
+        // 100
+    ).astype("Int64")
+
+
+    # PRD_CONTRACT_RATE:
+    # fill with PRD_QUAL_INT_RATE
+    missing_rate = (
+        df_pol[
+            "PRD_CONTRACT_RATE"
+        ].isna()
+    )
+
+    df_pol.loc[
+        missing_rate,
+        "filled_PRD_CONTRACT_RATE_by"
+    ] = "PRD_QUAL_INT_RATE"
+
+    df_pol["PRD_CONTRACT_RATE"] = (
+        df_pol[
+            "PRD_CONTRACT_RATE"
+        ]
+        .fillna(
+            df_pol[
+                "PRD_QUAL_INT_RATE"
             ]
         )
-        .copy()
+        .astype(float)
     )
 
-    policy = (
-        policy
-        .dropna(
-            subset=["APPLICATION_NUMBER"]
-        )
-        .drop_duplicates(
-            subset=["APPLICATION_NUMBER"],
-            keep="last"
-        )
-        .copy()
+
+    # POD_INSURANCE_IN_FORCE
+    df_pol["ACTLTV_lgd"] = (
+        df_pol["ACTLTV"] / 100
+        if divide_actltv_by_100
+        else df_pol["ACTLTV"]
     )
 
-    print(
-        "LRU rows removed during cleanup:",
-        f"{rows_before - len(lru_data):,}"
+    missing_iif = (
+        df_pol[
+            "POD_INSURANCE_IN_FORCE"
+        ].isna()
     )
 
-    print(
-        "LRU source shape after cleanup:",
-        lru_data.shape
+    iif_from_purchase_price = (
+        df_pol[
+            "PRK_PURCHASE_PRICE"
+        ].notna()
+        & df_pol[
+            "ACTLTV_lgd"
+        ].notna()
     )
 
-    df_lru = lru_data.merge(
-        policy,
-        left_on="LRU_REF_#",
-        right_on="APPLICATION_NUMBER",
-        how="left",
-        validate="many_to_one"
+    df_pol.loc[
+        missing_iif
+        & iif_from_purchase_price,
+        "filled_POD_INSURANCE_IN_FORCE_by"
+    ] = (
+        "PRK_PURCHASE_PRICE * ACTLTV_lgd"
     )
 
-    bulk_status = (
-        policy[
-            [
-                "APPLICATION_NUMBER",
-                "LATEST_PFP_POLICY_STATUS",
+    df_pol.loc[
+        missing_iif
+        & ~iif_from_purchase_price,
+        "filled_POD_INSURANCE_IN_FORCE_by"
+    ] = "PRD_BASE_LOAN_AMT"
+
+    df_pol[
+        "POD_INSURANCE_IN_FORCE"
+    ] = (
+        df_pol[
+            "POD_INSURANCE_IN_FORCE"
+        ]
+        .fillna(
+            df_pol[
+                "PRK_PURCHASE_PRICE"
             ]
+            * df_pol[
+                "ACTLTV_lgd"
+            ]
+        )
+        .fillna(
+            df_pol[
+                "PRD_BASE_LOAN_AMT"
+            ]
+        )
+        .astype(float)
+    )
+
+
+    # PRK_PROPERTY_VALUE
+    property_value = (
+        df_pol[
+            "PRK_PROPERTY_VALUE"
         ]
-        .rename(
-            columns={
-                "APPLICATION_NUMBER":
-                    "BULK_REF_#",
-                "LATEST_PFP_POLICY_STATUS":
-                    "BULK_STATUS",
-            }
-        )
-        .drop_duplicates(
-            subset=["BULK_REF_#"],
-            keep="last"
+        .where(
+            df_pol[
+                "PRK_PROPERTY_VALUE"
+            ] > 1,
+            np.nan
         )
     )
 
-    df_lru = df_lru.merge(
-        bulk_status,
-        on="BULK_REF_#",
-        how="left",
-        validate="many_to_one",
+    missing_property_value = (
+        property_value.isna()
     )
 
-    cond_rule1 = (
-        df_lru["LRU_REF_#"].notna()
-        & df_lru["BULK_REF_#"].notna()
-        & df_lru[
-            "LATEST_PFP_POLICY_STATUS"
-        ].isin(
-            status_def.valid_lru_funded_status
-            + ["D"]
+    df_pol.loc[
+        missing_property_value
+        & df_pol[
+            "PRK_PURCHASE_PRICE"
+        ].notna(),
+        "filled_PRK_PROPERTY_VALUE_by"
+    ] = "PRK_PURCHASE_PRICE"
+
+    df_pol.loc[
+        missing_property_value
+        & df_pol[
+            "PRK_PURCHASE_PRICE"
+        ].isna()
+        & df_pol[
+            "PRK_DECLARED_VALUE"
+        ].notna(),
+        "filled_PRK_PROPERTY_VALUE_by"
+    ] = "PRK_DECLARED_VALUE"
+
+    df_pol[
+        "PRK_PROPERTY_VALUE"
+    ] = (
+        property_value
+        .fillna(
+            df_pol[
+                "PRK_PURCHASE_PRICE"
+            ]
         )
-        & df_lru[
-            "BULK_STATUS"
-        ].isin(
-            status_def.funded_status
+        .fillna(
+            df_pol[
+                "PRK_DECLARED_VALUE"
+            ]
         )
+        .astype(float)
     )
 
-    cond_rule2 = (
-        df_lru["LRU_REF_#"].notna()
-        & df_lru["BULK_REF_#"].isna()
-        & df_lru[
-            "LATEST_PFP_POLICY_STATUS"
-        ].isin(
-            status_def.funded_status
-        )
+
+    # PRK_PROPERTY_AGE
+    missing_property_age = (
+        df_pol[
+            "PRK_PROPERTY_AGE"
+        ].isna()
     )
 
-    df_lru = df_lru.loc[
-        df_lru["EFFECT_SID"].between(
-            200901,
-            202512
-        )
-        & (cond_rule1 | cond_rule2)
-    ].copy()
-
-    df_lru = df_lru.drop(
-        columns=[
-            "LRU_REF_#",
-            "BULK_REF_#",
-            "BULK_STATUS",
-        ],
-        errors="ignore"
-    )
-
-    bulk_refs = set(
-        lru_data["BULK_REF_#"]
-        .dropna()
-        .astype("int64")
-        .unique()
-    )
-
-    etd_apps_on_bulk_side = set(
-        etd_claim_file.loc[
-            etd_claim_file[
-                "APPLICATION_NUMBER"
-            ].isin(bulk_refs),
-            "APPLICATION_NUMBER",
+    df_pol.loc[
+        missing_property_age
+        & df_pol[
+            "AVM_YEAR_BUILT"
+        ].notna(),
+        "PRK_PROPERTY_AGE"
+    ] = (
+        df_pol["BOOKYEAR"]
+        - df_pol[
+            "AVM_YEAR_BUILT"
         ]
-        .dropna()
-        .astype("int64")
-        .unique()
     )
 
-    lru_plus_extra = policy.loc[
-        policy[
-            "APPLICATION_NUMBER"
-        ].isin(etd_apps_on_bulk_side)
-    ].copy()
+    df_pol.loc[
+        df_pol[
+            "PRK_CONS_TYPE"
+        ].eq("N"),
+        "PRK_PROPERTY_AGE"
+    ] = 1
 
-    lru_df = pd.concat(
-        [
-            df_lru,
-            lru_plus_extra
-        ],
-        ignore_index=True,
-        sort=False
-    )
+    return df_pol
 
-    lru_df["LOB_RENAMED"] = "LRUPLUS"
+==========
 
-    print(
-        "LRUPLUS shape before deduplication:",
-        lru_df.shape
-    )
-
-    print(
-        "LRUPLUS duplicate APPLICATION_NUMBER count:",
-        lru_df.duplicated(
-            "APPLICATION_NUMBER"
-        ).sum()
-    )
-
-    lru_df = lru_df.drop_duplicates(
-        subset=["APPLICATION_NUMBER"],
-        keep="last"
-    )
-
-    print(
-        "Final LRUPLUS shape:",
-        lru_df.shape
-    )
-
-    return lru_df
+df = fill_pol_missing_values(df)
 
 ========
 
+# 1. Clean policy
+policy_clean = clean_policy(
+    policy_raw
+)
+
+# 2. Prepare ETD
+etd_clean = prepare_etd_claim_file(
+    etd_claim_file
+)
+
+# 3. Merge ETD
+policy_etd = policy_clean.merge(
+    etd_clean,
+    how="left",
+    on="APPLICATION_NUMBER",
+)
+
+# 4. MI population
+mi = build_mi_population(
+    policy_etd
+)
+
+# 5. LRU population
 lru = build_lru_population(
     policy=policy_etd,
     lru_data=lru_data,
     etd_claim_file=etd_clean
 )
 
-========
-
+# 6. Combine populations
 df = pd.concat(
     [mi, lru],
     ignore_index=True
@@ -292,265 +241,13 @@ df = df.drop_duplicates(
     keep="last"
 )
 
-print(
-    "Combined MI + LRUPLUS shape:",
-    df.shape
-)
-
-======
-
-def extract_toronto_fsa(
-    toronto_fsa_df
-):
-
-    toronto_fsa_df = normalize_columns(
-        toronto_fsa_df
-    )
-
-    source = (
-        toronto_fsa_df["FSA"]
-        if "FSA" in toronto_fsa_df.columns
-        else toronto_fsa_df.iloc[:, 0]
-    )
-
-    return (
-        source
-        .dropna()
-        .astype(str)
-        .str.strip()
-        .str.upper()
-        .unique()
-        .tolist()
-    )
-
-=========
-
-def map_econ_region(
-    df,
-    toronto_fsa_df
-):
-
-    df = df.copy()
-
-    toronto_fsa = extract_toronto_fsa(
-        toronto_fsa_df
-    )
-
-    df["ECON_REGION"] = (
-        df["PROVINCE"]
-        .map(PROVINCE_REGION_MAP)
-        .fillna("Territories")
-    )
-
-    is_on = (
-        df["PROVINCE"]
-        .astype(str)
-        .str.upper()
-        .eq("ON")
-    )
-
-    postal_code = (
-        df["POSTAL_CODE"]
-        .astype(str)
-        .str.replace(
-            " ",
-            "",
-            regex=False
-        )
-        .str.upper()
-    )
-
-    is_toronto = postal_code.str.startswith(
-        tuple(toronto_fsa),
-        na=False
-    )
-
-    df.loc[
-        is_on & is_toronto,
-        "ECON_REGION"
-    ] = "Toronto"
-
-    df.loc[
-        is_on & ~is_toronto,
-        "ECON_REGION"
-    ] = "Rest_of_Ontario"
-
-    return df
-
-=======
-
+# 7. Economic region
 df = map_econ_region(
     df,
     toronto_fsa_df
 )
 
-========
-
-def prepare_economics(
-    econ_hist,
-    econ_future
-):
-
-    econ_hist = normalize_columns(
-        econ_hist
-    )
-
-    econ_future = normalize_columns(
-        econ_future
-    )
-
-    for old, new in econ_cfg.region_map.items():
-
-        econ_future.columns = (
-            econ_future.columns.str.replace(
-                f"{old}_",
-                f"{new}_",
-                regex=False
-            )
-        )
-
-    econ_data = pd.concat(
-        [
-            econ_hist.loc[
-                econ_hist["Date"].between(
-                    198801,
-                    202211
-                )
-            ],
-            econ_future.loc[
-                econ_future["Date"].ge(
-                    202212
-                )
-            ],
-        ],
-        ignore_index=True,
-    )
-
-    econ_data = econ_data.filter(
-        regex=r"^(Date|.*_(?:hpi|ue))$",
-        axis=1
-    )
-
-    econ_data = econ_data.rename(
-        columns=lambda c:
-            c.replace(
-                "National",
-                "Territories"
-            )
-    )
-
-    melted = econ_data.melt(
-        id_vars=["Date"],
-        var_name="REGION_INDICATOR",
-        value_name="VALUE"
-    )
-
-    extracted = (
-        melted["REGION_INDICATOR"]
-        .str.extract(
-            r"^(.*)_(hpi|ue)$"
-        )
-    )
-
-    melted["ECON_REGION"] = (
-        extracted[0]
-    )
-
-    melted["INDICATOR"] = (
-        extracted[1]
-    )
-
-    econ = (
-        melted
-        .drop(
-            columns="REGION_INDICATOR"
-        )
-        .pivot_table(
-            index=[
-                "Date",
-                "ECON_REGION"
-            ],
-            columns="INDICATOR",
-            values="VALUE"
-        )
-        .reset_index()
-        .rename_axis(
-            None,
-            axis=1
-        )
-        .rename(
-            columns={
-                "hpi": "HPI",
-                "ue": "UE"
-            }
-        )
-        .sort_values(
-            [
-                "ECON_REGION",
-                "Date"
-            ]
-        )
-        .reset_index(
-            drop=True
-        )
-    )
-
-    grouped = econ.groupby(
-        "ECON_REGION",
-        group_keys=False
-    )
-
-    for year in range(
-        1,
-        econ_cfg.max_shift_year + 1
-    ):
-
-        months = 12 * year
-
-        econ[f"UE_-{year}"] = (
-            grouped["UE"]
-            .shift(months)
-        )
-
-        econ[f"UE_+{year}"] = (
-            grouped["UE"]
-            .shift(-months)
-        )
-
-        econ[f"HPI_+{year}"] = (
-            grouped["HPI"]
-            .shift(-months)
-            / econ["HPI"]
-        )
-
-        econ[f"HPI_-{year}"] = (
-            econ["HPI"]
-            / grouped["HPI"]
-            .shift(months)
-        )
-
-    econ["UE_+4"] = (
-        econ["UE_+4"]
-        - econ["UE"]
-    )
-
-    econ["Date"] = (
-        econ["Date"]
-        .astype(
-            "int64",
-            errors="ignore"
-        )
-    )
-
-    print(
-        "Prepared economics shape:",
-        econ.shape
-    )
-
-    return econ
-
-========
-
+# 8. Economics
 econ = prepare_economics(
     econ_hist,
     econ_future
@@ -569,483 +266,40 @@ df = df.merge(
     how="left",
 )
 
-
-=======
-
-def add_product_group(df):
-
-    df = df.copy()
-
-    code = df["POD_SPL_PROG_CODE"]
-    frgn = df["PRD_FOREIGN_BORROWER"]
-
-    actltv = pd.to_numeric(
-        df["ACTLTV"],
-        errors="coerce"
-    )
-
-    df["PRODUCT_GROUP"] = np.select(
-        [
-            actltv > 97,
-            code.isin(["ALAU", "ALAM"]),
-            code.isin(["HELF", "HELP"]),
-            code.isin(["BDWN"]),
-            code.isin(["CHBK"]),
-            code.isin(["VACP"]),
-            code.isin(["FE01"])
-            | (frgn == "Y"),
-            code.isin(["CPSI", "CPPI"]),
-        ],
-        [
-            "HB100",
-            "ALTA",
-            "HELOC",
-            "BORROWED DOWN",
-            "CASHBACK",
-            "VACATION/SECOND",
-            "NEW TO CAN",
-            "CREDIT_ASSIST",
-        ],
-        default="REGULAR",
-    )
-
-    df["PRODUCT_GROUP_2"] = np.where(
-        df["PRODUCT_GROUP"].isin(
-            [
-                "CASHBACK",
-                "CREDIT_ASSIST",
-                "HB100",
-                "HELOC"
-            ]
-        ),
-        "EXPIRED",
-        np.where(
-            df["PRODUCT_GROUP"].isin(
-                [
-                    "VACATION/SECOND",
-                    "NEW TO CAN"
-                ]
-            ),
-            "REGULAR",
-            df["PRODUCT_GROUP"],
-        ),
-    )
-
-    return df
-
-======
-
-def filter_valid_product_population(df):
-
-    rows_before = len(df)
-
-    df = df[
-        (
-            ~df["PRODUCT_GROUP_2"]
-            .isin(
-                [
-                    "ALTA",
-                    "EXPIRED"
-                ]
-            )
-        )
-        & (
-            df["PRD_GOVT_GUARANTEE"]
-            == "Y"
-        )
-    ].copy()
-
-    print(
-        "Rows removed by product filter:",
-        f"{rows_before - len(df):,}"
-    )
-
-    return df
-
-=======
-
+# 9. Product grouping
 df = add_product_group(df)
 
-df = filter_valid_product_population(df)
-
-========
-
-def clip_features(df):
-
-    out = df.copy()
-
-    rows = []
-
-    for col, bounds in FEATURE_RANGES.items():
-
-        if col not in out.columns:
-            continue
-
-        lo, hi = bounds
-
-        x = pd.to_numeric(
-            out[col],
-            errors="coerce"
-        )
-
-        valid = x.notna()
-
-        below = (
-            valid
-            & (x < lo)
-        )
-
-        above = (
-            valid
-            & (x > hi)
-        )
-
-        out.loc[
-            below,
-            col
-        ] = lo
-
-        out.loc[
-            above,
-            col
-        ] = hi
-
-        n = int(
-            valid.sum()
-        )
-
-        breach_cnt = int(
-            below.sum()
-            + above.sum()
-        )
-
-        rows.append(
-            {
-                "col": col,
-                "lo": lo,
-                "hi": hi,
-                "n": n,
-                "below_lo": int(
-                    below.sum()
-                ),
-                "above_hi": int(
-                    above.sum()
-                ),
-                "breach_cnt":
-                    breach_cnt,
-                "breach_pct":
-                    round(
-                        (
-                            breach_cnt
-                            / n
-                            * 100
-                        ),
-                        4
-                    )
-                    if n
-                    else 0.0,
-            }
-        )
-
-    clip_summary = pd.DataFrame(
-        rows
-    )
-
-    if not clip_summary.empty:
-
-        clip_summary = (
-            clip_summary
-            .sort_values(
-                [
-                    "breach_cnt",
-                    "col"
-                ],
-                ascending=[
-                    False,
-                    True
-                ]
-            )
-            .reset_index(
-                drop=True
-            )
-        )
-
-    return out, clip_summary
-
-========
-
-df, clip_summary = clip_features(df)
-
-display(clip_summary)
-
-=======
-
-def add_policy_derived_features(df):
-
-    df = df.copy()
-
-    df["CRA_COLLECTION"] = np.where(
-        df[
-            "CRA_SATISFIED_COLLECTION"
-        ].eq("Y")
-        | df[
-            "CRA_UNSATISFIED_COLLECTION"
-        ].eq("Y"),
-        "Y",
-        "N",
-    )
-
-    df["CRA_JUDGEMENT"] = np.where(
-        df[
-            "CRA_SATISFIED_JUDGEMENT"
-        ].eq("Y")
-        | df[
-            "CRA_UNSATISFIED_JUDGEMENT"
-        ].eq("Y"),
-        "Y",
-        "N",
-    )
-
-    if "PRK_CONDO_FEE" in df.columns:
-
-        df["PRK_CONDO_FEE"] = (
-            pd.to_numeric(
-                df["PRK_CONDO_FEE"],
-                errors="coerce"
-            )
-            .fillna(0)
-        )
-
-    rows_before = len(df)
-
-    if {
-        "TDSR",
-        "GDSR"
-    }.issubset(df.columns):
-
-        tdsr = pd.to_numeric(
-            df["TDSR"],
-            errors="coerce"
-        )
-
-        gdsr = pd.to_numeric(
-            df["GDSR"],
-            errors="coerce"
-        )
-
-        df["DSR_DIFF"] = (
-            tdsr - gdsr
-        ).abs()
-
-    df = df[
-        ~(
-            df[
-                "PRD_LOAN_PURPOSE"
-            ].eq("R")
-            & df[
-                "PRD_OUTSTANDING_BAL"
-            ].gt(3000)
-        )
-    ].copy()
-
-    print(
-        "Rows removed by refinance OSB filter:",
-        f"{rows_before - len(df):,}"
-    )
-
-    df["STATUS"] = np.select(
-        [
-            df[
-                "LATEST_PFP_POLICY_STATUS"
-            ].isin(
-                status_def.funded_status
-            )
-            | (
-                df[
-                    "LATEST_PFP_POLICY_STATUS"
-                ].isin(
-                    status_def
-                    .valid_lru_funded_status
-                )
-                & df[
-                    "LOB_RENAMED"
-                ].eq("LRUPLUS")
-            ),
-
-            df[
-                "LATEST_PFP_POLICY_STATUS"
-            ].isin(
-                status_def.declined_status
-            ),
-        ],
-        [
-            "Funded",
-            "Declined"
-        ],
-        default="Others",
-    )
-
-    print(
-        df["STATUS"]
-        .value_counts(dropna=False)
-    )
-
-    return df
-
-========
-
-df = add_policy_derived_features(df)
-
-========
-
-def add_target_category(df):
-
-    df = df.copy()
-
-    for col in [
-        "CLAIM_IND",
-        "DELQ90_IND"
-    ]:
-
-        if col in df.columns:
-            df[col] = (
-                df[col]
-                .fillna(0)
-            )
-
-    claim_ind = df.get(
-        "CLAIM_IND",
-        0
-    )
-
-    delq90_ind = df.get(
-        "DELQ90_IND",
-        0
-    )
-
-    df["category"] = np.select(
-        [
-            df["STATUS"]
-            == "Declined",
-
-            df["STATUS"]
-            == "Others",
-
-            (
-                claim_ind == 1
-            )
-            & (
-                delq90_ind == 1
-            ),
-
-            (
-                claim_ind == 1
-            )
-            & (
-                delq90_ind == 0
-            ),
-
-            (
-                claim_ind == 0
-            )
-            & (
-                delq90_ind == 1
-            ),
-        ],
-        [
-            "Declined",
-            "Others",
-            "Delq_Claim",
-            "Claim_Only",
-            "Delq_Only"
-        ],
-        default="No_Event",
-    )
-
-    df["target"] = np.select(
-        [
-            df["category"]
-            == "Others",
-
-            df["category"]
-            == "No_Event",
-        ],
-        [
-            np.nan,
-            0
-        ],
-        default=1,
-    )
-
-    print(
-        df["category"]
-        .value_counts(dropna=False)
-    )
-
-    return df
-
-=======
-
-df = add_target_category(df)
-
-
-=====
-
-def add_rural_indicator(df):
-
-    df = df.copy()
-
-    postal_code = (
-        df["POSTAL_CODE"]
-        .astype(str)
-        .fillna("")
-        .str.replace(
-            " ",
-            "",
-            regex=False
-        )
-        .str.upper()
-    )
-
-    df["RURAL_IND"] = np.where(
-        postal_code.str[1:2]
-        == "0",
-        "Y",
-        "N"
-    )
-
-    is_nb = (
-        df["PROVINCE"]
-        .astype(str)
-        .str.upper()
-        == "NB"
-    )
-
-    city = (
-        df.get(
-            "CITY",
-            pd.Series(
-                pd.NA,
-                index=df.index
-            )
-        )
-        .astype(str)
-        .str.upper()
-    )
-
-    df.loc[
-        is_nb
-        & ~city.isin(
-            NB_URBAN_WHITELIST
-        ),
-        "RURAL_IND"
-    ] = "Y"
-
-    return df
-
-======
-
-df = add_rural_indicator(df)
-
-
-
+# 10. Product filter
+df = filter_valid_product_population(
+    df
+)
+
+# 11. Clip
+df, clip_summary = clip_features(
+    df
+)
+
+# 12. Derived features
+df = add_policy_derived_features(
+    df
+)
+
+# 13. Target/category
+df = add_target_category(
+    df
+)
+
+# 14. Rural indicator
+df = add_rural_indicator(
+    df
+)
+
+# 15. Missing-value treatment
+df = fill_pol_missing_values(
+    df
+)
+
+print(
+    "Final processed dataset shape:",
+    df.shape
+)
