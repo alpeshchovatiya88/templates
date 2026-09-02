@@ -1,23 +1,290 @@
-# ---------------------------------------------------------
-# PRK_PROPERTY_AGE missing-value treatment
-# Exact logic from current policy_processor.py
-# ---------------------------------------------------------
+import numpy as np
+import pandas as pd
+from dataclasses import dataclass, field
 
-# 1. Identify rows where property age is missing
-missing_property_age = policy_df["PRK_PROPERTY_AGE"].isna()
 
-# 2. If AVM_YEAR_BUILT exists, calculate property age
-policy_df.loc[
-    missing_property_age
-    & policy_df["AVM_YEAR_BUILT"].notna(),
-    "PRK_PROPERTY_AGE"
-] = (
-    policy_df["BOOKYEAR"]
-    - policy_df["AVM_YEAR_BUILT"]
+NB_URBAN_WHITELIST = {
+    "FREDERICTON",
+    "SAINT JOHN",
+    "MONCTON"
+}
+
+
+FEATURE_RANGES = {
+    "PRK_PROPERTY_VALUE": [0, 3_000_000],
+    "ACTLTV": [0, 100],
+    "PRK_PROPERTY_AGE": [0, 150],
+    "PRD_LOAN_TERM": [1, 120],
+    "TDSR": [0, 48],
+    "GDSR": [0, 42],
+    "TOTAL_INCOME": [0, 450_000],
+    "BORYREMP": [0, 40],
+    "PRD_AMORTIZATION": [1, 480],
+    "CRD_OPEN_TRADE_TU": [0, 20],
+    "CRD_OPEN_TRADE_EQ": [0, 20],
+    "CRD_PUBLIC_DEROG_TU": [0, 10],
+    "CRD_PUBLIC_DEROG_EQ": [0, 10],
+}
+
+
+PROVINCE_REGION_MAP = {
+    "BC": "British_Columbia",
+    "AB": "Alberta",
+    "MB": "Manitoba",
+    "ON": "Rest_of_Ontario",
+    "QC": "Quebec",
+    "NS": "Nova_Scotia",
+    "NL": "Newfoundland_Labrador",
+    "SK": "Saskatchewan",
+    "NB": "New_Brunswick",
+    "PE": "Prince_Edward_Island",
+}
+
+
+@dataclass(frozen=True)
+class StatusDefinition:
+    funded_status: list[str] = field(
+        default_factory=lambda: ["C", "L", "R", "M", "T"]
+    )
+    valid_lru_funded_status: list[str] = field(
+        default_factory=lambda: ["X", "A", "E"]
+    )
+    declined_status: list[str] = field(
+        default_factory=lambda: ["D"]
+    )
+
+
+@dataclass(frozen=True)
+class EconomicsConfig:
+    max_shift_year: int = 4
+
+    region_map: dict[str, str] = field(
+        default_factory=lambda: {
+            "NewBrunswick": "New_Brunswick",
+            "Newfoundland": "Newfoundland_Labrador",
+            "BritishColumbia": "British_Columbia",
+            "Ontario": "Rest_of_Ontario",
+            "NovaScotia": "Nova_Scotia",
+            "PrinceEdwardIsland": "Prince_Edward_Island",
+        }
+    )
+
+
+status_def = StatusDefinition()
+econ_cfg = EconomicsConfig()
+
+========
+
+def validate_columns(df, required_cols, name):
+    missing = [c for c in required_cols if c not in df.columns]
+
+    if missing:
+        raise KeyError(
+            f"{name} missing required columns: {missing}"
+        )
+
+
+def normalize_columns(df):
+    df = df.copy()
+    df.columns = df.columns.str.strip()
+    return df
+
+=======
+
+def clean_policy(policy):
+
+    policy = normalize_columns(policy)
+
+    validate_columns(
+        policy,
+        [
+            "APPLICATION_NUMBER",
+            "RECEIVED_DAY_SID",
+            "EFFECT_DAY_SID",
+            "LOB_CODE",
+            "LRUPLUS_FLAG",
+        ],
+        "policy",
+    )
+
+    rows_before = len(policy)
+
+    policy = policy[
+        policy["APPLICATION_NUMBER"].notna()
+    ].copy()
+
+    policy["APPLICATION_NUMBER"] = (
+        policy["APPLICATION_NUMBER"].astype("int64")
+    )
+
+    policy["RECEIVED_DAY_SID"] = pd.to_numeric(
+        policy["RECEIVED_DAY_SID"],
+        errors="coerce"
+    )
+
+    policy["EFFECT_DAY_SID"] = pd.to_numeric(
+        policy["EFFECT_DAY_SID"],
+        errors="coerce"
+    )
+
+    effect_invalid = (
+        policy["EFFECT_DAY_SID"].isna()
+        | policy["EFFECT_DAY_SID"].le(0)
+    )
+
+    received_invalid = (
+        policy["RECEIVED_DAY_SID"].isna()
+        | policy["RECEIVED_DAY_SID"].le(0)
+    )
+
+    policy.loc[
+        effect_invalid & ~received_invalid,
+        "EFFECT_DAY_SID"
+    ] = policy.loc[
+        effect_invalid & ~received_invalid,
+        "RECEIVED_DAY_SID"
+    ]
+
+    policy["EFFECT_SID"] = (
+        policy["EFFECT_DAY_SID"] // 100
+    ).astype("Int64")
+
+    policy["BOOKYEAR"] = (
+        policy["EFFECT_SID"] // 100
+    ).astype("Int64")
+
+    dup_count = policy.duplicated(
+        "APPLICATION_NUMBER"
+    ).sum()
+
+    print(
+        "BOOKYEARS:\n",
+        policy["BOOKYEAR"]
+        .value_counts(dropna=False)
+    )
+
+    print(
+        "Policy rows before APPLICATION_NUMBER cleanup:",
+        f"{rows_before:,}"
+    )
+
+    print(
+        "Policy duplicate APPLICATION_NUMBER count:",
+        f"{dup_count:,}"
+    )
+
+    policy = policy.drop_duplicates(
+        subset="APPLICATION_NUMBER",
+        keep="last"
+    )
+
+    print("Policy shape after cleanup:", policy.shape)
+
+    return policy
+
+========
+
+policy_clean = clean_policy(policy_raw)
+
+policy_clean.shape
+
+=======
+
+def prepare_etd_claim_file(etd_claim_file):
+
+    etd_claim_file = normalize_columns(
+        etd_claim_file
+    )
+
+    validate_columns(
+        etd_claim_file,
+        [
+            "APPLICATION_NUMBER",
+            "PMP_BEST_DATE",
+            "DELQ90_IND",
+            "CLAIM_IND",
+            "TOTAL_INCURED_LOSS",
+        ],
+        "etd_claim_file",
+    )
+
+    etd_claim_file["APPLICATION_NUMBER"] = (
+        etd_claim_file["APPLICATION_NUMBER"]
+        .astype("int64")
+    )
+
+    pmp_date = pd.to_datetime(
+        etd_claim_file["PMP_BEST_DATE"],
+        errors="coerce"
+    )
+
+    etd_claim_file["PMP_BEST_DATE"] = (
+        pmp_date.dt.strftime("%Y%m%d")
+        .astype("Int64")
+    )
+
+    etd_claim_file = etd_claim_file[
+        pmp_date.dt.year.ne(2020)
+    ].copy()
+
+    dup_rows = etd_claim_file.duplicated(
+        "APPLICATION_NUMBER"
+    ).sum()
+
+    dup_apps = (
+        etd_claim_file.loc[
+            etd_claim_file.duplicated(
+                "APPLICATION_NUMBER"
+            ),
+            "APPLICATION_NUMBER",
+        ]
+        .nunique()
+    )
+
+    print(
+        "ETD duplicate episodes:",
+        f"{dup_rows:,}",
+        "rows across",
+        f"{dup_apps:,}",
+        "applications"
+    )
+
+    etd_claim_file = (
+        etd_claim_file
+        .groupby(
+            "APPLICATION_NUMBER",
+            as_index=False
+        )
+        .agg(
+            DELQ90_IND=("DELQ90_IND", "max"),
+            CLAIM_IND=("CLAIM_IND", "max"),
+            TOTAL_INCURED_LOSS=(
+                "TOTAL_INCURED_LOSS",
+                "sum"
+            ),
+        )
+    )
+
+    print(
+        "ETD shape after application-level aggregation:",
+        etd_claim_file.shape
+    )
+
+    return etd_claim_file
+
+=========
+
+etd_clean = prepare_etd_claim_file(
+    etd_claim_file
 )
 
-# 3. For new construction, always force property age = 1
-policy_df.loc[
-    policy_df["PRK_CONS_TYPE"].eq("N"),
-    "PRK_PROPERTY_AGE"
-] = 1
+policy_etd = policy_clean.merge(
+    etd_clean,
+    how="left",
+    on="APPLICATION_NUMBER",
+)
+
+print(policy_etd.shape)
+
+==========
+
