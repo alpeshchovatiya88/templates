@@ -1,305 +1,1093 @@
-def fill_pol_missing_values(
-    df_pol,
-    divide_actltv_by_100=True
-):
+import numpy as np
+import pandas as pd
+from dataclasses import dataclass, field
 
-    df_pol = df_pol.copy()
 
-    # EFFECT_DAY_SID:
-    # use RECEIVED_DAY_SID when -1 or missing
-    effect_day = (
-        df_pol["EFFECT_DAY_SID"]
-        .replace(
-            -1,
-            np.nan
-        )
+CV_SCORE_COLS = [
+    "CV_CREDIT_SCORE_2017",
+    "CV_CREDIT_SCORE_2019",
+    "CV_CREDIT_SCORE_2022",
+    "CV_CREDIT_SCORE_2023",
+]
+
+EQ_SCORE_COLS = [
+    "EQ_CREDIT_SCORE_2017",
+    "EQ_CREDIT_SCORE_2019",
+    "EQ_CREDIT_SCORE_2022",
+    "EQ_CREDIT_SCORE_2023",
+]
+
+
+@dataclass(frozen=True)
+class BorrowerConfig:
+    stats: set[str] = field(
+        default_factory=lambda: {
+            "min",
+            "max",
+            "avg",
+            "wavg",
+            "median"
+        }
     )
 
-    df_pol["EFFECT_DAY_SID"] = (
-        effect_day.fillna(
-            df_pol["RECEIVED_DAY_SID"]
-        )
-    )
+    weight_col: str = "BASE_SALARY"
 
-    df_pol["EFFECT_SID"] = (
-        df_pol["EFFECT_DAY_SID"]
-        // 100
-    ).astype("Int64")
-
-
-    # PRD_CONTRACT_RATE:
-    # fill with PRD_QUAL_INT_RATE
-    missing_rate = (
-        df_pol[
-            "PRD_CONTRACT_RATE"
-        ].isna()
-    )
-
-    df_pol.loc[
-        missing_rate,
-        "filled_PRD_CONTRACT_RATE_by"
-    ] = "PRD_QUAL_INT_RATE"
-
-    df_pol["PRD_CONTRACT_RATE"] = (
-        df_pol[
-            "PRD_CONTRACT_RATE"
-        ]
-        .fillna(
-            df_pol[
-                "PRD_QUAL_INT_RATE"
-            ]
-        )
-        .astype(float)
-    )
-
-
-    # POD_INSURANCE_IN_FORCE
-    df_pol["ACTLTV_lgd"] = (
-        df_pol["ACTLTV"] / 100
-        if divide_actltv_by_100
-        else df_pol["ACTLTV"]
-    )
-
-    missing_iif = (
-        df_pol[
-            "POD_INSURANCE_IN_FORCE"
-        ].isna()
-    )
-
-    iif_from_purchase_price = (
-        df_pol[
-            "PRK_PURCHASE_PRICE"
-        ].notna()
-        & df_pol[
-            "ACTLTV_lgd"
-        ].notna()
-    )
-
-    df_pol.loc[
-        missing_iif
-        & iif_from_purchase_price,
-        "filled_POD_INSURANCE_IN_FORCE_by"
-    ] = (
-        "PRK_PURCHASE_PRICE * ACTLTV_lgd"
-    )
-
-    df_pol.loc[
-        missing_iif
-        & ~iif_from_purchase_price,
-        "filled_POD_INSURANCE_IN_FORCE_by"
-    ] = "PRD_BASE_LOAN_AMT"
-
-    df_pol[
-        "POD_INSURANCE_IN_FORCE"
-    ] = (
-        df_pol[
-            "POD_INSURANCE_IN_FORCE"
-        ]
-        .fillna(
-            df_pol[
-                "PRK_PURCHASE_PRICE"
-            ]
-            * df_pol[
-                "ACTLTV_lgd"
-            ]
-        )
-        .fillna(
-            df_pol[
-                "PRD_BASE_LOAN_AMT"
-            ]
-        )
-        .astype(float)
-    )
-
-
-    # PRK_PROPERTY_VALUE
-    property_value = (
-        df_pol[
-            "PRK_PROPERTY_VALUE"
-        ]
-        .where(
-            df_pol[
-                "PRK_PROPERTY_VALUE"
-            ] > 1,
-            np.nan
-        )
-    )
-
-    missing_property_value = (
-        property_value.isna()
-    )
-
-    df_pol.loc[
-        missing_property_value
-        & df_pol[
-            "PRK_PURCHASE_PRICE"
-        ].notna(),
-        "filled_PRK_PROPERTY_VALUE_by"
-    ] = "PRK_PURCHASE_PRICE"
-
-    df_pol.loc[
-        missing_property_value
-        & df_pol[
-            "PRK_PURCHASE_PRICE"
-        ].isna()
-        & df_pol[
-            "PRK_DECLARED_VALUE"
-        ].notna(),
-        "filled_PRK_PROPERTY_VALUE_by"
-    ] = "PRK_DECLARED_VALUE"
-
-    df_pol[
-        "PRK_PROPERTY_VALUE"
-    ] = (
-        property_value
-        .fillna(
-            df_pol[
-                "PRK_PURCHASE_PRICE"
-            ]
-        )
-        .fillna(
-            df_pol[
-                "PRK_DECLARED_VALUE"
-            ]
-        )
-        .astype(float)
-    )
-
-
-    # PRK_PROPERTY_AGE
-    missing_property_age = (
-        df_pol[
-            "PRK_PROPERTY_AGE"
-        ].isna()
-    )
-
-    df_pol.loc[
-        missing_property_age
-        & df_pol[
-            "AVM_YEAR_BUILT"
-        ].notna(),
-        "PRK_PROPERTY_AGE"
-    ] = (
-        df_pol["BOOKYEAR"]
-        - df_pol[
-            "AVM_YEAR_BUILT"
+    score_priority: list[str] = field(
+        default_factory=lambda: [
+            "TV",
+            "CV",
+            "TU",
+            "FICO10",
+            "BEACON9",
+            "BEACON4",
         ]
     )
 
-    df_pol.loc[
-        df_pol[
-            "PRK_CONS_TYPE"
-        ].eq("N"),
-        "PRK_PROPERTY_AGE"
-    ] = 1
+    score_bins: dict[str, list[int]] = field(
+        default_factory=lambda: {
+            "TV": [625, 650, 675, 700, 730, 755, 795],
+            "CV": [635, 650, 680, 700, 720, 745, 785],
+            "TU": [625, 650, 675, 700, 725, 750, 780],
+            "FICO10": [625, 650, 675, 700, 730, 755, 795],
+            "BEACON9": [635, 650, 680, 700, 720, 745, 785],
+            "BEACON4": [625, 650, 675, 700, 725, 750, 780],
+        }
+    )
 
-    return df_pol
+
+config = BorrowerConfig()
 
 ==========
 
-df = fill_pol_missing_values(df)
+def normalize_columns(df):
+
+    df = df.copy()
+    df.columns = df.columns.str.strip()
+
+    return df
+
+
+def validate_columns(
+    df,
+    required,
+    name
+):
+
+    missing = [
+        c
+        for c in required
+        if c not in df.columns
+    ]
+
+    if missing:
+        raise KeyError(
+            f"{name} missing required columns: {missing}"
+        )
+
+
+def round_half_up(x):
+
+    return np.floor(x + 0.5)
+
+============
+
+def clean_borrower(borrower):
+
+    borrower = normalize_columns(
+        borrower
+    )
+
+    validate_columns(
+        borrower,
+        [
+            "APPLICATION_NUMBER",
+            "BOR_ID",
+            "BORROWER_SID"
+        ],
+        "borrower",
+    )
+
+    rows_before = len(
+        borrower
+    )
+
+    borrower = borrower[
+        borrower[
+            "APPLICATION_NUMBER"
+        ].notna()
+    ].copy()
+
+    borrower[
+        "APPLICATION_NUMBER"
+    ] = borrower[
+        "APPLICATION_NUMBER"
+    ].astype("int64")
+
+    borrower[
+        "BOR_ID"
+    ] = borrower[
+        "BOR_ID"
+    ].astype("int64")
+
+    object_cols = (
+        borrower
+        .select_dtypes(
+            include="object"
+        )
+        .columns
+    )
+
+    for col in object_cols:
+
+        try:
+
+            borrower[col] = (
+                borrower[col]
+                .replace(
+                    {
+                        " ": np.nan,
+                        "*": np.nan,
+                        "": np.nan
+                    }
+                )
+                .astype("float64")
+            )
+
+        except Exception:
+            continue
+
+    print(
+        "Borrower rows before cleanup:",
+        f"{rows_before:,}"
+    )
+
+    print(
+        "Borrower shape after cleanup:",
+        borrower.shape
+    )
+
+    return borrower
+
+=========
+
+borrower_clean = clean_borrower(
+    borrower_raw
+)
+
+borrower_clean.shape
+
+======
+
+def prepare_tu_credit(tu):
+
+    tu = normalize_columns(
+        tu
+    )
+
+    validate_columns(
+        tu,
+        [
+            "UNIQUE_RECORD_ID",
+            "CRD_SCORE_TV",
+            "CRD_SCORE_10"
+        ],
+        "tu_credit",
+    )
+
+    tu["TV_SOURCE"] = (
+        tu["CRD_SCORE_TV"]
+        .notna()
+        .map(
+            {
+                True: "credit_tv",
+                False: np.nan
+            }
+        )
+    )
+
+    tu["FICO10_SOURCE"] = (
+        tu["CRD_SCORE_10"]
+        .notna()
+        .map(
+            {
+                True: "credit_10",
+                False: np.nan
+            }
+        )
+    )
+
+    tu = (
+        tu
+        .replace(
+            "*",
+            np.nan
+        )
+        .apply(
+            pd.to_numeric,
+            errors="coerce"
+        )
+        .mask(
+            lambda x: x < 0,
+            np.nan
+        )
+    )
+
+    print(
+        "TU credit shape after cleanup:",
+        tu.shape
+    )
+
+    return tu
+
+============
+
+tu_clean = prepare_tu_credit(
+    tu_raw
+)
 
 ========
 
-# 1. Clean policy
-policy_clean = clean_policy(
-    policy_raw
-)
-
-# 2. Prepare ETD
-etd_clean = prepare_etd_claim_file(
-    etd_claim_file
-)
-
-# 3. Merge ETD
-policy_etd = policy_clean.merge(
-    etd_clean,
-    how="left",
-    on="APPLICATION_NUMBER",
-)
-
-# 4. MI population
-mi = build_mi_population(
-    policy_etd
-)
-
-# 5. LRU population
-lru = build_lru_population(
-    policy=policy_etd,
-    lru_data=lru_data,
-    etd_claim_file=etd_clean
-)
-
-# 6. Combine populations
-df = pd.concat(
-    [mi, lru],
-    ignore_index=True
-)
-
-df = df.drop_duplicates(
-    subset=["APPLICATION_NUMBER"],
-    keep="last"
-)
-
-# 7. Economic region
-df = map_econ_region(
+def extract_hit_score(
     df,
-    toronto_fsa_df
+    score_cols,
+    output_col
+):
+
+    hit_cols = [
+        f"{c}_HIT"
+        for c in score_cols
+    ]
+
+    available_score_cols = [
+        c
+        for c in score_cols
+        if c in df.columns
+    ]
+
+    available_hit_cols = [
+        c
+        for c in hit_cols
+        if c in df.columns
+    ]
+
+    if (
+        not available_score_cols
+        or not available_hit_cols
+    ):
+
+        print(
+            "No available columns found for",
+            output_col
+        )
+
+        return pd.DataFrame(
+            columns=[
+                "BORROWER_SID",
+                output_col
+            ]
+        )
+
+    mask = (
+        df[
+            available_hit_cols
+        ]
+        .eq("hit")
+        .any(axis=1)
+    )
+
+    out = df.loc[
+        mask,
+        [
+            "BORROWER_SID"
+        ]
+        + available_score_cols
+        + available_hit_cols,
+    ].copy()
+
+    out[
+        output_col
+    ] = np.nan
+
+    for score_col in available_score_cols:
+
+        hit_col = (
+            f"{score_col}_HIT"
+        )
+
+        if hit_col not in out.columns:
+            continue
+
+        m = out[
+            hit_col
+        ].eq("hit")
+
+        out.loc[
+            m,
+            output_col
+        ] = out.loc[
+            m,
+            score_col
+        ]
+
+    out = out[
+        [
+            "BORROWER_SID",
+            output_col
+        ]
+    ].copy()
+
+    out[
+        output_col
+    ] = pd.to_numeric(
+        out[output_col],
+        errors="coerce"
+    )
+
+    return out
+
+=======
+
+def prepare_cv_scores(cv):
+
+    cv = normalize_columns(
+        cv
+    )
+
+    validate_columns(
+        cv,
+        ["BORROWER_SID"],
+        "cv_credit_file"
+    )
+
+    credit_vision = extract_hit_score(
+        cv,
+        score_cols=CV_SCORE_COLS,
+        output_col="CRD_SCORE_CV_old",
+    )
+
+    eq_beacon9 = extract_hit_score(
+        cv,
+        score_cols=EQ_SCORE_COLS,
+        output_col="CRD_SCORE_BEACON9",
+    )
+
+    print(
+        "Credit Vision old shape:",
+        credit_vision.shape
+    )
+
+    print(
+        "EQ Beacon9 shape:",
+        eq_beacon9.shape
+    )
+
+    return (
+        credit_vision,
+        eq_beacon9
+    )
+
+=========
+
+credit_vision_old, eq_beacon9 = (
+    prepare_cv_scores(
+        cv_raw
+    )
 )
 
-# 8. Economics
-econ = prepare_economics(
-    econ_hist,
-    econ_future
+========
+
+def build_credit_vision_all(
+    borrower,
+    credit_vision_old
+):
+
+    frames = []
+
+    if (
+        "CRD_SCORE_FICO8"
+        in borrower.columns
+    ):
+
+        frames.append(
+            borrower.loc[
+                borrower[
+                    "CRD_SCORE_FICO8"
+                ].notna(),
+                [
+                    "BORROWER_SID",
+                    "CRD_SCORE_FICO8"
+                ],
+            ]
+            .rename(
+                columns={
+                    "CRD_SCORE_FICO8":
+                        "CRD_SCORE_CV"
+                }
+            )
+            .assign(
+                CV_SOURCE="BR1_F8"
+            )
+        )
+
+    if not credit_vision_old.empty:
+
+        frames.append(
+            credit_vision_old[
+                [
+                    "BORROWER_SID",
+                    "CRD_SCORE_CV_old"
+                ]
+            ]
+            .rename(
+                columns={
+                    "CRD_SCORE_CV_old":
+                        "CRD_SCORE_CV"
+                }
+            )
+            .assign(
+                CV_SOURCE="202306_FLAT"
+            )
+        )
+
+    if not frames:
+
+        return pd.DataFrame(
+            columns=[
+                "BORROWER_SID",
+                "CRD_SCORE_CV",
+                "CV_SOURCE"
+            ]
+        )
+
+    out = (
+        pd.concat(
+            frames,
+            ignore_index=True
+        )
+        .sort_values(
+            "CRD_SCORE_CV",
+            ascending=False
+        )
+        .drop_duplicates(
+            "BORROWER_SID",
+            keep="first"
+        )
+        .reset_index(
+            drop=True
+        )
+    )
+
+    print(
+        "Combined CV score shape:",
+        out.shape
+    )
+
+    return out
+
+==========
+
+credit_vision_all = (
+    build_credit_vision_all(
+        borrower_clean,
+        credit_vision_old
+    )
 )
 
-df = df.merge(
-    econ,
-    left_on=[
-        "EFFECT_SID",
-        "ECON_REGION"
-    ],
-    right_on=[
-        "Date",
-        "ECON_REGION"
-    ],
-    how="left",
+=========
+
+def merge_credit_sources(
+    borrower,
+    tu,
+    credit_vision_all,
+    eq_beacon9,
+):
+
+    borrower_tu = borrower.merge(
+        tu,
+        left_on="BOR_ID",
+        right_on="UNIQUE_RECORD_ID",
+        how="left",
+    ).drop(
+        columns=[
+            "UNIQUE_RECORD_ID"
+        ],
+        errors="ignore"
+    )
+
+    out = (
+        borrower_tu
+        .merge(
+            credit_vision_all,
+            on="BORROWER_SID",
+            how="left"
+        )
+        .merge(
+            eq_beacon9,
+            on="BORROWER_SID",
+            how="left"
+        )
+    )
+
+    out["NUM_OF_BOR"] = (
+        out[
+            "APPLICATION_NUMBER"
+        ]
+        .map(
+            out
+            .groupby(
+                "APPLICATION_NUMBER"
+            )
+            .size()
+        )
+    )
+
+    out = out.rename(
+        columns={
+            "CRD_SCORE_10":
+                "CRD_SCORE_FICO10",
+
+            "CRD_SCORE_EQ":
+                "CRD_SCORE_BEACON4",
+        }
+    )
+
+    print(
+        "Borrower-credit merged shape:",
+        out.shape
+    )
+
+    return out
+
+=========
+
+b = merge_credit_sources(
+    borrower=borrower_clean,
+    tu=tu_clean,
+    credit_vision_all=credit_vision_all,
+    eq_beacon9=eq_beacon9,
 )
 
-# 9. Product grouping
-df = add_product_group(df)
+=========
 
-# 10. Product filter
-df = filter_valid_product_population(
-    df
+def clean_scores(b):
+
+    b = b.copy()
+
+    for bureau in config.score_bins:
+
+        col = (
+            f"CRD_SCORE_{bureau}"
+        )
+
+        if col not in b.columns:
+            continue
+
+        bad = (
+            (b[col] < 300)
+            | (b[col] > 998)
+        )
+
+        b.loc[
+            bad,
+            col
+        ] = np.nan
+
+    if "CRD_SCORE_TU" in b.columns:
+
+        tu_missing = (
+            b[
+                "CRD_SCORE_TU"
+            ].isna()
+        )
+
+        for col in [
+            "CRD_MONTHS_TU",
+            "CRD_OPEN_TRADE_TU",
+            "CRD_PUBLIC_DEROG_TU"
+        ]:
+
+            if col in b.columns:
+
+                b.loc[
+                    tu_missing,
+                    col
+                ] = np.nan
+
+    for col in [
+        "CRD_OPEN_TRADE",
+        "CRD_PUBLIC_DEROG",
+        "CRD_MONTHS"
+    ]:
+
+        tu_col = (
+            f"{col}_TU"
+        )
+
+        eq_col = (
+            f"{col}_EQ"
+        )
+
+        if (
+            tu_col in b.columns
+            and eq_col in b.columns
+        ):
+
+            b[
+                tu_col
+            ] = (
+                b[
+                    tu_col
+                ]
+                .fillna(
+                    b[
+                        eq_col
+                    ]
+                )
+            )
+
+    return b
+
+========
+
+b = clean_scores(b)
+
+=========
+
+def add_score_bins(b):
+
+    b = b.copy()
+
+    for (
+        bureau,
+        cutpoints
+    ) in config.score_bins.items():
+
+        col = (
+            f"CRD_SCORE_{bureau}"
+        )
+
+        if col not in b.columns:
+            continue
+
+        b[
+            f"CRD_SCORE_{bureau}_val"
+        ] = (
+            b[col]
+            .where(
+                b[col].notna(),
+                np.nan
+            )
+        )
+
+        b[
+            f"CRD_SCORE_{bureau}_bin"
+        ] = np.where(
+            b[col].notna(),
+            np.digitize(
+                b[col],
+                cutpoints,
+                right=False
+            ) + 1,
+            np.nan,
+        )
+
+    b["CRD_SCORE"] = np.nan
+    b["CRD_SCORE_bin"] = np.nan
+    b["which_score"] = np.nan
+
+    for bureau in config.score_priority:
+
+        val_col = (
+            f"CRD_SCORE_{bureau}_val"
+        )
+
+        bin_col = (
+            f"CRD_SCORE_{bureau}_bin"
+        )
+
+        if (
+            val_col not in b.columns
+            or bin_col not in b.columns
+        ):
+            continue
+
+        take = (
+            b[
+                "CRD_SCORE"
+            ].isna()
+            & b[
+                val_col
+            ].notna()
+        )
+
+        b.loc[
+            take,
+            "CRD_SCORE"
+        ] = b.loc[
+            take,
+            val_col
+        ]
+
+        b.loc[
+            take,
+            "CRD_SCORE_bin"
+        ] = b.loc[
+            take,
+            bin_col
+        ]
+
+        b.loc[
+            take,
+            "which_score"
+        ] = bureau
+
+    b["which_score"] = (
+        pd.Categorical(
+            b[
+                "which_score"
+            ],
+            categories=config.score_priority,
+            ordered=True,
+        )
+    )
+
+    return b
+
+=========
+
+b = add_score_bins(b)
+
+=======
+
+b[
+    [
+        "CRD_SCORE",
+        "CRD_SCORE_bin",
+        "which_score"
+    ]
+].head()
+
+======
+
+b[
+    "which_score"
+].value_counts(
+    dropna=False
 )
 
-# 11. Clip
-df, clip_summary = clip_features(
-    df
-)
+======
 
-# 12. Derived features
-df = add_policy_derived_features(
-    df
-)
+def resolve_weight(b):
 
-# 13. Target/category
-df = add_target_category(
-    df
-)
+    if (
+        config.weight_col
+        in b.columns
+    ):
 
-# 14. Rural indicator
-df = add_rural_indicator(
-    df
-)
+        w = pd.to_numeric(
+            b[
+                config.weight_col
+            ],
+            errors="coerce"
+        )
 
-# 15. Missing-value treatment
-df = fill_pol_missing_values(
-    df
-)
+        if (
+            "TOTAL_INCOME"
+            in b.columns
+        ):
 
-print(
-    "Final processed dataset shape:",
-    df.shape
+            w = w.fillna(
+                pd.to_numeric(
+                    b[
+                        "TOTAL_INCOME"
+                    ],
+                    errors="coerce"
+                )
+            )
+
+        return w
+
+    return pd.Series(
+        1.0,
+        index=b.index
+    )
+
+========
+
+def aggregate_to_application(b):
+
+    grp_idx = (
+        b[
+            "APPLICATION_NUMBER"
+        ]
+    )
+
+    id_cols = set(
+        b.filter(
+            regex="ID"
+        ).columns
+    )
+
+    num_cols = [
+        c
+        for c in b.columns
+        if c not in id_cols
+        and c not in {
+            "APPLICATION_NUMBER",
+            "which_score"
+        }
+        and pd.api.types.is_numeric_dtype(
+            b[c]
+        )
+    ]
+
+    out = (
+        b
+        .groupby(
+            "APPLICATION_NUMBER",
+            sort=False,
+            observed=True
+        )[num_cols]
+        .max()
+    )
+
+    score_mode = (
+        pd.crosstab(
+            b[
+                "APPLICATION_NUMBER"
+            ],
+            b[
+                "which_score"
+            ]
+        )
+        .idxmax(
+            axis=1
+        )
+        .rename(
+            "which_score"
+        )
+    )
+
+    out = out.join(
+        score_mode
+    )
+
+    w = resolve_weight(
+        b
+    )
+
+    stats = config.stats
+
+
+    def agg_one(
+        series,
+        prefix,
+        round_stats=True
+    ):
+
+        s = pd.to_numeric(
+            series,
+            errors="coerce"
+        )
+
+        g = (
+            pd.DataFrame(
+                {
+                    "val": s
+                },
+                index=b.index
+            )
+            .groupby(
+                grp_idx,
+                sort=False
+            )
+        )
+
+        agg_map = {
+            f"{prefix}_min":
+                ("val", "min"),
+
+            f"{prefix}_max":
+                ("val", "max"),
+
+            f"{prefix}_avg":
+                ("val", "mean"),
+
+            f"{prefix}_median":
+                ("val", "median"),
+        }
+
+        agg_map = {
+            col: spec
+            for (
+                col,
+                spec
+            ) in agg_map.items()
+            if (
+                col.rsplit(
+                    "_",
+                    1
+                )[-1]
+                in stats
+            )
+        }
+
+        result = g.agg(
+            **agg_map
+        )
+
+        if round_stats:
+
+            for stat in [
+                "avg",
+                "median"
+            ]:
+
+                col = (
+                    f"{prefix}_{stat}"
+                )
+
+                if col in result:
+
+                    result[col] = (
+                        round_half_up(
+                            result[col]
+                        )
+                        .where(
+                            result[col]
+                            .notna()
+                        )
+                    )
+
+        if (
+            "wavg"
+            in stats
+        ):
+
+            w_valid = (
+                w.where(
+                    s.notna(),
+                    0.0
+                )
+            )
+
+            numerator = (
+                (
+                    s
+                    * w_valid
+                )
+                .groupby(
+                    grp_idx,
+                    sort=False
+                )
+                .sum(
+                    min_count=1
+                )
+            )
+
+            denominator = (
+                w_valid
+                .groupby(
+                    grp_idx,
+                    sort=False
+                )
+                .sum(
+                    min_count=1
+                )
+                .replace(
+                    0,
+                    np.nan
+                )
+            )
+
+            wavg = (
+                numerator
+                / denominator
+            ).replace(
+                0,
+                np.nan
+            )
+
+            result[
+                f"{prefix}_wavg"
+            ] = (
+                round_half_up(
+                    wavg
+                )
+                .where(
+                    wavg.notna()
+                )
+                if round_stats
+                else wavg
+            )
+
+        return result
+
+
+    for (
+        col,
+        prefix,
+        do_round
+    ) in [
+
+        (
+            "CRD_SCORE_bin",
+            "CRD_SCORE_bin",
+            False
+        ),
+
+        (
+            "CRD_SCORE_bin",
+            "CRD_SCORE_rbin",
+            True
+        ),
+
+        (
+            "CRD_SCORE",
+            "CRD_SCORE",
+            True
+        ),
+    ]:
+
+        if col in b.columns:
+
+            out = out.join(
+                agg_one(
+                    b[col],
+                    prefix,
+                    round_stats=do_round
+                )
+            )
+
+    if (
+        "CRD_SCORE_bin"
+        in out.columns
+    ):
+
+        out[
+            "CRD_SCORE_bin"
+        ] = round_half_up(
+            out[
+                "CRD_SCORE_bin"
+            ]
+        )
+
+    borrower_df = (
+        out
+        .reset_index()
+    )
+
+    print(
+        "Final borrower application-level shape:",
+        borrower_df.shape
+    )
+
+    return borrower_df
+
+======
+
+borrower_df = (
+    aggregate_to_application(
+        b
+    )
 )
