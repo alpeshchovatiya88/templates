@@ -1,70 +1,21 @@
-                DEVELOPER
-                    │
-                    ▼
-              Change Code
-                    │
-                    ▼
-               Push Code
-                    │
-══════════════════ CI ══════════════════
-                    │
-                    ▼
-              Check / Build
-                    │
-                    ▼
-           Build Docker Image
-                    │
-                    ▼
-              Push to ECR
-                    │
-══════════════════ CD ══════════════════
-                    │
-                    ▼
-          Create/Update SageMaker
-                Pipeline
-                    │
-                    ▼
-══════════════ ML PIPELINE ═════════════
-                    │
-                    ▼
-              Preprocessing
-                    │
-                    ▼
-              Data Profile
-                    │
-                    ▼
-          Data Quality Check
-               │        │
-             PASS      FAIL
-               │        │
-               ▼        └──→ STOP
-             Train
-               │
-               ▼
-            XGBoost
-               │
-               ▼
-            Evaluate
-               │
-               ▼
-         Model Metrics
-               │
-               ▼
-        Register Model
-               │
-               ▼
-        SageMaker Model
-            Registry
-               │
-               ▼
-        Approve / Deploy
-               │
-               ▼
-           Endpoint /
-           Predictor
-               │
-               ▼
-      New Application JSON
-               │
-               ▼
-           Prediction
+Raw Policy
+   ↓
+Clean policy
+   ↓
+Attach claim / delinquency history
+   ↓
+Build MI + LRU+ populations
+   ↓
+Create geography / economics
+   ↓
+Create property / product features
+   ↓
+Create status + target
+   ↓
+Apply model population filters
+   ↓
+Clip / impute values
+   ↓
+Optional LGD
+   ↓
+Final Policy Dataset
