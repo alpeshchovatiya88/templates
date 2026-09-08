@@ -1,19 +1,19 @@
-Raw Borrowers
-     +
-TU Credit Files
-     +
-Credit Vision / Equifax Scores
-     ↓
-Clean everything
-     ↓
-Merge credit sources
-     ↓
-Validate credit scores
-     ↓
-Create score bins
-     ↓
-Choose preferred score
-     ↓
-Aggregate multiple borrowers
-     ↓
-ONE ROW PER APPLICATION
+                 preprocess.py
+                      │
+         ┌────────────┴────────────┐
+         ▼                         ▼
+   Policy information        Borrower information
+         │                         │
+         ▼                         ▼
+ PolicyProcessor()          BorrowerProcessor()
+         │                         │
+         └────────────┬────────────┘
+                      ▼
+          Merge on APPLICATION_NUMBER
+                      │
+                      ▼
+              Clean final population
+                      │
+        ┌─────────────┼─────────────┐
+        ▼             ▼             ▼
+      TRAIN          TEST         RECENT
