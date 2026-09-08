@@ -1,21 +1,19 @@
-Raw Policy
-   ↓
-Clean policy
-   ↓
-Attach claim / delinquency history
-   ↓
-Build MI + LRU+ populations
-   ↓
-Create geography / economics
-   ↓
-Create property / product features
-   ↓
-Create status + target
-   ↓
-Apply model population filters
-   ↓
-Clip / impute values
-   ↓
-Optional LGD
-   ↓
-Final Policy Dataset
+Raw Borrowers
+     +
+TU Credit Files
+     +
+Credit Vision / Equifax Scores
+     ↓
+Clean everything
+     ↓
+Merge credit sources
+     ↓
+Validate credit scores
+     ↓
+Create score bins
+     ↓
+Choose preferred score
+     ↓
+Aggregate multiple borrowers
+     ↓
+ONE ROW PER APPLICATION
