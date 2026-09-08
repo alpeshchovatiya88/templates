@@ -1,19 +1,38 @@
-                 preprocess.py
-                      │
-         ┌────────────┴────────────┐
-         ▼                         ▼
-   Policy information        Borrower information
-         │                         │
-         ▼                         ▼
- PolicyProcessor()          BorrowerProcessor()
-         │                         │
-         └────────────┬────────────┘
-                      ▼
-          Merge on APPLICATION_NUMBER
-                      │
-                      ▼
-              Clean final population
-                      │
-        ┌─────────────┼─────────────┐
-        ▼             ▼             ▼
-      TRAIN          TEST         RECENT
+                      preprocess.py
+                           │
+                           ▼
+                    Read arguments
+                           │
+                           ▼
+                     Start MLflow
+                           │
+              ┌────────────┴─────────────┐
+              ▼                          ▼
+         SNOWFLAKE                       S3
+              │                          │
+       ┌──────┴──────┐          ┌────────┼─────────┐
+       ▼             ▼          ▼        ▼         ▼
+    Policy       Borrower    Economics   ETD     Scores
+                              Toronto    Claims    LRU+
+       │             │
+       ▼             ▼
+ PolicyProcessor  BorrowerProcessor
+       │             │
+       │             ▼
+       │       Credit processing
+       │       Multiple borrowers
+       │             ↓
+       │       One row/application
+       │             │
+       └──────┬──────┘
+              ▼
+  MERGE ON APPLICATION_NUMBER
+              │
+              ▼
+   Remove rows missing critical
+         modelling variables
+              │
+        ┌─────┼─────┐
+        │     │     │
+        ▼     ▼     ▼
+      TRAIN  TEST  RECENT
