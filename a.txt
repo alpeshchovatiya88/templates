@@ -1,38 +1,47 @@
-                      preprocess.py
-                           │
-                           ▼
-                    Read arguments
-                           │
-                           ▼
-                     Start MLflow
-                           │
-              ┌────────────┴─────────────┐
-              ▼                          ▼
-         SNOWFLAKE                       S3
-              │                          │
-       ┌──────┴──────┐          ┌────────┼─────────┐
-       ▼             ▼          ▼        ▼         ▼
-    Policy       Borrower    Economics   ETD     Scores
-                              Toronto    Claims    LRU+
-       │             │
-       ▼             ▼
- PolicyProcessor  BorrowerProcessor
-       │             │
-       │             ▼
-       │       Credit processing
-       │       Multiple borrowers
-       │             ↓
-       │       One row/application
-       │             │
-       └──────┬──────┘
-              ▼
-  MERGE ON APPLICATION_NUMBER
-              │
-              ▼
-   Remove rows missing critical
-         modelling variables
-              │
-        ┌─────┼─────┐
-        │     │     │
-        ▼     ▼     ▼
-      TRAIN  TEST  RECENT
+SageMaker Training Job
+        │
+        ▼
+read hyperparameters.json
+        │
+        ▼
+read train.csv
+        │
+        ├── preserve analysis-only columns
+        ├── determine label
+        ├── remove leaky columns
+        ├── remove rows with missing target
+        └── feature engineering
+        │
+        ▼
+X_train + y_train
+        │
+        ▼
+build_preprocessor()
+        │
+        ▼
+XGBTrainer
+        │
+        ├── optional GridSearchCV
+        │
+        ├── K-fold OOF CV
+        │      └── unbiased-ish validation predictions
+        │
+        ├── full-data refit
+        │
+        ├── OOF metrics / ModelResult
+        │
+        ├── feature importance
+        │
+        ├── SHAP
+        │
+        ├── save model/preprocessor
+        │
+        └── deployment verification
+        │
+        ▼
+/opt/ml/model/
+        │
+        ├── deployed_model/
+        ├── validation_metric_utility/
+        ├── xgb_preprocessor.pkl
+        └── INFERENCE/   ← optional LGD artifacts
