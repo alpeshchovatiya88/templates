@@ -1,47 +1,35 @@
-SageMaker Training Job
-        │
-        ▼
-read hyperparameters.json
-        │
-        ▼
-read train.csv
-        │
-        ├── preserve analysis-only columns
-        ├── determine label
-        ├── remove leaky columns
-        ├── remove rows with missing target
-        └── feature engineering
-        │
-        ▼
-X_train + y_train
-        │
-        ▼
-build_preprocessor()
-        │
-        ▼
-XGBTrainer
-        │
-        ├── optional GridSearchCV
-        │
-        ├── K-fold OOF CV
-        │      └── unbiased-ish validation predictions
-        │
-        ├── full-data refit
-        │
-        ├── OOF metrics / ModelResult
-        │
-        ├── feature importance
-        │
-        ├── SHAP
-        │
-        ├── save model/preprocessor
-        │
-        └── deployment verification
-        │
-        ▼
-/opt/ml/model/
-        │
-        ├── deployed_model/
-        ├── validation_metric_utility/
-        ├── xgb_preprocessor.pkl
-        └── INFERENCE/   ← optional LGD artifacts
+Use the same format as your screenshot:
+
+Summary: [Preprocessing] Credit Score Binning Logic Mismatch Between JsonPreprocessor and BorrowerProcessor
+
+Description: Credit score binning logic in JsonPreprocessor should be consistent with the existing BorrowerProcessor logic to ensure the same credit score produces the same model input during batch processing and JSON/inference processing.
+
+Currently, BorrowerProcessor uses:
+
+
+while JsonPreprocessor._score_to_bin() uses:
+
+
+These implementations produce different bins when the input credit score is exactly equal to a configured cutpoint. For example, a score of 625 is assigned to bin 2 by BorrowerProcessor, but bin 1 by JsonPreprocessor.
+
+Please provide:
+
+* Update JsonPreprocessor credit score binning to match BorrowerProcessor.
+* Ensure scores exactly equal to a cutpoint are assigned to the same bin in both processors.
+* Ensure missing (NaN) credit scores remain missing and are not assigned to a valid bin.
+* Validate the logic for all configured credit bureau score cutpoints.
+* Add unit tests covering values below, at, and above each bin boundary.
+
+Acceptance Criteria:
+
+☐ JsonPreprocessor and BorrowerProcessor use equivalent credit score binning logic.
+
+☐ Scores exactly equal to configured cutpoints produce identical bins in both processors.
+
+☐ Scores immediately below and above each cutpoint produce identical bins in both processors.
+
+☐ Missing (NaN) credit scores remain NaN and are not assigned to a valid bin.
+
+☐ Unit tests cover all configured bureau score boundaries and missing-value scenarios.
+
+☐ The same borrower/application produces the same CRD_SCORE_bin regardless of whether it is processed through the batch preprocessing path or the JSON/inference path.
