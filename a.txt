@@ -1,35 +1,23 @@
-Use the same format as your screenshot:
+from preprocess import build_policy_query, build_borrower_query
+from util import load_data_from_snowflake
 
-Summary: [Preprocessing] Credit Score Binning Logic Mismatch Between JsonPreprocessor and BorrowerProcessor
+dt_model = "202605"
+region = "ca-central-1"
 
-Description: Credit score binning logic in JsonPreprocessor should be consistent with the existing BorrowerProcessor logic to ensure the same credit score produces the same model input during batch processing and JSON/inference processing.
+# Policy
+policy = load_data_from_snowflake(
+    build_policy_query(dt_model=dt_model),
+    region=region
+)
+policy.to_csv("raw_policy.csv", index=False)
 
-Currently, BorrowerProcessor uses:
+# Borrower
+borrower = load_data_from_snowflake(
+    build_borrower_query(dt_model=dt_model),
+    region=region
+)
+borrower.to_csv("raw_borrower.csv", index=False)
 
-
-while JsonPreprocessor._score_to_bin() uses:
-
-
-These implementations produce different bins when the input credit score is exactly equal to a configured cutpoint. For example, a score of 625 is assigned to bin 2 by BorrowerProcessor, but bin 1 by JsonPreprocessor.
-
-Please provide:
-
-* Update JsonPreprocessor credit score binning to match BorrowerProcessor.
-* Ensure scores exactly equal to a cutpoint are assigned to the same bin in both processors.
-* Ensure missing (NaN) credit scores remain missing and are not assigned to a valid bin.
-* Validate the logic for all configured credit bureau score cutpoints.
-* Add unit tests covering values below, at, and above each bin boundary.
-
-Acceptance Criteria:
-
-☐ JsonPreprocessor and BorrowerProcessor use equivalent credit score binning logic.
-
-☐ Scores exactly equal to configured cutpoints produce identical bins in both processors.
-
-☐ Scores immediately below and above each cutpoint produce identical bins in both processors.
-
-☐ Missing (NaN) credit scores remain NaN and are not assigned to a valid bin.
-
-☐ Unit tests cover all configured bureau score boundaries and missing-value scenarios.
-
-☐ The same borrower/application produces the same CRD_SCORE_bin regardless of whether it is processed through the batch preprocessing path or the JSON/inference path.
+print("Policy:", policy.shape)
+print("Borrower:", borrower.shape)
+print("Done")
