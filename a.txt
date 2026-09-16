@@ -5,57 +5,61 @@ econ_dist.columns = ["ECON_REGION", "Count"]
 
 econ_dist["Percentage"] = (
     econ_dist["Count"] / econ_dist["Count"].sum() * 100
-).round(2)
+)
+
+econ_dist["Label"] = (
+    econ_dist["Count"].map("{:,}".format)
+    + " (" +
+    econ_dist["Percentage"].map("{:.1f}%".format)
+    + ")"
+)
 
 fig = px.bar(
     econ_dist,
     x="ECON_REGION",
     y="Count",
-    text="Percentage",
-    title="ECON_REGION Data Distribution",
-    hover_data=["Count", "Percentage"]
+    text="Label",
+    title="ECON_REGION Data Distribution"
 )
 
-fig.update_traces(
-    texttemplate="%{text:.2f}%",
-    textposition="outside"
-)
+fig.update_traces(textposition="outside")
 
 fig.update_layout(
     xaxis_title="ECON_REGION",
-    yaxis_title="Number of Records",
-    hovermode="x"
+    yaxis_title="Number of Records"
 )
 
 fig.show()
 
-======
+=====
 
 book_dist = df["BOOKYEAR"].value_counts().sort_index().reset_index()
 book_dist.columns = ["BOOKYEAR", "Count"]
 
 book_dist["Percentage"] = (
     book_dist["Count"] / book_dist["Count"].sum() * 100
-).round(2)
+)
+
+book_dist["Label"] = (
+    book_dist["Count"].map("{:,}".format)
+    + " (" +
+    book_dist["Percentage"].map("{:.1f}%".format)
+    + ")"
+)
 
 fig = px.bar(
     book_dist,
     x="BOOKYEAR",
     y="Count",
-    text="Percentage",
-    title="BOOKYEAR Data Distribution",
-    hover_data=["Count", "Percentage"]
+    text="Label",
+    title="BOOKYEAR Data Distribution"
 )
 
-fig.update_traces(
-    texttemplate="%{text:.2f}%",
-    textposition="outside"
-)
+fig.update_traces(textposition="outside")
 
 fig.update_layout(
     xaxis_title="BOOKYEAR",
-    yaxis_title="Number of Records",
-    hovermode="x"
+    yaxis_title="Number of Records"
 )
 
 fig.show()
