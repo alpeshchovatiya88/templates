@@ -1,23 +1,18 @@
-from preprocess import build_policy_query, build_borrower_query
-from util import load_data_from_snowflake
+def apply_dsr_logic(self, df: pd.DataFrame) -> pd.DataFrame:
+    df = df.copy()
 
-dt_model = "202605"
-region = "ca-central-1"
+    mask_extract = df["EFFECT_SID"].between(200901, 201610)
+    mask_comp = df["EFFECT_SID"].between(201611, 202512)
 
-# Policy
-policy = load_data_from_snowflake(
-    build_policy_query(dt_model=dt_model),
-    region=region
-)
-policy.to_csv("raw_policy.csv", index=False)
+    # 200901 to 201610
+    df_extract = self.extract_dsr(df.loc[mask_extract])
 
-# Borrower
-borrower = load_data_from_snowflake(
-    build_borrower_query(dt_model=dt_model),
-    region=region
-)
-borrower.to_csv("raw_borrower.csv", index=False)
+    # 201611 to 202512
+    df_comp = self.use_comp_dsr(df.loc[mask_comp])
 
-print("Policy:", policy.shape)
-print("Borrower:", borrower.shape)
-print("Done")
+    # Anything outside the above ranges
+    df_other = df.loc[~(mask_extract | mask_comp)]
+
+    return pd.concat(
+        [df_extract, df_comp, df_other]
+    ).sort_index()
