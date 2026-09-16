@@ -1,43 +1,20 @@
-import plotly.express as px
+def plot_numeric_distributions(data, numeric_cols, bins=50):
 
-bookyear_bad = (
-    df.groupby("BOOKYEAR")
-      .agg(
-          total=("target", "size"),
-          bads=("target", "sum"),
-          bad_rate=("target", "mean")
-      )
-      .reset_index()
-)
+    for col in numeric_cols:
 
-bookyear_bad["bad_rate_pct"] = bookyear_bad["bad_rate"] * 100
+        plt.figure(figsize=(10, 5))
 
-fig = px.scatter(
-    bookyear_bad,
-    x="BOOKYEAR",
-    y="bad_rate_pct",
-    size="total",
-    text="bad_rate_pct",
-    custom_data=["total", "bads"],
-    size_max=35,
-    title="Bad Rate by BOOKYEAR"
-)
+        sns.histplot(
+            data=data,
+            x=col,
+            bins=bins,
+            kde=True,
+            stat="density",
+            element="step"
+        )
 
-fig.update_traces(
-    texttemplate="%{text:.2f}%",
-    textposition="top center",
-    hovertemplate=
-        "<b>BOOKYEAR: %{x}</b><br>" +
-        "Total: %{customdata[0]:,.0f}<br>" +
-        "Bads: %{customdata[1]:,.0f}<br>" +
-        "Bad Rate: %{y:.2f}%<extra></extra>"
-)
-
-fig.update_layout(
-    xaxis_title="BOOKYEAR",
-    yaxis_title="Bad Rate (%)",
-    yaxis_ticksuffix="%",
-    xaxis=dict(type="category")
-)
-
-fig.show()
+        plt.title(f"Distribution of {col}")
+        plt.xlabel(col)
+        plt.ylabel("Density")
+        plt.tight_layout()
+        plt.show()
