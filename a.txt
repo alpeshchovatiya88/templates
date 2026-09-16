@@ -1,28 +1,182 @@
-# Select numeric columns only
-numeric_df = df.select_dtypes(include="number")
+import numpy as np
+import pandas as pd
 
-# Correlation matrix
-corr_matrix = numeric_df.corr()
 
-display(corr_matrix.round(3))
+def psi_interpretation(psi):
+    if pd.isna(psi):
+        return "Not calculated"
+    elif psi < 0.10:
+        return "Stable"
+    elif psi < 0.25:
+        return "Moderate shift"
+    else:
+        return "Significant shift"
+
+
+def calculate_psi_numeric(expected, actual, feature, bins=10, eps=0.0001):
+
+    exp = pd.to_numeric(
+        expected[feature], errors="coerce"
+    ).replace([np.inf, -np.inf], np.nan)
+
+    act = pd.to_numeric(
+        actual[feature], errors="coerce"
+    ).replace([np.inf, -np.inf], np.nan)
+
+    # Build bins using non-missing expected data
+    exp_clean = exp.dropna()
+
+    if exp_clean.nunique() < 2:
+        return np.nan
+
+    # Quantile bins based ONLY on expected population
+    _, bin_edges = pd.qcut(
+        exp_clean,
+        q=bins,
+        retbins=True,
+        duplicates="drop"
+    )
+
+    # Capture actual values outside expected range
+    bin_edges[0] = -np.inf
+    bin_edges[-1] = np.inf
+
+    exp_bins = pd.cut(
+        exp,
+        bins=bin_edges,
+        include_lowest=True
+    ).astype("object")
+
+    act_bins = pd.cut(
+        act,
+        bins=bin_edges,
+        include_lowest=True
+    ).astype("object")
+
+    # Keep missing as its own bucket
+    exp_bins = exp_bins.where(exp.notna(), "MISSING")
+    act_bins = act_bins.where(act.notna(), "MISSING")
+
+    levels = exp_bins.unique().tolist()
+
+    for level in act_bins.unique():
+        if level not in levels:
+            levels.append(level)
+
+    expected_pct = (
+        exp_bins.value_counts(normalize=True)
+        .reindex(levels, fill_value=0)
+    )
+
+    actual_pct = (
+        act_bins.value_counts(normalize=True)
+        .reindex(levels, fill_value=0)
+    )
+
+    expected_pct = expected_pct.replace(0, eps)
+    actual_pct = actual_pct.replace(0, eps)
+
+    psi = (
+        (actual_pct - expected_pct)
+        * np.log(actual_pct / expected_pct)
+    ).sum()
+
+    return float(psi)
+
+=====
+
+def calculate_psi_categorical(expected, actual, feature, eps=0.0001):
+
+    exp = expected[feature].astype("object")
+    act = actual[feature].astype("object")
+
+    exp = exp.where(exp.notna(), "MISSING").astype(str)
+    act = act.where(act.notna(), "MISSING").astype(str)
+
+    levels = sorted(
+        set(exp.unique()).union(set(act.unique()))
+    )
+
+    expected_pct = (
+        exp.value_counts(normalize=True)
+        .reindex(levels, fill_value=0)
+    )
+
+    actual_pct = (
+        act.value_counts(normalize=True)
+        .reindex(levels, fill_value=0)
+    )
+
+    expected_pct = expected_pct.replace(0, eps)
+    actual_pct = actual_pct.replace(0, eps)
+
+    psi = (
+        (actual_pct - expected_pct)
+        * np.log(actual_pct / expected_pct)
+    ).sum()
+
+    return float(psi)
 
 ======
 
-import plotly.express as px
+def run_psi(
+    expected,
+    actual,
+    numeric_cols,
+    categorical_cols,
+    model_name="funded_model"
+):
 
-fig = px.imshow(
-    corr_matrix,
-    text_auto=".2f",
-    aspect="auto",
-    color_continuous_scale="RdBu_r",
-    zmin=-1,
-    zmax=1,
-    title="Feature Correlation Heatmap"
+    results = []
+
+    for col in numeric_cols:
+
+        psi = calculate_psi_numeric(
+            expected,
+            actual,
+            col
+        )
+
+        results.append({
+            "model": model_name,
+            "feature": col,
+            "type": "numeric",
+            "psi": psi,
+            "interpretation": psi_interpretation(psi)
+        })
+
+    for col in categorical_cols:
+
+        psi = calculate_psi_categorical(
+            expected,
+            actual,
+            col
+        )
+
+        results.append({
+            "model": model_name,
+            "feature": col,
+            "type": "categorical",
+            "psi": psi,
+            "interpretation": psi_interpretation(psi)
+        })
+
+    return pd.DataFrame(results)
+
+====
+
+psi_results = run_psi(
+    expected=funded_model_dev,
+    actual=funded_model_oot,
+    numeric_cols=numeric_cols,
+    categorical_cols=categorical_cols,
+    model_name="Funded Model"
 )
 
-fig.update_layout(
-    width=1000,
-    height=800
-)
+psi_results = psi_results.sort_values(
+    "psi",
+    ascending=False
+).reset_index(drop=True)
 
-fig.show()
+display(psi_results)
+
