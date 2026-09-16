@@ -1,43 +1,11 @@
-# Get ACTLTV bins from developer PSI
-actltv_detail = psi_details["ACTLTV"]
+Population Stability Index (PSI)
 
-bins = actltv_detail["bin"]
+Population stability was assessed by comparing the development population with the test and recent populations. PSI values below 0.10 were treated as stable, values between 0.10 and 0.25 as moderate shifts, and values of 0.25 or greater as significant shifts.
 
-# Get bin edges
-edges = sorted(set(
-    [x.left for x in bins] +
-    [x.right for x in bins]
-))
+The development-to-test comparison indicates that most model variables are stable. A significant shift was observed for PRD_LOAN_PURPOSE (PSI = 0.3240), while substantial shifts were also observed for the macroeconomic variables HPI_+4 and UE_+4.
 
-# Create ACTLTV bins in full data
-df["ACTLTV_bin"] = pd.cut(
-    df["ACTLTV"],
-    bins=edges,
-    include_lowest=True
-)
+The development-to-recent comparison shows greater population movement. Significant shifts were observed for PRD_LOAN_PURPOSE (0.3909), CRD_SCORE_bin (0.3255), and ACTLTV (0.2678). Detailed analysis indicates that the PRD_LOAN_PURPOSE shift is largely driven by the increase in category R, while the CRD_SCORE_bin and ACTLTV distributions show clear changes over BOOKYEAR. The remaining model variables have PSI below 0.10 and remain relatively stable.
 
-# Count
-count = pd.crosstab(
-    df["BOOKYEAR"],
-    df["ACTLTV_bin"]
-)
+The very high PSI values for HPI_+4 and UE_+4 should be interpreted separately, as these variables represent macroeconomic conditions and their distributions are inherently dependent on the economic period being evaluated.
 
-# Percentage by year
-pct = pd.crosstab(
-    df["BOOKYEAR"],
-    df["ACTLTV_bin"],
-    normalize="index"
-).mul(100)
-
-# Combine percentage + count
-table = pct.copy()
-
-for col in table.columns:
-    table[col] = (
-        pct[col].map("{:.2f}%".format)
-        + " ("
-        + count[col].map("{:,}".format)
-        + ")"
-    )
-
-display(table)
+Conclusion: Overall, the PSI assessment identifies material changes in selected characteristics of the recent population relative to model development, particularly PRD_LOAN_PURPOSE, CRD_SCORE_bin, and ACTLTV. The observed shifts warrant continued monitoring and should be considered together with subsequent model performance and stability testing to determine whether the population changes have translated into deterioration in model performance.
