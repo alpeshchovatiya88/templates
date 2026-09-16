@@ -1,22 +1,58 @@
-pct = pd.crosstab(
-    df["BOOKYEAR"],
-    df["PRD_LOAN_PURPOSE"],
-    normalize="index"
-).mul(100)
+def population_stability_index(expected, actual, buckets=10, eps=1e-4):
 
-count = pd.crosstab(
-    df["BOOKYEAR"],
-    df["PRD_LOAN_PURPOSE"]
-)
+    # Numeric
+    if pd.api.types.is_numeric_dtype(expected):
 
-table = pct.copy()
+        e = pd.to_numeric(expected, errors="coerce")
+        a = pd.to_numeric(actual, errors="coerce")
 
-for col in table.columns:
-    table[col] = (
-        pct[col].map("{:.2f}%".format)
-        + " ("
-        + count[col].map("{:,}".format)
-        + ")"
+        clean = e.dropna()
+
+        if clean.nunique() < 2:
+            return np.nan
+
+        _, edges = pd.qcut(
+            clean,
+            q=buckets,
+            retbins=True,
+            duplicates="drop"
+        )
+
+        # Capture values outside expected range
+        edges[0], edges[-1] = -np.inf, np.inf
+
+        e = pd.cut(e, edges, include_lowest=True).astype("string").fillna("MISSING")
+        a = pd.cut(a, edges, include_lowest=True).astype("string").fillna("MISSING")
+
+    # Categorical
+    else:
+        e = expected.astype("string").fillna("MISSING")
+        a = actual.astype("string").fillna("MISSING")
+
+    # Distribution
+    levels = e.unique().tolist()
+
+    for x in a.unique():
+        if x not in levels:
+            levels.append(x)
+
+    e_pct = e.value_counts(normalize=True).reindex(levels, fill_value=0)
+    a_pct = a.value_counts(normalize=True).reindex(levels, fill_value=0)
+
+    e_pct = e_pct.replace(0, eps)
+    a_pct = a_pct.replace(0, eps)
+
+    # PSI
+    return float(
+        ((a_pct - e_pct) * np.log(a_pct / e_pct)).sum()
     )
 
-display(table)
+=======
+
+psi_results = pd.DataFrame({
+    "feature": numeric_cols + categorical_cols,
+    "psi": [
+        population_stability_index(train_df[c], oot_df[c])
+        for c in numeric_cols + categorical_cols
+    ]
+})
