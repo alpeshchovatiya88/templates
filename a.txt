@@ -1,41 +1,22 @@
-feature = "PRD_LOAN_PURPOSE"
+pct = pd.crosstab(
+    df["BOOKYEAR"],
+    df["PRD_LOAN_PURPOSE"],
+    normalize="index"
+).mul(100)
 
-dev_pct = (
-    all_model_dev[feature]
-    .astype("string").fillna("MISSING")
-    .value_counts(normalize=True)
+count = pd.crosstab(
+    df["BOOKYEAR"],
+    df["PRD_LOAN_PURPOSE"]
 )
 
-oot_pct = (
-    all_model_oot[feature]
-    .astype("string").fillna("MISSING")
-    .value_counts(normalize=True)
-)
+table = pct.copy()
 
-psi_detail = pd.concat([dev_pct, oot_pct], axis=1).fillna(0)
-psi_detail.columns = ["DEV_pct", "OOT_pct"]
-
-eps = 0.0001
-
-psi_detail["PSI_contribution"] = (
-    (psi_detail["OOT_pct"].replace(0, eps) -
-     psi_detail["DEV_pct"].replace(0, eps))
-    *
-    np.log(
-        psi_detail["OOT_pct"].replace(0, eps) /
-        psi_detail["DEV_pct"].replace(0, eps)
+for col in table.columns:
+    table[col] = (
+        pct[col].map("{:.2f}%".format)
+        + " ("
+        + count[col].map("{:,}".format)
+        + ")"
     )
-)
 
-psi_detail["DEV_pct"] *= 100
-psi_detail["OOT_pct"] *= 100
-
-psi_detail = psi_detail.sort_values(
-    "PSI_contribution", ascending=False
-)
-
-display(psi_detail)
-
-====
-
-psi_detail["PSI_contribution"].sum()
+display(table)
