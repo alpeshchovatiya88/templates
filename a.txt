@@ -1,57 +1,85 @@
-feature = "PRD_LOAN_PURPOSE"
+def population_stability_index(expected, actual, buckets=10, eps=1e-4):
 
-dev_pct = (
-    all_model_dev[feature]
-    .astype("string").fillna("MISSING")
-    .value_counts(normalize=True)
+    # Numeric
+    if pd.api.types.is_numeric_dtype(expected):
+        data_type = "numeric"
+
+        e = pd.to_numeric(expected, errors="coerce")
+        a = pd.to_numeric(actual, errors="coerce")
+
+        clean = e.dropna()
+
+        if clean.nunique() < 2:
+            return np.nan, data_type, "Not calculated"
+
+        _, edges = pd.qcut(
+            clean,
+            q=buckets,
+            retbins=True,
+            duplicates="drop"
+        )
+
+        edges[0], edges[-1] = -np.inf, np.inf
+
+        e = pd.cut(e, edges, include_lowest=True).astype("string").fillna("MISSING")
+        a = pd.cut(a, edges, include_lowest=True).astype("string").fillna("MISSING")
+
+    # Categorical
+    else:
+        data_type = "categorical"
+
+        e = expected.astype("string").fillna("MISSING")
+        a = actual.astype("string").fillna("MISSING")
+
+    # Distribution
+    levels = e.unique().tolist()
+
+    for x in a.unique():
+        if x not in levels:
+            levels.append(x)
+
+    e_pct = e.value_counts(normalize=True).reindex(levels, fill_value=0)
+    a_pct = a.value_counts(normalize=True).reindex(levels, fill_value=0)
+
+    e_pct = e_pct.replace(0, eps)
+    a_pct = a_pct.replace(0, eps)
+
+    # PSI
+    psi = float(
+        ((a_pct - e_pct) * np.log(a_pct / e_pct)).sum()
+    )
+
+    # Interpretation
+    if psi < 0.10:
+        interpretation = "Stable"
+    elif psi < 0.25:
+        interpretation = "Moderate shift"
+    else:
+        interpretation = "Significant shift"
+
+    return psi, data_type, interpretation
+
+======
+
+results = []
+
+for c in numeric_cols + categorical_cols:
+    psi, data_type, interpretation = population_stability_index(
+        model_dev[c],
+        model_oot[c]
+    )
+
+    results.append({
+        "feature": c,
+        "type": data_type,
+        "psi": psi,
+        "interpretation": interpretation
+    })
+
+psi_results = (
+    pd.DataFrame(results)
+    .sort_values("psi", ascending=False)
+    .reset_index(drop=True)
 )
 
-oot_pct = (
-    all_model_oot[feature]
-    .astype("string").fillna("MISSING")
-    .value_counts(normalize=True)
-)
-
-psi_detail = pd.concat([dev_pct, oot_pct], axis=1).fillna(0)
-psi_detail.columns = ["DEV_pct", "OOT_pct"]
-
-eps = 0.0001
-
-e = psi_detail["DEV_pct"].replace(0, eps)
-a = psi_detail["OOT_pct"].replace(0, eps)
-
-psi_detail["PSI_contribution"] = (
-    (a - e) * np.log(a / e)
-)
-
-# Add type
-psi_detail["type"] = "categorical"
-
-# Add interpretation
-psi_detail["interpretation"] = np.select(
-    [
-        psi_detail["PSI_contribution"] < 0.10,
-        psi_detail["PSI_contribution"] < 0.25
-    ],
-    [
-        "Stable",
-        "Moderate shift"
-    ],
-    default="Significant shift"
-)
-
-# Convert to %
-psi_detail["DEV_pct"] *= 100
-psi_detail["OOT_pct"] *= 100
-
-psi_detail = (
-    psi_detail
-    .sort_values("PSI_contribution", ascending=False)
-)
-
-display(psi_detail)
-
-=======
-
-total_psi = psi_detail["PSI_contribution"].sum()
-print("Total PSI:", total_psi)
+display(psi_results)
