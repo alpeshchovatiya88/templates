@@ -10,36 +10,34 @@ bookyear_bad = (
       .reset_index()
 )
 
-bookyear_bad["bad_rate_pct"] = (
-    bookyear_bad["bad_rate"] * 100
-).round(2)
+bookyear_bad["bad_rate_pct"] = bookyear_bad["bad_rate"] * 100
 
-bookyear_bad["Label"] = (
-    "Total: " + bookyear_bad["total"].map("{:,.0f}".format) +
-    "<br>Bads: " + bookyear_bad["bads"].map("{:,.0f}".format) +
-    "<br>Bad Rate: " + bookyear_bad["bad_rate_pct"].map("{:.2f}%".format)
-)
-
-fig = px.line(
+fig = px.scatter(
     bookyear_bad,
     x="BOOKYEAR",
     y="bad_rate_pct",
-    markers=True,
-    text="Label",
-    hover_data=["total", "bads", "bad_rate_pct"],
+    size="total",
+    text="bad_rate_pct",
+    custom_data=["total", "bads"],
+    size_max=35,
     title="Bad Rate by BOOKYEAR"
 )
 
 fig.update_traces(
+    texttemplate="%{text:.2f}%",
     textposition="top center",
-    marker=dict(size=8)
+    hovertemplate=
+        "<b>BOOKYEAR: %{x}</b><br>" +
+        "Total: %{customdata[0]:,.0f}<br>" +
+        "Bads: %{customdata[1]:,.0f}<br>" +
+        "Bad Rate: %{y:.2f}%<extra></extra>"
 )
 
 fig.update_layout(
     xaxis_title="BOOKYEAR",
     yaxis_title="Bad Rate (%)",
     yaxis_ticksuffix="%",
-    hovermode="x unified"
+    xaxis=dict(type="category")
 )
 
 fig.show()
