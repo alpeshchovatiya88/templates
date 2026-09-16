@@ -1,14 +1,35 @@
+# Get ACTLTV bins from developer PSI
+actltv_detail = psi_details["ACTLTV"]
+
+bins = actltv_detail["bin"]
+
+# Get bin edges
+edges = sorted(set(
+    [x.left for x in bins] +
+    [x.right for x in bins]
+))
+
+# Create ACTLTV bins in full data
+df["ACTLTV_bin"] = pd.cut(
+    df["ACTLTV"],
+    bins=edges,
+    include_lowest=True
+)
+
+# Count
+count = pd.crosstab(
+    df["BOOKYEAR"],
+    df["ACTLTV_bin"]
+)
+
+# Percentage by year
 pct = pd.crosstab(
     df["BOOKYEAR"],
-    df["PRD_LOAN_PURPOSE"],
+    df["ACTLTV_bin"],
     normalize="index"
 ).mul(100)
 
-count = pd.crosstab(
-    df["BOOKYEAR"],
-    df["PRD_LOAN_PURPOSE"]
-)
-
+# Combine percentage + count
 table = pct.copy()
 
 for col in table.columns:
