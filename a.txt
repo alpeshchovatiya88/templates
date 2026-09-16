@@ -1,14 +1,7 @@
-df_rest = (
-    df_all
-    .merge(
-        df_1[["APPLICATION_NUMBER"]].drop_duplicates(),
-        on="APPLICATION_NUMBER",
-        how="left",
-        indicator=True
-    )
-    .query('_merge == "left_only"')
-    .drop(columns="_merge")
-    .reset_index(drop=True)
+drop_mask = (
+    (df_rest["BOOKYEAR"] <= 2015)
+    | (df_rest["RECEIVED_DATE"] >= 202510)
+    | (df_rest["EFFECTIVE_DATE"].between(202101, 202312))
 )
 
-print(df_rest.shape)
+df_rest = df_rest.loc[~drop_mask].copy()
