@@ -1,22 +1,28 @@
+# Select numeric columns only
+numeric_df = df.select_dtypes(include="number")
+
+# Correlation matrix
+corr_matrix = numeric_df.corr()
+
+display(corr_matrix.round(3))
+
+======
+
 import plotly.express as px
 
-def plot_numeric_distributions(data, numeric_cols, bins=50):
+fig = px.imshow(
+    corr_matrix,
+    text_auto=".2f",
+    aspect="auto",
+    color_continuous_scale="RdBu_r",
+    zmin=-1,
+    zmax=1,
+    title="Feature Correlation Heatmap"
+)
 
-    for col in numeric_cols:
+fig.update_layout(
+    width=1000,
+    height=800
+)
 
-        fig = px.histogram(
-            data,
-            x=col,
-            nbins=bins,
-            histnorm="probability density",
-            marginal="box",
-            title=f"Distribution of {col}"
-        )
-
-        fig.update_layout(
-            xaxis_title=col,
-            yaxis_title="Density",
-            hovermode="x"
-        )
-
-        fig.show()
+fig.show()
