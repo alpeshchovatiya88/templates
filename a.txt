@@ -1,36 +1,58 @@
-import plotly.express as px
+def population_stability_index(expected, actual, buckets=10, eps=1e-4):
 
-plot_df = (
-    df.groupby(["BOOKYEAR", "PRD_LOAN_PURPOSE"])
-      .size()
-      .reset_index(name="count")
-)
+    # Numeric
+    if pd.api.types.is_numeric_dtype(expected):
 
-plot_df["pct"] = (
-    plot_df["count"] /
-    plot_df.groupby("BOOKYEAR")["count"].transform("sum")
-    * 100
-)
+        e = pd.to_numeric(expected, errors="coerce")
+        a = pd.to_numeric(actual, errors="coerce")
 
-fig = px.bar(
-    plot_df,
-    x="BOOKYEAR",
-    y="pct",
-    color="PRD_LOAN_PURPOSE",
-    text="pct",
-    hover_data=["count"],
-    title="PRD_LOAN_PURPOSE Distribution by BOOKYEAR"
-)
+        clean = e.dropna()
 
-fig.update_traces(
-    texttemplate="%{text:.1f}%",
-    textposition="inside"
-)
+        if clean.nunique() < 2:
+            return np.nan
 
-fig.update_layout(
-    yaxis_title="Percentage (%)",
-    xaxis_title="BOOKYEAR",
-    barmode="stack"
-)
+        _, edges = pd.qcut(
+            clean,
+            q=buckets,
+            retbins=True,
+            duplicates="drop"
+        )
 
-fig.show()
+        # Capture values outside expected range
+        edges[0], edges[-1] = -np.inf, np.inf
+
+        e = pd.cut(e, edges, include_lowest=True).astype("string").fillna("MISSING")
+        a = pd.cut(a, edges, include_lowest=True).astype("string").fillna("MISSING")
+
+    # Categorical
+    else:
+        e = expected.astype("string").fillna("MISSING")
+        a = actual.astype("string").fillna("MISSING")
+
+    # Distribution
+    levels = e.unique().tolist()
+
+    for x in a.unique():
+        if x not in levels:
+            levels.append(x)
+
+    e_pct = e.value_counts(normalize=True).reindex(levels, fill_value=0)
+    a_pct = a.value_counts(normalize=True).reindex(levels, fill_value=0)
+
+    e_pct = e_pct.replace(0, eps)
+    a_pct = a_pct.replace(0, eps)
+
+    # PSI
+    return float(
+        ((a_pct - e_pct) * np.log(a_pct / e_pct)).sum()
+    )
+
+======
+
+psi_results = pd.DataFrame({
+    "feature": numeric_cols + categorical_cols,
+    "psi": [
+        population_stability_index(train_df[c], oot_df[c])
+        for c in numeric_cols + categorical_cols
+    ]
+})
