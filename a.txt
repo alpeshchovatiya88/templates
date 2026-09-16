@@ -1,8 +1,22 @@
-psi_df, psi_details = psi_all_variables(
-    df_expected=model_dev,
-    df_actual=model_oot,
-    buckets=10,
-    categorical_cols=categorical_cols
+pct = pd.crosstab(
+    df["BOOKYEAR"],
+    df["PRD_LOAN_PURPOSE"],
+    normalize="index"
+).mul(100)
+
+count = pd.crosstab(
+    df["BOOKYEAR"],
+    df["PRD_LOAN_PURPOSE"]
 )
 
-display(psi_df)
+table = pct.copy()
+
+for col in table.columns:
+    table[col] = (
+        pct[col].map("{:.2f}%".format)
+        + " ("
+        + count[col].map("{:,}".format)
+        + ")"
+    )
+
+display(table)
