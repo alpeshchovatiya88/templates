@@ -1,21 +1,8 @@
-model_dev["CRD_SCORE_bin"] = model_dev["CRD_SCORE_bin"].astype("string")
-model_oot["CRD_SCORE_bin"] = model_oot["CRD_SCORE_bin"].astype("string")
+psi_df, psi_details = psi_all_variables(
+    df_expected=model_dev,
+    df_actual=model_oot,
+    buckets=10,
+    categorical_cols=categorical_cols
+)
 
-=====
-
-numeric_cols = model_dev.select_dtypes(include="number").columns.tolist()
-
-categorical_cols = model_dev.select_dtypes(
-    include=["object", "string", "category"]
-).columns.tolist()
-
-print("Numeric:", numeric_cols)
-print("Categorical:", categorical_cols)
-
-=====
-
-model_dev[numeric_cols]
-model_oot[numeric_cols]
-
-model_dev[categorical_cols]
-model_oot[categorical_cols]
+display(psi_df)
