@@ -9,3 +9,41 @@ The development-to-recent comparison shows greater population movement. Signific
 The very high PSI values for HPI_+4 and UE_+4 should be interpreted separately, as these variables represent macroeconomic conditions and their distributions are inherently dependent on the economic period being evaluated.
 
 Conclusion: Overall, the PSI assessment identifies material changes in selected characteristics of the recent population relative to model development, particularly PRD_LOAN_PURPOSE, CRD_SCORE_bin, and ACTLTV. The observed shifts warrant continued monitoring and should be considered together with subsequent model performance and stability testing to determine whether the population changes have translated into deterioration in model performance.
+
+=======
+
+1. Source-to-Model Data Reconciliation & Lineage
+    * Source-to-model reconciliation
+    * Data lineage and provenance verification
+    * Data traceability and transformation accuracy
+2. Data Quality & Integrity Testing
+    * Completeness and missing-value analysis
+    * Outlier and invalid-value testing
+    * Duplicate and consistency testing
+    * Data quality exceptions 3,2 model data.pdf
+3. Data Representativeness, Timeliness & Relevance
+    * Development vs. target population representativeness
+    * Data relevance for model purpose
+    * Data timeliness / currency
+    * Population differences 3,2 model data.pdf
+4. Data Cleansing & Transformation Review
+    * Missing-value and outlier treatment
+    * Exclusions / imputation
+    * Data transformations
+    * Before-and-after validation 3,2 model data.pdf
+5. Synthetic / Proxy Data Assessment, if applicable
+    * Appropriateness and rationale
+    * Quality and representativeness
+    * Limitations and model impact 3,2 model data.pdf
+6. Data Bias, Drift & PSI Assessment
+    * Data / sampling bias
+    * Bias and fairness impact
+    * Data / population drift
+    * PSI analysis, where applicable
+7. Exceptions, Findings & Model Impact
+    * Material data exceptions
+    * Impact on model results
+    * Required mitigation / remediation
+8. Overall Data Validation Conclusion
+    * Approved
+    * Conditionally Approved
