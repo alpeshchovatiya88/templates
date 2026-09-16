@@ -1,60 +1,14 @@
-# ============================================================
-# 1. TRAINING
-# ============================================================
-training_mask = (
-    df_all["BOOKYEAR"].between(2009, 2015)
-    & df_all["STATUS"].eq("Funded")
+df_rest = (
+    df_all
+    .merge(
+        df_1[["APPLICATION_NUMBER"]].drop_duplicates(),
+        on="APPLICATION_NUMBER",
+        how="left",
+        indicator=True
+    )
+    .query('_merge == "left_only"')
+    .drop(columns="_merge")
+    .reset_index(drop=True)
 )
 
-# ============================================================
-# 2. RECENT
-# ============================================================
-recent_mask = (
-    df_all["RECEIVED_SID"].between(202510, 202605)
-    & df_all["which_score"].eq("TV")
-)
-
-# ============================================================
-# 3. TEST / REST
-# Everything that is neither training nor recent
-# ============================================================
-testing_mask = ~(training_mask | recent_mask)
-
-
-df_training = df_all.loc[training_mask].copy()
-df_testing  = df_all.loc[testing_mask].copy()
-df_recent   = df_all.loc[recent_mask].copy()
-
-=======
-
-# TRAINING
-df_training = policy_processor.apply_model_population_filters(df_training)
-
-df_training = policy_processor.finalize_population(
-    df_training,
-    clip=True,
-    use_comp_dsr=False
-)
-
-df_training = df_training.dropna(subset=["TDSR", "GDSR"])
-
-
-# TEST / REST
-df_testing = policy_processor.apply_model_population_filters(df_testing)
-
-df_testing = policy_processor.finalize_population(
-    df_testing,
-    clip=True,
-    use_comp_dsr=True
-).reset_index(drop=True)
-
-
-# RECENT
-df_recent = policy_processor.finalize_population(
-    df_recent,
-    clip=False,
-    use_comp_dsr=True
-).reset_index(drop=True)
-
-=======
-
+print(df_rest.shape)
