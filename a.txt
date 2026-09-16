@@ -1,20 +1,22 @@
+import plotly.express as px
+
 def plot_numeric_distributions(data, numeric_cols, bins=50):
 
     for col in numeric_cols:
 
-        plt.figure(figsize=(10, 5))
-
-        sns.histplot(
-            data=data,
+        fig = px.histogram(
+            data,
             x=col,
-            bins=bins,
-            kde=True,
-            stat="density",
-            element="step"
+            nbins=bins,
+            histnorm="probability density",
+            marginal="box",
+            title=f"Distribution of {col}"
         )
 
-        plt.title(f"Distribution of {col}")
-        plt.xlabel(col)
-        plt.ylabel("Density")
-        plt.tight_layout()
-        plt.show()
+        fig.update_layout(
+            xaxis_title=col,
+            yaxis_title="Density",
+            hovermode="x"
+        )
+
+        fig.show()
