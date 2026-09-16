@@ -1,38 +1,5 @@
 import plotly.express as px
 
-econ_dist = df["ECON_REGION"].value_counts().reset_index()
-econ_dist.columns = ["ECON_REGION", "Count"]
-
-econ_dist["Percentage"] = (
-    econ_dist["Count"] / econ_dist["Count"].sum() * 100
-)
-
-econ_dist["Label"] = (
-    econ_dist["Count"].map("{:,}".format)
-    + " (" +
-    econ_dist["Percentage"].map("{:.1f}%".format)
-    + ")"
-)
-
-fig = px.bar(
-    econ_dist,
-    x="ECON_REGION",
-    y="Count",
-    text="Label",
-    title="ECON_REGION Data Distribution"
-)
-
-fig.update_traces(textposition="outside")
-
-fig.update_layout(
-    xaxis_title="ECON_REGION",
-    yaxis_title="Number of Records"
-)
-
-fig.show()
-
-=====
-
 book_dist = df["BOOKYEAR"].value_counts().sort_index().reset_index()
 book_dist.columns = ["BOOKYEAR", "Count"]
 
@@ -47,19 +14,23 @@ book_dist["Label"] = (
     + ")"
 )
 
-fig = px.bar(
+fig = px.line(
     book_dist,
     x="BOOKYEAR",
     y="Count",
+    markers=True,
     text="Label",
-    title="BOOKYEAR Data Distribution"
+    title="Data Distribution by BOOKYEAR"
 )
 
-fig.update_traces(textposition="outside")
+fig.update_traces(
+    textposition="top center"
+)
 
 fig.update_layout(
     xaxis_title="BOOKYEAR",
-    yaxis_title="Number of Records"
+    yaxis_title="Number of Records",
+    hovermode="x unified"
 )
 
 fig.show()
