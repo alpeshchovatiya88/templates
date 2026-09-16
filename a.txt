@@ -1,30 +1,45 @@
 import plotly.express as px
 
-region_bad["Label"] = (
-    "Total: " + region_bad["total"].map("{:,.0f}".format) +
-    "<br>Bads: " + region_bad["bads"].map("{:,.0f}".format) +
-    "<br>Bad Rate: " + region_bad["bad_rate_pct"].map("{:.2f}%".format)
+bookyear_bad = (
+    df.groupby("BOOKYEAR")
+      .agg(
+          total=("target", "size"),
+          bads=("target", "sum"),
+          bad_rate=("target", "mean")
+      )
+      .reset_index()
 )
 
-fig = px.bar(
-    region_bad,
-    x="ECON_REGION",
+bookyear_bad["bad_rate_pct"] = (
+    bookyear_bad["bad_rate"] * 100
+).round(2)
+
+bookyear_bad["Label"] = (
+    "Total: " + bookyear_bad["total"].map("{:,.0f}".format) +
+    "<br>Bads: " + bookyear_bad["bads"].map("{:,.0f}".format) +
+    "<br>Bad Rate: " + bookyear_bad["bad_rate_pct"].map("{:.2f}%".format)
+)
+
+fig = px.line(
+    bookyear_bad,
+    x="BOOKYEAR",
     y="bad_rate_pct",
+    markers=True,
     text="Label",
     hover_data=["total", "bads", "bad_rate_pct"],
-    title="Bad Rate by ECON_REGION"
+    title="Bad Rate by BOOKYEAR"
 )
 
 fig.update_traces(
-    textposition="outside"
+    textposition="top center",
+    marker=dict(size=8)
 )
 
 fig.update_layout(
-    xaxis_title="ECON_REGION",
+    xaxis_title="BOOKYEAR",
     yaxis_title="Bad Rate (%)",
     yaxis_ticksuffix="%",
-    uniformtext_minsize=8,
-    uniformtext_mode="show"
+    hovermode="x unified"
 )
 
 fig.show()
