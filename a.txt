@@ -1,15 +1,41 @@
-exp_bins = pd.cut(
-    exp,
-    bins=bin_edges,
-    include_lowest=True
+feature = "PRD_LOAN_PURPOSE"
+
+dev_pct = (
+    all_model_dev[feature]
+    .astype("string").fillna("MISSING")
+    .value_counts(normalize=True)
 )
 
-act_bins = pd.cut(
-    act,
-    bins=bin_edges,
-    include_lowest=True
+oot_pct = (
+    all_model_oot[feature]
+    .astype("string").fillna("MISSING")
+    .value_counts(normalize=True)
 )
 
-# Convert bucket labels to strings
-exp_bins = exp_bins.astype("string").fillna("MISSING")
-act_bins = act_bins.astype("string").fillna("MISSING")
+psi_detail = pd.concat([dev_pct, oot_pct], axis=1).fillna(0)
+psi_detail.columns = ["DEV_pct", "OOT_pct"]
+
+eps = 0.0001
+
+psi_detail["PSI_contribution"] = (
+    (psi_detail["OOT_pct"].replace(0, eps) -
+     psi_detail["DEV_pct"].replace(0, eps))
+    *
+    np.log(
+        psi_detail["OOT_pct"].replace(0, eps) /
+        psi_detail["DEV_pct"].replace(0, eps)
+    )
+)
+
+psi_detail["DEV_pct"] *= 100
+psi_detail["OOT_pct"] *= 100
+
+psi_detail = psi_detail.sort_values(
+    "PSI_contribution", ascending=False
+)
+
+display(psi_detail)
+
+====
+
+psi_detail["PSI_contribution"].sum()
