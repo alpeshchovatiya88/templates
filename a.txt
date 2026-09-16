@@ -1,34 +1,38 @@
+region_bad = (
+    df.groupby("ECON_REGION")
+      .agg(
+          total=("target", "size"),
+          bads=("target", "sum"),
+          bad_rate=("target", "mean")
+      )
+      .reset_index()
+)
+
+region_bad["bad_rate_pct"] = (region_bad["bad_rate"] * 100).round(2)
+
+region_bad
+
+=======
+
 import plotly.express as px
 
-target_dist = df["target"].value_counts().sort_index().reset_index()
-target_dist.columns = ["Target", "Count"]
-
-target_dist["Percentage"] = (
-    target_dist["Count"] / target_dist["Count"].sum() * 100
-)
-
-target_dist["Label"] = (
-    target_dist["Count"].map("{:,}".format)
-    + " (" +
-    target_dist["Percentage"].map("{:.2f}%".format)
-    + ")"
-)
-
 fig = px.bar(
-    target_dist,
-    x="Target",
-    y="Count",
-    text="Label",
-    title="Target Distribution"
+    region_bad,
+    x="ECON_REGION",
+    y="bad_rate_pct",
+    text="bad_rate_pct",
+    hover_data=["total", "bads"],
+    title="Bad Rate by ECON_REGION"
 )
 
 fig.update_traces(
+    texttemplate="%{text:.2f}%",
     textposition="outside"
 )
 
 fig.update_layout(
-    xaxis_title="Target",
-    yaxis_title="Number of Records"
+    xaxis_title="ECON_REGION",
+    yaxis_title="Bad Rate (%)"
 )
 
 fig.show()
