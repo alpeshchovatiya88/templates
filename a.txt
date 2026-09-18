@@ -1,50 +1,56 @@
-UPSTREAM DATA SOURCES
-        │
-        ├── Snowflake DM_POL
-        │     ├── Policy Data
-        │     └── Borrower Data
-        │
-        ├── Credit Data
-        │     ├── TransUnion
-        │     └── CreditVision
-        │
-        ├── Economic Data
-        │
-        ├── ETD Claim/Delinquency Data
-        │
-        ├── LRU Plus Data
-        │
-        └── Geographic/FSA Data
-                    │
-                    ▼
-        ┌──────────────────────┐
-        │ CI/CD Preprocessing  │
-        │      Pipeline        │
-        └──────────┬───────────┘
-                   │
-          ┌────────┴────────┐
-          ▼                 ▼
- ┌─────────────────┐  ┌──────────────────┐
- │ PolicyProcessor │  │ BorrowerProcessor│
- └────────┬────────┘  └─────────┬────────┘
-          │                      │
-          │              Credit Source
-          │              Consolidation
-          │                      │
-          └──────────┬───────────┘
-                     ▼
-             APPLICATION_NUMBER
-                Level Merge
-                     │
-                     ▼
-           Population Selection /
-             Business Filters
-                     │
-                     ▼
-             FINAL MODEL DATA
-                     │
-          ┌──────────┼──────────┐
-          ▼          ▼          ▼
-      Development   Test      Recent /
-       Population Population Validation
-                              Population
+flowchart LR
+
+    subgraph S["1. UPSTREAM DATA SOURCES"]
+        direction TB
+        S1["Snowflake DM_POL<br/>Policy Data"]
+        S2["Snowflake DM_POL<br/>Borrower Data"]
+        S3["Credit Data<br/>TransUnion / CreditVision"]
+        S4["Economic Data"]
+        S5["ETD Claims / Delinquency"]
+        S6["LRU Plus Data"]
+        S7["Geographic / FSA Data"]
+    end
+
+    subgraph P["2. PREPROCESSING"]
+        direction TB
+        P1["PolicyProcessor"]
+        P2["BorrowerProcessor"]
+        P3["Credit Source<br/>Consolidation"]
+    end
+
+    subgraph I["3. DATA INTEGRATION"]
+        direction TB
+        I1["Application-Level<br/>Aggregation"]
+        I2["Merge using<br/>APPLICATION_NUMBER"]
+        I3["Population Selection &<br/>Business Rules"]
+    end
+
+    subgraph M["4. MODEL-READY DATA"]
+        direction TB
+        M1["Final Model Dataset"]
+        M2["Development<br/>Population"]
+        M3["Test<br/>Population"]
+        M4["Recent / Validation<br/>Population"]
+    end
+
+    S1 --> P1
+    S5 --> P1
+    S6 --> P1
+    S4 --> P1
+    S7 --> P1
+
+    S2 --> P2
+    S3 --> P2
+
+    P2 --> P3
+
+    P1 --> I1
+    P3 --> I1
+
+    I1 --> I2
+    I2 --> I3
+    I3 --> M1
+
+    M1 --> M2
+    M1 --> M3
+    M1 --> M4
