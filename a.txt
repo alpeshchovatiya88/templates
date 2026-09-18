@@ -1,7 +1,50 @@
-drop_mask = (
-    (df_rest["BOOKYEAR"] <= 2015)
-    | (df_rest["RECEIVED_DATE"] >= 202510)
-    | (df_rest["EFFECTIVE_DATE"].between(202101, 202312))
-)
-
-df_rest = df_rest.loc[~drop_mask].copy()
+UPSTREAM DATA SOURCES
+        │
+        ├── Snowflake DM_POL
+        │     ├── Policy Data
+        │     └── Borrower Data
+        │
+        ├── Credit Data
+        │     ├── TransUnion
+        │     └── CreditVision
+        │
+        ├── Economic Data
+        │
+        ├── ETD Claim/Delinquency Data
+        │
+        ├── LRU Plus Data
+        │
+        └── Geographic/FSA Data
+                    │
+                    ▼
+        ┌──────────────────────┐
+        │ CI/CD Preprocessing  │
+        │      Pipeline        │
+        └──────────┬───────────┘
+                   │
+          ┌────────┴────────┐
+          ▼                 ▼
+ ┌─────────────────┐  ┌──────────────────┐
+ │ PolicyProcessor │  │ BorrowerProcessor│
+ └────────┬────────┘  └─────────┬────────┘
+          │                      │
+          │              Credit Source
+          │              Consolidation
+          │                      │
+          └──────────┬───────────┘
+                     ▼
+             APPLICATION_NUMBER
+                Level Merge
+                     │
+                     ▼
+           Population Selection /
+             Business Filters
+                     │
+                     ▼
+             FINAL MODEL DATA
+                     │
+          ┌──────────┼──────────┐
+          ▼          ▼          ▼
+      Development   Test      Recent /
+       Population Population Validation
+                              Population
