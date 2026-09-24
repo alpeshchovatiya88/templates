@@ -1,1 +1,35 @@
-Based on our code review and quantitative checks, we approve the data cleansing and transformation process. The reviewed controls appropriately address duplicates, missing values, outliers, and population construction, and the transformations are applied consistently and are traceable. No material concerns were identified.
+Summary: [Model Development] Implement Monotonic Constraints for Key Risk Drivers
+
+Description:
+The existing model training process did not explicitly enforce monotonic relationships between key risk drivers and predicted probability of default. As a result, model predictions may exhibit noise or non-intuitive movements across feature values/bins.
+
+Introduce monotonic constraints for selected model features based on expected business and risk relationships. For example, as credit score increases, the predicted probability of default is expected to decrease. Enforcing these relationships during model training is intended to produce more stable and intuitive risk patterns while improving model interpretability and explainability.
+
+Please provide:
+
+* Identify features for which a clear monotonic relationship with probability of default is expected.
+* Define the appropriate monotonic direction (1 for increasing and -1 for decreasing) for each selected feature.
+* Configure monotonic constraints as part of model training.
+* Include appropriate handling for binary features where monotonic behavior is required.
+* Compare model behavior before and after applying the constraints.
+* Assess whether the constraints reduce noise/non-intuitive movements across feature bins.
+* Evaluate the impact on model discrimination and calibration.
+* Document the business rationale for the selected features and constraint directions.
+
+Acceptance Criteria:
+
+☐ Monotonic constraints are implemented for the identified model features.
+
+☐ The direction of each constraint is documented and supported by business/risk rationale.
+
+☐ Credit score demonstrates the expected relationship, with predicted probability of default decreasing as credit score increases.
+
+☐ Constrained features are reviewed to confirm that predicted risk follows the intended monotonic direction.
+
+☐ Before-and-after results are evaluated to determine whether unexpected noise or fluctuations have been reduced.
+
+☐ Impact on model performance and calibration is assessed and documented.
+
+☐ The implementation and resulting relationships are sufficiently interpretable and explainable for model review/validation.
+
+=========
