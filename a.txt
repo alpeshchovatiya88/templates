@@ -33,3 +33,23 @@ Acceptance Criteria:
 ☐ The implementation and resulting relationships are sufficiently interpretable and explainable for model review/validation.
 
 =========
+
+Summary: [Model Development] Validate DSR_DIFF Feature Consistency Across Datasets
+
+Description:
+The DSR_DIFF feature is derived using different DSR sources across datasets:
+
+* Training: TDSR and GDSR
+* Testing & Production: Compliance TDSR and GDSR
+
+Provide rationale for using different sources and demonstrate that this difference does not materially impact the DSR_DIFF feature.
+
+Acceptance Criteria:
+
+☐ Rationale for the different DSR sources is documented.
+
+☐ DSR_DIFF distributions are compared across training, testing, and production datasets.
+
+☐ Evidence demonstrates that feature distributions are reasonably consistent/similar across datasets.
+
+☐ Any material differences identified are explained and appropriately addressed.
