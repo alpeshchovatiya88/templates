@@ -1,55 +1,19 @@
-Summary: [Model Development] Implement Monotonic Constraints for Key Risk Drivers
+importance_values = model.get_feature_importance()
 
-Description:
-The existing model training process did not explicitly enforce monotonic relationships between key risk drivers and predicted probability of default. As a result, model predictions may exhibit noise or non-intuitive movements across feature values/bins.
+if len(importance_values) != len(self.feature_names):
+    raise ValueError(
+        "Feature importance count does not match "
+        "encoded feature count: "
+        f"{len(importance_values)} != {len(self.feature_names)}"
+    )
 
-Introduce monotonic constraints for selected model features based on expected business and risk relationships. For example, as credit score increases, the predicted probability of default is expected to decrease. Enforcing these relationships during model training is intended to produce more stable and intuitive risk patterns while improving model interpretability and explainability.
+rows = []
 
-Please provide:
-
-* Identify features for which a clear monotonic relationship with probability of default is expected.
-* Define the appropriate monotonic direction (1 for increasing and -1 for decreasing) for each selected feature.
-* Configure monotonic constraints as part of model training.
-* Include appropriate handling for binary features where monotonic behavior is required.
-* Compare model behavior before and after applying the constraints.
-* Assess whether the constraints reduce noise/non-intuitive movements across feature bins.
-* Evaluate the impact on model discrimination and calibration.
-* Document the business rationale for the selected features and constraint directions.
-
-Acceptance Criteria:
-
-☐ Monotonic constraints are implemented for the identified model features.
-
-☐ The direction of each constraint is documented and supported by business/risk rationale.
-
-☐ Credit score demonstrates the expected relationship, with predicted probability of default decreasing as credit score increases.
-
-☐ Constrained features are reviewed to confirm that predicted risk follows the intended monotonic direction.
-
-☐ Before-and-after results are evaluated to determine whether unexpected noise or fluctuations have been reduced.
-
-☐ Impact on model performance and calibration is assessed and documented.
-
-☐ The implementation and resulting relationships are sufficiently interpretable and explainable for model review/validation.
-
-=========
-
-Summary: [Model Development] Validate DSR_DIFF Feature Consistency Across Datasets
-
-Description:
-The DSR_DIFF feature is derived using different DSR sources across datasets:
-
-* Training: TDSR and GDSR
-* Testing & Production: Compliance TDSR and GDSR
-
-Provide rationale for using different sources and demonstrate that this difference does not materially impact the DSR_DIFF feature.
-
-Acceptance Criteria:
-
-☐ Rationale for the different DSR sources is documented.
-
-☐ DSR_DIFF distributions are compared across training, testing, and production datasets.
-
-☐ Evidence demonstrates that feature distributions are reasonably consistent/similar across datasets.
-
-☐ Any material differences identified are explained and appropriately addressed.
+for feature, value in zip(
+    self.feature_names,
+    importance_values
+):
+    rows.append({
+        "feature": feature,
+        "importance": float(value)
+    })
