@@ -8,17 +8,21 @@ Conclusions in this review are separated into code-evidenced observations and pr
 
 SMI3.0.5 Key Design and Updates
 
-• Policy and borrower data are processed separately and combined at the application level. Borrower processing includes aggregation and credit-score selection logic.
-• Snowflake supplies policy and borrower source data. S3 supplies static economic, claim and delinquency, geography, credit-score and other supporting inputs.
-• The code constructs event categories from mortgage status, claim and 90-day delinquency indicators, then derives a binary target. The Declined category is assigned target=1 in policy_processor.py; the appropriateness of that assignment for outcome-based testing requires specific validation.
-• The training population is restricted to funded mortgages with BOOKYEAR from 2009 through 2015. The test population is selected using EFFECT_SID from 202101 through 202312. A separate recent population uses EFFECT_SID from 202510 through 202605 and a specified credit-score source. Population eligibility and outcome maturity must be checked separately for each group.
-• Macroeconomic features use historical and future HPI and unemployment inputs. The test and recent processing code also applies a reference-period mapping and a fixed contract-rate value; the timing and appropriateness of these assumptions require validation.
-• The pipeline retrieves an external LGD artifact. Downstream code uses LGD and model scores in loss and loss-ratio calculations. The external LGD methodology is not established by this source review.
-• The configured predictive model is an XGBClassifier in a scikit-learn pipeline. The code uses five-fold stratified cross-validation to generate out-of-fold predictions, then fits a model on the full training population. Grid search is implemented as an option but is disabled in the supplied configuration.
-• Training code produces out-of-fold and full-fit predictions, AUC and other classification metrics, feature-importance outputs, model artifacts and optional SHAP outputs. Test and recent evaluation code produces predictions, AUC where labels are available, model metadata, risk-ranking and related diagnostic artifacts.
-• SageMaker defines preprocessing, profiling, training, evaluation and registration steps. A data-quality ConditionStep is constructed, but the active final step list includes the steps directly and does not include that condition. The code therefore does not evidence an operating data-quality gate in the submitted pipeline definition. The condition compares the number of failed metrics with 200, despite a comment referring to two failures.
-• Registration is configured with PendingManualApproval as its default approval status. The active pipeline definition does not show an evaluation-threshold condition controlling registration.
-• The training archive contains references to inference files and deployment artifacts, but the real-time inference implementation and batch-versus-real-time parity cannot be concluded from this training archive alone.
+• Automated policy and borrower preprocessing, followed by application-level merging.
+• Snowflake policy and borrower source data; S3 economic, claim and delinquency, geography, credit-score and other static inputs.
+• Application-level borrower aggregation using multiple summary statistics and credit-score source selection logic.
+• Binary target derived from mortgage status, claim and 90-day delinquency categories; declined applications assigned target=1 in the reviewed code.
+• Funded-mortgage training population with BOOKYEAR 2009–2015; later test population with EFFECT_SID 202101–202312.
+• Separate recent population with EFFECT_SID 202510–202605 and a specified credit-score source.
+• HPI and unemployment feature construction using historical and future economic inputs; reference-period values and a fixed contract rate applied in test and recent processing.
+• External LGD artifact used in downstream loss and loss-ratio calculations.
+• XGBClassifier within a scikit-learn preprocessing pipeline; ROC AUC as the configured evaluation metric.
+• Five-fold stratified cross-validation, out-of-fold predictions and a subsequent full-training fit; optional grid search disabled in the supplied configuration.
+• Training outputs covering model artifacts, predictions, classification metrics, feature importance and optional SHAP explanations.
+• Evaluation outputs covering test and recent predictions, AUC where labels are available, model metadata, risk ranking and related diagnostic artifacts.
+• SageMaker preprocessing, profiling, training, evaluation and model-registration steps; registration defaulting to PendingManualApproval.
+• Data-quality ConditionStep defined in code but absent from the active pipeline step list; no evidenced evaluation-threshold gate before registration.
+• MLflow experiment and artifact tracking, with model-package metadata linking to the experiment and available source-control information.
 
 Technical Validation Scope
 
