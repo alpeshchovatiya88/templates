@@ -1,52 +1,213 @@
-SMI3.0 is implemented as a mortgage-insurance risk modelling framework that combines policy and borrower preprocessing, binary risk prediction, an external LGD dependency, loss calculations, model evaluation and SageMaker model registration. The supplied training code uses Snowflake and S3 inputs, AWS SageMaker for orchestration, and MLflow for experiment and artifact tracking.
+import numpy as np
+import pandas as pd
+from sklearn.metrics import (
+    roc_auc_score, average_precision_score, brier_score_loss, log_loss,
+    accuracy_score, precision_score, recall_score, f1_score,
+    mean_absolute_error, mean_squared_error, r2_score,
+)
 
-The configured training implementation is an XGBoost classifier within a scikit-learn preprocessing pipeline. Although the supplied Docker notebook installs AutoGluon, the reviewed train.py uses XGBClassifier directly. Its configuration specifies five-fold stratified cross-validation, out-of-fold predictions, a subsequent fit on the full training population, and ROC AUC as the evaluation metric. This should not be described as AutoGluon bagging without evidence from a different executed implementation.
+TRAIN_PATH = "df_scored_train.csv"
+TEST_PATH = "df_scored_test.csv"
+VAL_PATH = "df_scored_val.csv"
 
-The technical validation objective is to determine whether the implementation is technically sound, reproducible, appropriately controlled, consistent with the approved model design, and suitable for independent replication. The review covers data processing, feature engineering, target construction, model methodology, diagnostics, explainability, MLOps and governance.
+TARGET_COL = "TARGET"
+SCORE_COL = "SCORE"
+TASK = "classification"          # or "regression"
+THRESHOLD = 0.5
+ID_COLS = ["APPLICATION_NUMBER", "UAID", "UUAID", "Date"]
+PROTECTED_COLS = ["PROVINCE"]
+DATE_COL = "Date"
 
-Conclusions in this review are separated into code-evidenced observations and procedures requiring execution. Source code can show that a calculation or control was written, but cannot establish that it ran successfully on the approved dataset or that the resulting model meets acceptance criteria. The supplied archive also contains syntax and import inconsistencies; an executable version of the source and its dependencies is required before independent replication can be completed.
+train = pd.read_csv(TRAIN_PATH)
+test = pd.read_csv(TEST_PATH)
+val = pd.read_csv(VAL_PATH)
+frames = {
+    "train_2009_2015": train,
+    "test_2021_2023": test,
+    "val_202510_202605": val,
+}
 
-SMI3.0.5 Key Design and Updates
+def y_true(df):
+    return df[TARGET_COL].astype(float).to_numpy()
 
-• Automated policy and borrower preprocessing, followed by application-level merging.
-• Snowflake policy and borrower source data; S3 economic, claim and delinquency, geography, credit-score and other static inputs.
-• Application-level borrower aggregation using multiple summary statistics and credit-score source selection logic.
-• Binary target derived from mortgage status, claim and 90-day delinquency categories; declined applications assigned target=1 in the reviewed code.
-• Funded-mortgage training population with BOOKYEAR 2009–2015; later test population with EFFECT_SID 202101–202312.
-• Separate recent population with EFFECT_SID 202510–202605 and a specified credit-score source.
-• HPI and unemployment feature construction using historical and future economic inputs; reference-period values and a fixed contract rate applied in test and recent processing.
-• External LGD artifact used in downstream loss and loss-ratio calculations.
-• XGBClassifier within a scikit-learn preprocessing pipeline; ROC AUC as the configured evaluation metric.
-• Five-fold stratified cross-validation, out-of-fold predictions and a subsequent full-training fit; optional grid search disabled in the supplied configuration.
-• Training outputs covering model artifacts, predictions, classification metrics, feature importance and optional SHAP explanations.
-• Evaluation outputs covering test and recent predictions, AUC where labels are available, model metadata, risk ranking and related diagnostic artifacts.
-• SageMaker preprocessing, profiling, training, evaluation and model-registration steps; registration defaulting to PendingManualApproval.
-• Data-quality ConditionStep defined in code but absent from the active pipeline step list; no evidenced evaluation-threshold gate before registration.
-• MLflow experiment and artifact tracking, with model-package metadata linking to the experiment and available source-control information.
+def y_score(df):
+    return df[SCORE_COL].astype(float).to_numpy()
 
-Technical Validation Scope
+def y_pred(df):
+    if TASK == "classification":
+        return (y_score(df) >= THRESHOLD).astype(int)
+    return y_score(df)
 
-In scope: code review and independent procedures
+def feature_cols(df):
+    drop = {TARGET_COL, SCORE_COL, *ID_COLS}
+    return [c for c in df.columns if c not in drop and pd.api.types.is_numeric_dtype(df[c])]
 
-• Trace Snowflake and S3 inputs through joins, deduplication, missing-value handling, application-level aggregation and final train, test and recent extracts.
-• Reconcile population counts and selection criteria, including funded status, book-year and effective-period filters, product filters, score-source selection and exclusions at every stage.
-• Reconstruct event categories and the binary target from source indicators. Investigate the treatment of declined applications, missing outcomes, observation windows and outcome maturity before relying on test AUC.
-• Review feature transformations, credit-score logic, economic features, fixed values, LGD integration and the availability of each feature at the intended prediction time.
-• Reperform feature-exclusion and leakage checks, including identifier, status, outcome and post-decision fields.
-• Independently reproduce preprocessing, the five-fold out-of-fold procedure, full-data fit, model serialization and test-set scoring using the approved executable code, configuration, data snapshot and image.
-• Recompute discrimination, calibration and threshold-dependent metrics on an eligible independent test population; assess results by time period, geography, product and other material segments with adequate sample sizes.
-• Review feature importance and SHAP calculations for model-input consistency, reference population, sampling and interpretation. Execute stability, sensitivity and drift tests on appropriate development, test and recent populations.
-• Trace MLflow runs and artifacts to dataset versions, configuration, code commit, fitted model hash, evaluation output and registered model package.
-• Verify the SageMaker pipeline graph and observe whether quality checks, validation results and approval conditions operate as intended. Resolve the difference between code comments and the active step list.
-• Compare batch and real-time predictions on identical representative inputs once the deployment source, image and test evidence are supplied.
-• Record code-evidenced findings separately from executed test results, limitations, remediation and validator conclusions.
+def finite(df):
+    m = np.isfinite(y_true(df)) & np.isfinite(y_score(df))
+    return y_true(df)[m], y_score(df)[m], y_pred(df)[m]
 
-Out of scope for this source-code review
+==========
+Setup
+-------
 
-• Certification of the accuracy or completeness of Snowflake, S3 and external source-system data without source-to-target reconciliation evidence.
-• Validation of the external LGD model methodology without its documentation, artifact and separate validation evidence.
-• Business approval of target semantics, population selection, cut-offs, economic assumptions and product treatment.
-• Final privacy, legal, ethical, fairness and third-party data-use conclusions.
-• Final performance, calibration, stability and fitness-for-use conclusions before independent tests are run on the approved data and model artifact.
-• Conclusions on production monitoring effectiveness without monitoring configuration, operating evidence and observed results.
-• Final model risk rating and residual-risk acceptance.
+rows = []
+for name, df in frames.items():
+    yt, ys, _ = finite(df)
+    rows.append({
+        "split": name,
+        "n": len(df),
+        "target_mean": yt.mean(),
+        "score_mean": ys.mean(),
+        "score_min": ys.min(),
+        "score_max": ys.max(),
+        "n_features": len(feature_cols(df)),
+    })
+pd.DataFrame(rows)
+
+========
+#performance
+
+def ks_stat(y, s):
+    order = np.argsort(s)
+    y = y[order]
+    n1, n0 = y.sum(), len(y) - y.sum()
+    if n1 == 0 or n0 == 0:
+        return np.nan
+    cdf1 = np.cumsum(y) / n1
+    cdf0 = np.cumsum(1 - y) / n0
+    return float(np.max(np.abs(cdf1 - cdf0)))
+
+rows = []
+for name, df in frames.items():
+    yt, ys, yp = finite(df)
+    if TASK == "classification":
+        rows.append({
+            "split": name, "n": len(yt), "bad_rate": yt.mean(),
+            "AUC": roc_auc_score(yt, ys),
+            "Gini": 2 * roc_auc_score(yt, ys) - 1,
+            "KS": ks_stat(yt, ys),
+            "PR_AUC": average_precision_score(yt, ys),
+            "Brier": brier_score_loss(yt, np.clip(ys, 1e-6, 1 - 1e-6)),
+            "LogLoss": log_loss(yt, np.clip(ys, 1e-6, 1 - 1e-6)),
+            "Accuracy": accuracy_score(yt, yp),
+            "Precision": precision_score(yt, yp, zero_division=0),
+            "Recall": recall_score(yt, yp, zero_division=0),
+            "F1": f1_score(yt, yp, zero_division=0),
+        })
+    else:
+        rows.append({
+            "split": name, "n": len(yt),
+            "MAE": mean_absolute_error(yt, ys),
+            "RMSE": mean_squared_error(yt, ys) ** 0.5,
+            "R2": r2_score(yt, ys),
+            "Bias": float((ys - yt).mean()),
+        })
+pd.DataFrame(rows)
+
+========
+def ks_stat(y, s):
+    order = np.argsort(s)
+    y = y[order]
+    n1, n0 = y.sum(), len(y) - y.sum()
+    if n1 == 0 or n0 == 0:
+        return np.nan
+    cdf1 = np.cumsum(y) / n1
+    cdf0 = np.cumsum(1 - y) / n0
+    return float(np.max(np.abs(cdf1 - cdf0)))
+
+rows = []
+for name, df in frames.items():
+    yt, ys, yp = finite(df)
+    if TASK == "classification":
+        rows.append({
+            "split": name, "n": len(yt), "bad_rate": yt.mean(),
+            "AUC": roc_auc_score(yt, ys),
+            "Gini": 2 * roc_auc_score(yt, ys) - 1,
+            "KS": ks_stat(yt, ys),
+            "PR_AUC": average_precision_score(yt, ys),
+            "Brier": brier_score_loss(yt, np.clip(ys, 1e-6, 1 - 1e-6)),
+            "LogLoss": log_loss(yt, np.clip(ys, 1e-6, 1 - 1e-6)),
+            "Accuracy": accuracy_score(yt, yp),
+            "Precision": precision_score(yt, yp, zero_division=0),
+            "Recall": recall_score(yt, yp, zero_division=0),
+            "F1": f1_score(yt, yp, zero_division=0),
+        })
+    else:
+        rows.append({
+            "split": name, "n": len(yt),
+            "MAE": mean_absolute_error(yt, ys),
+            "RMSE": mean_squared_error(yt, ys) ** 0.5,
+            "R2": r2_score(yt, ys),
+            "Bias": float((ys - yt).mean()),
+        })
+pd.DataFrame(rows)
+
+===========
+Overfit
+--------
+
+def metric(df):
+    yt, ys, _ = finite(df)
+    if TASK == "classification":
+        return {"AUC": roc_auc_score(yt, ys), "Brier": brier_score_loss(yt, np.clip(ys, 1e-6, 1 - 1e-6))}
+    return {"MAE": mean_absolute_error(yt, ys)}
+
+m = {name: metric(df) for name, df in frames.items()}
+rows = []
+for k in m["train_2009_2015"]:
+    rows.append({
+        "metric": k,
+        "train": m["train_2009_2015"][k],
+        "test": m["test_2021_2023"][k],
+        "val": m["val_202510_202605"][k],
+        "train_minus_test": m["train_2009_2015"][k] - m["test_2021_2023"][k],
+        "train_minus_val": m["train_2009_2015"][k] - m["val_202510_202605"][k],
+    })
+pd.DataFrame(rows)
+
+==========
+Calibration
+------
+
+def reliability_table(df, n_bins=10):
+    yt, ys, _ = finite(df)
+    tab = pd.DataFrame({"y": yt, "s": ys, "bin": pd.qcut(ys, n_bins, duplicates="drop")})
+    tab = tab.groupby("bin", observed=True).agg(n=("y", "size"), mean_score=("s", "mean"), observed_rate=("y", "mean"))
+    tab["gap"] = tab["mean_score"] - tab["observed_rate"]
+    return tab
+
+def ece(df):
+    tab = reliability_table(df)
+    return float(np.average(np.abs(tab["gap"]), weights=tab["n"]))
+
+for name, df in frames.items():
+    print(name, "ECE", round(ece(df), 4))
+    display(reliability_table(df))
+
+----
+import matplotlib.pyplot as plt
+from sklearn.calibration import calibration_curve
+
+fig, ax = plt.subplots(figsize=(6, 6))
+for name, df in frames.items():
+    yt, ys, _ = finite(df)
+    frac, pred = calibration_curve(yt, ys, n_bins=10, strategy="quantile")
+    ax.plot(pred, frac, marker="o", label=name)
+ax.plot([0, 1], [0, 1], "--", color="gray")
+ax.set_xlabel("Mean score")
+ax.set_ylabel("Observed rate")
+ax.legend()
+plt.show()
+
+----
+
+from sklearn.linear_model import LogisticRegression
+
+cal = LogisticRegression(solver="lbfgs")
+cal.fit(y_score(test).reshape(-1, 1), y_true(test).astype(int))
+val_cal = cal.predict_proba(y_score(val).reshape(-1, 1))[:, 1]
+print("val Brier raw", brier_score_loss(y_true(val), np.clip(y_score(val), 1e-6, 1 - 1e-6)))
+print("val Brier Platt", brier_score_loss(y_true(val), np.clip(val_cal, 1e-6, 1 - 1e-6)))
+
+
+
