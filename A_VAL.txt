@@ -1,0 +1,2206 @@
+=============================================================
+# SETUP
+============================================================
+from pathlib import Path
+import hashlib
+import importlib.metadata
+import json
+import re
+
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+
+from sklearn.metrics import (
+    roc_auc_score,
+    average_precision_score,
+    log_loss,
+    confusion_matrix,
+    roc_curve,
+    precision_recall_curve,
+)
+from sklearn.model_selection import (
+    train_test_split,
+    GroupShuffleSplit,
+)
+
+# ============================================================
+# SETTINGS: EDIT THESE
+# ============================================================
+
+FILES = {
+    "train": "df_scored_train.csv",
+    "test": "df_scored_test.csv",
+    "val": "df_scored_val.csv",
+}
+
+TARGET = "target"  # 1 = bad event; 0 = no bad event
+
+SCORE_COLUMNS = {
+    "train": "pred_proba",
+    "test": "pred_proba",
+    "val": "pred_proba",
+}
+
+ID_COLUMN = "APPLICATION_NUMBER"
+
+# Confirm the outcome horizon and ascertainment before setting True.
+MATURE = {
+    "train": True,
+    "test": True,
+    "val": False,
+}
+
+# Apply your approved population definition.
+# Example ONLY if appropriate: 'STATUS == "Funded"'
+POPULATION_FILTERS = {
+    "train": None,
+    "test": None,
+    "val": None,
+}
+
+THRESHOLD = 0.5  # Replace with approved decision threshold.
+SEED = 42
+BOOTSTRAPS = 300
+MIN_N = 100
+MIN_EVENTS = 10
+
+# Borrower/group identifier when applications are dependent.
+# Used in bootstrap, holdout splitting and tuning.
+GROUP_COLUMN = None
+
+SEGMENT_COLUMNS = [
+    "PROVINCE",
+    "ECON_REGION",
+    "PRK_PROPERTY_TYPE",
+    "PRD_LOAN_PURPOSE",
+    "PRK_OCCUPANCY",
+]
+
+DATE_COLUMNS = {
+    "train": ("BOOKYEAR", "%Y"),
+    "test": ("EFFECT_SID", "%Y%m"),
+    "val": ("EFFECT_SID", "%Y%m"),
+}
+
+# Trusted sklearn pipeline INCLUDING fitted preprocessing.
+MODEL_PATH = None  # Example: "best_xgb.joblib"
+
+# Exact raw inputs expected by the fitted pipeline.
+FEATURES = [
+    # "LTV",
+    # "CREDIT_SCORE",
+    # ...all remaining required inputs...
+]
+
+# Plausible numeric measurement-error perturbations.
+ROBUSTNESS_RULES = {
+    # "LTV": {"sd": 0.5, "min": 0, "max": 100},
+    # "CREDIT_SCORE": {
+    #     "sd": 5, "min": 300, "max": 900, "integer": True
+    # },
+}
+
+# Hypothetical scenarios in the original input units.
+STRESS_SCENARIOS = {
+    # "higher_ltv": {
+    #     "LTV": {"add": 5, "min": 0, "max": 100}
+    # },
+}
+
+# Authorized attributes only. Do not infer protected attributes.
+PROTECTED_COLUMNS = []
+REFERENCE_GROUPS = {}
+
+RUN_SHAP = False
+RUN_TUNING = False
+RUN_MLFLOW = False
+
+# Must match parameter names in your actual pipeline.
+PARAM_GRID = {
+    # "model__max_depth": [3, 5],
+    # "model__learning_rate": [0.03, 0.10],
+}
+
+# Optional comparison probabilities on the SAME applications.
+INCUMBENT_SCORE_COLUMNS = {
+    # "test": "incumbent_pred_proba",
+}
+
+MLFLOW_EXPERIMENT = "SMI3-independent-validation"
+
+OUTPUT = Path("validation_outputs")
+OUTPUT.mkdir(exist_ok=True)
+
+plt.rcParams.update({
+    "figure.dpi": 110,
+    "axes.grid": True,
+    "grid.alpha": 0.2,
+})
+
+
+# ============================================================
+# OUTPUT HELPERS
+# ============================================================
+
+def safe_name(value):
+    return re.sub(r"[^A-Za-z0-9_.-]+", "_", str(value))
+
+
+def show_table(df, name):
+    df.to_csv(
+        OUTPUT / f"{safe_name(name)}.csv",
+        index=True,
+    )
+    display(df)
+
+
+def show_plot(name):
+    plt.tight_layout()
+    plt.savefig(
+        OUTPUT / f"{safe_name(name)}.png",
+        dpi=160,
+        bbox_inches="tight",
+    )
+    plt.show()
+    plt.close()
+
+
+def divide(a, b):
+    return a / b if b else np.nan
+
+
+def wilson_interval(events, n):
+    """Independent-observation 95% interval for a proportion."""
+    if n == 0:
+        return np.nan, np.nan
+
+    rate = events / n
+    z = 1.96
+    denominator = 1 + z**2 / n
+
+    center = (rate + z**2 / (2 * n)) / denominator
+
+    half = (
+        z * np.sqrt(
+            rate * (1 - rate) / n
+            + z**2 / (4 * n**2)
+        ) / denominator
+    )
+
+    return center - half, center + half
+
+
+# ============================================================
+# LOAD AND VALIDATE
+# ============================================================
+
+frames = {}
+evaluation = {}
+data_audit = []
+
+for name, path in FILES.items():
+    df = pd.read_csv(path)
+    raw_n = len(df)
+
+    if POPULATION_FILTERS[name]:
+        df = df.query(POPULATION_FILTERS[name]).copy()
+
+    if df.empty:
+        raise ValueError(f"{name}: empty eligible population")
+
+    if ID_COLUMN in df:
+        if (
+            df[ID_COLUMN].isna().any()
+            or df[ID_COLUMN].duplicated().any()
+        ):
+            raise ValueError(
+                f"{name}: missing/duplicate application IDs. "
+                "Resolve the unit of analysis."
+            )
+
+    if GROUP_COLUMN:
+        if (
+            GROUP_COLUMN not in df
+            or df[GROUP_COLUMN].isna().any()
+        ):
+            raise ValueError(
+                f"{name}: missing group column/identifiers"
+            )
+
+    score_column = SCORE_COLUMNS[name]
+
+    if score_column not in df:
+        raise ValueError(
+            f"{name}: score column '{score_column}' missing. "
+            f"Available columns: {list(df.columns)}"
+        )
+
+    df["_p"] = pd.to_numeric(
+        df[score_column],
+        errors="coerce",
+    )
+
+    if (
+        not np.isfinite(df["_p"]).all()
+        or not df["_p"].between(0, 1).all()
+    ):
+        raise ValueError(
+            f"{name}: missing/nonfinite/out-of-range probabilities"
+        )
+
+    if MATURE[name]:
+        if TARGET not in df:
+            raise ValueError(f"{name}: target column missing")
+
+        df["_y"] = pd.to_numeric(
+            df[TARGET], errors="coerce"
+        )
+
+        if not df["_y"].isin([0, 1]).all():
+            raise ValueError(
+                f"{name}: missing/nonbinary outcomes. "
+                "Define eligible mature outcomes explicitly."
+            )
+
+        df["_y"] = df["_y"].astype(int)
+        evaluation[name] = df.reset_index(drop=True)
+
+    frames[name] = df.reset_index(drop=True)
+
+    data_audit.append({
+        "dataset": name,
+        "raw_n": raw_n,
+        "eligible_n": len(df),
+        "outcomes_mature": MATURE[name],
+        "evaluated_n": len(df) if MATURE[name] else 0,
+    })
+
+
+# ============================================================
+# PERFORMANCE FUNCTIONS
+# ============================================================
+
+def performance(df, threshold=THRESHOLD):
+    y = df["_y"].to_numpy()
+    p = df["_p"].to_numpy()
+
+    tn, fp, fn, tp = confusion_matrix(
+        y,
+        p >= threshold,
+        labels=[0, 1],
+    ).ravel()
+
+    both_classes = np.unique(y).size == 2
+
+    auc = (
+        roc_auc_score(y, p)
+        if both_classes else np.nan
+    )
+
+    ks = np.nan
+
+    if both_classes:
+        fpr, tpr, _ = roc_curve(
+            y,
+            p,
+            drop_intermediate=False,
+        )
+        ks = float(np.max(np.abs(tpr - fpr)))
+
+    prevalence = y.mean()
+    brier = np.mean((y - p) ** 2)
+
+    return {
+        "n": len(y),
+        "bad_events": int(y.sum()),
+        "bad_rate": prevalence,
+        "mean_pd": p.mean(),
+        "auc": auc,
+        "gini": 2 * auc - 1,
+        "ks": ks,
+        "average_precision": (
+            average_precision_score(y, p)
+            if both_classes else np.nan
+        ),
+        "brier": brier,
+        "within_cohort_brier_skill": (
+            1 - divide(
+                brier,
+                prevalence * (1 - prevalence),
+            )
+        ),
+        "log_loss": log_loss(y, p, labels=[0, 1]),
+        "accuracy": divide(tp + tn, len(y)),
+        "precision": divide(tp, tp + fp),
+        "recall": divide(tp, tp + fn),
+        "specificity": divide(tn, tn + fp),
+        "false_positive_rate": divide(fp, fp + tn),
+        "f1": divide(2 * tp, 2 * tp + fp + fn),
+        "flag_rate": (p >= threshold).mean(),
+        "observed_expected": divide(y.sum(), p.sum()),
+    }
+
+
+def resampling_units(df):
+    if GROUP_COLUMN:
+        units = list(
+            df.groupby(
+                GROUP_COLUMN, sort=False
+            ).indices.values()
+        )
+        if len(units) < 2:
+            raise ValueError("At least two independent groups required")
+        return units
+
+    return None
+
+
+def sample_indices(df, rng, units=None):
+    if units is None:
+        return rng.integers(0, len(df), len(df))
+
+    selected = rng.integers(0, len(units), len(units))
+    return np.concatenate([units[i] for i in selected])
+
+
+def bootstrap_performance(df):
+    rng = np.random.default_rng(SEED)
+    units = resampling_units(df)
+
+    draws = pd.DataFrame([
+        performance(
+            df.iloc[sample_indices(df, rng, units)]
+        )
+        for _ in range(BOOTSTRAPS)
+    ])
+
+    result = pd.DataFrame({
+        "estimate": pd.Series(performance(df)),
+        "lower": draws.quantile(0.025),
+        "upper": draws.quantile(0.975),
+        "valid_bootstraps": draws.notna().sum(),
+    })
+
+    result.loc[
+        ["n", "bad_events"],
+        ["lower", "upper"],
+    ] = np.nan
+
+    return result
+
+
+def split_data(df, fraction=0.5, stratify=True):
+    if GROUP_COLUMN:
+        splitter = GroupShuffleSplit(
+            n_splits=1,
+            test_size=fraction,
+            random_state=SEED,
+        )
+        a, b = next(splitter.split(
+            df, groups=df[GROUP_COLUMN]
+        ))
+        return df.iloc[a].copy(), df.iloc[b].copy()
+
+    return train_test_split(
+        df,
+        test_size=fraction,
+        random_state=SEED,
+        stratify=df["_y"] if stratify else None,
+    )
+
+
+def calibration_table(df):
+    work = df.assign(
+        band=pd.cut(
+            df["_p"],
+            np.linspace(0, 1, 11),
+            include_lowest=True,
+        )
+    )
+
+    result = work.groupby(
+        "band", observed=True
+    ).agg(
+        n=("_y", "size"),
+        bad_events=("_y", "sum"),
+        mean_pd=("_p", "mean"),
+        observed_rate=("_y", "mean"),
+    )
+
+    intervals = [
+        wilson_interval(events, n)
+        for events, n in zip(
+            result["bad_events"], result["n"]
+        )
+    ]
+
+    result["lower"] = [x[0] for x in intervals]
+    result["upper"] = [x[1] for x in intervals]
+
+    result["gap"] = (
+        result["observed_rate"] - result["mean_pd"]
+    )
+
+    return result
+
+
+def segment_performance(df, columns):
+    rows = []
+
+    for column in columns:
+        if column not in df:
+            continue
+
+        for value, group in df.groupby(
+            column, dropna=False
+        ):
+            row = performance(group)
+
+            row.update({
+                "feature": column,
+                "value": str(value),
+                "sufficient_sample": (
+                    len(group) >= MIN_N
+                    and group["_y"].sum() >= MIN_EVENTS
+                    and (1 - group["_y"]).sum() >= MIN_EVENTS
+                ),
+            })
+
+            rows.append(row)
+
+    return pd.DataFrame(rows)
+
+
+# ============================================================
+# OPTIONAL FITTED MODEL
+# ============================================================
+
+model = None
+
+forbidden = {
+    TARGET,
+    ID_COLUMN,
+    "_p",
+    "_y",
+    "residual",
+    "abs_residual",
+    "pearson_residual",
+    *SCORE_COLUMNS.values(),
+    *INCUMBENT_SCORE_COLUMNS.values(),
+}
+
+if set(FEATURES) & forbidden:
+    raise ValueError("Target/prediction/diagnostic leakage in FEATURES")
+
+if MODEL_PATH:
+    import joblib
+
+    if not FEATURES:
+        raise ValueError("Exact raw-input FEATURES required")
+
+    model = joblib.load(MODEL_PATH)
+
+    if list(model.classes_) != [0, 1]:
+        raise ValueError(
+            "This implementation requires classes [0, 1]"
+        )
+
+
+def model_probability(X, estimator=None):
+    estimator = model if estimator is None else estimator
+
+    p = estimator.predict_proba(X)[
+        :, list(estimator.classes_).index(1)
+    ]
+
+    if (
+        not np.isfinite(p).all()
+        or ((p < 0) | (p > 1)).any()
+    ):
+        raise ValueError("Invalid model probabilities")
+
+    return p
+
+====================================================================================
+# 1. Data quality and population overlap
+====================================================================================
+show_table(pd.DataFrame(data_audit), "01_population_audit")
+
+missingness = pd.DataFrame({
+    name: df.isna().mean()
+    for name, df in frames.items()
+})
+
+show_table(missingness, "01_missingness")
+
+shown = (
+    missingness.loc[missingness.max(axis=1) > 0]
+    .assign(max_missing=lambda x: x.max(axis=1))
+    .sort_values("max_missing", ascending=False)
+    .drop(columns="max_missing")
+    .head(25)
+)
+
+if not shown.empty:
+    fig, ax = plt.subplots(
+        figsize=(8, max(4, len(shown) * 0.3))
+    )
+
+    image = ax.imshow(
+        shown.fillna(0).to_numpy(),
+        aspect="auto",
+        vmin=0,
+        vmax=1,
+        cmap="YlOrRd",
+    )
+
+    ax.set_xticks(range(len(shown.columns)))
+    ax.set_xticklabels(shown.columns)
+    ax.set_yticks(range(len(shown)))
+    ax.set_yticklabels(shown.index)
+
+    fig.colorbar(image, ax=ax, label="Missing fraction")
+    ax.set_title("Missingness by cohort")
+    show_plot("01_missingness_heatmap")
+
+overlap = []
+names = list(frames)
+
+identifiers = [
+    ID_COLUMN,
+    *([GROUP_COLUMN] if GROUP_COLUMN else []),
+]
+
+for i, first in enumerate(names):
+    for second in names[i + 1:]:
+        for identifier in identifiers:
+            if (
+                identifier in frames[first]
+                and identifier in frames[second]
+            ):
+                overlap.append({
+                    "first": first,
+                    "second": second,
+                    "identifier": identifier,
+                    "shared_identifiers": len(
+                        set(frames[first][identifier])
+                        & set(frames[second][identifier])
+                    ),
+                })
+
+show_table(pd.DataFrame(overlap), "01_population_overlap")
+
+========================================================================================
+# 2. Performance, confidence intervals and dashboard
+========================================================================================
+summary = pd.DataFrame({
+    name: performance(df)
+    for name, df in evaluation.items()
+}).T
+
+show_table(summary, "02_performance")
+
+confidence_intervals = {
+    name: bootstrap_performance(df)
+    for name, df in evaluation.items()
+}
+
+for name, result in confidence_intervals.items():
+    show_table(result, f"02_{name}_confidence_intervals")
+
+fig, axes = plt.subplots(2, 2, figsize=(13, 9))
+
+for name, df in evaluation.items():
+    if df["_y"].nunique() != 2:
+        continue
+
+    fpr, tpr, _ = roc_curve(
+        df["_y"], df["_p"], drop_intermediate=False
+    )
+
+    axes[0, 0].plot(
+        fpr,
+        tpr,
+        label=f"{name}: AUC={summary.loc[name, 'auc']:.3f}",
+    )
+
+    precision, recall, _ = precision_recall_curve(
+        df["_y"], df["_p"]
+    )
+
+    axes[0, 1].plot(
+        recall,
+        precision,
+        label=(
+            f"{name}: AP="
+            f"{summary.loc[name, 'average_precision']:.3f}"
+        ),
+    )
+
+    axes[0, 1].axhline(
+        df["_y"].mean(),
+        alpha=0.3,
+        linestyle="--",
+    )
+
+for name, df in frames.items():
+    axes[1, 0].hist(
+        df["_p"],
+        bins=np.linspace(0, 1, 31),
+        density=True,
+        histtype="step",
+        label=name,
+    )
+
+for i, (name, result) in enumerate(
+    confidence_intervals.items()
+):
+    row = result.loc["auc"]
+
+    if np.isfinite(row["estimate"]):
+        axes[1, 1].plot(row["estimate"], i, "o")
+        axes[1, 1].hlines(
+            i, row["lower"], row["upper"]
+        )
+
+axes[0, 0].plot([0, 1], [0, 1], "--", color="gray")
+
+axes[0, 0].set(
+    xlabel="False positive rate",
+    ylabel="True positive rate",
+    title="ROC",
+)
+
+axes[0, 1].set(
+    xlabel="Recall",
+    ylabel="Precision",
+    title="Precision–recall; dashed = bad-event prevalence",
+)
+
+axes[1, 0].set(
+    xlabel="P(bad event)",
+    ylabel="Density",
+    title="Score distributions, including immature cohorts",
+)
+
+axes[1, 1].set(
+    yticks=range(len(confidence_intervals)),
+    yticklabels=list(confidence_intervals),
+    xlabel="AUC",
+    title="Bootstrap 95% intervals",
+)
+
+for ax in axes.flat[:3]:
+    handles, _ = ax.get_legend_handles_labels()
+    if handles:
+        ax.legend()
+
+show_plot("02_performance_dashboard")
+
+=========================================================================
+# 3. Gain, lift, confusion matrix and threshold sensitivity
+=========================================================================
+fig, axes = plt.subplots(1, 2, figsize=(13, 4))
+
+for name, df in evaluation.items():
+    # Equal scores remain together.
+    ranked = (
+        df.groupby("_p")["_y"]
+        .agg(["size", "sum"])
+        .sort_index(ascending=False)
+    )
+
+    ranked["population_fraction"] = (
+        ranked["size"].cumsum() / len(df)
+    )
+
+    ranked["bad_event_capture"] = (
+        ranked["sum"].cumsum() / df["_y"].sum()
+        if df["_y"].sum() else np.nan
+    )
+
+    ranked["lift"] = (
+        ranked["bad_event_capture"]
+        / ranked["population_fraction"]
+    )
+
+    show_table(ranked, f"03_{name}_gain_lift")
+
+    axes[0].plot(
+        np.r_[0, ranked["population_fraction"]],
+        np.r_[0, ranked["bad_event_capture"]],
+        label=name,
+    )
+
+    axes[1].plot(
+        ranked["population_fraction"],
+        ranked["lift"],
+        label=name,
+    )
+
+axes[0].plot([0, 1], [0, 1], "--", color="gray")
+axes[1].axhline(1, linestyle="--", color="gray")
+
+axes[0].set(
+    xlabel="Population selected, highest risk first",
+    ylabel="Fraction of bad events captured",
+    title="Cumulative gain",
+)
+
+axes[1].set(
+    xlabel="Population selected",
+    ylabel="Cumulative lift",
+    title="Risk ranking",
+)
+
+for ax in axes:
+    ax.legend()
+
+show_plot("03_gain_lift")
+
+
+for name, df in evaluation.items():
+    thresholds = np.unique(np.r_[
+        np.quantile(df["_p"], np.linspace(0, 1, 101)),
+        THRESHOLD,
+    ])
+
+    sensitivity = pd.DataFrame([
+        {"threshold": t, **performance(df, t)}
+        for t in thresholds
+    ])
+
+    show_table(sensitivity, f"03_{name}_thresholds")
+
+    sensitivity.set_index("threshold")[[
+        "precision",
+        "recall",
+        "false_positive_rate",
+        "flag_rate",
+    ]].plot(figsize=(9, 4))
+
+    plt.axvline(
+        THRESHOLD, color="black", linestyle="--"
+    )
+    plt.ylabel("Rate")
+    plt.title(f"{name}: threshold sensitivity")
+    show_plot(f"03_{name}_threshold_sensitivity")
+
+    matrix = confusion_matrix(
+        df["_y"],
+        df["_p"] >= THRESHOLD,
+        labels=[0, 1],
+    )
+
+    fig, ax = plt.subplots(figsize=(5, 4))
+    image = ax.imshow(matrix, cmap="Blues")
+
+    for i in range(2):
+        for j in range(2):
+            ax.text(
+                j, i, f"{matrix[i, j]:,}",
+                ha="center", va="center",
+            )
+
+    ax.set(
+        xticks=[0, 1],
+        yticks=[0, 1],
+        xticklabels=["Below threshold", "Flagged bad"],
+        yticklabels=["Actual good", "Actual bad"],
+        xlabel="Prediction",
+        ylabel="Outcome",
+        title=f"{name}: threshold={THRESHOLD}",
+    )
+
+    fig.colorbar(image, ax=ax)
+    show_plot(f"03_{name}_confusion_matrix")
+
+=====================================================================================
+# 4. Calibration and held-out recalibration challenger
+=====================================================================================
+fig, axes = plt.subplots(1, 2, figsize=(13, 5))
+rows = []
+
+for name, df in evaluation.items():
+    result = calibration_table(df)
+    show_table(result, f"04_{name}_calibration")
+
+    rows.append({
+        "dataset": name,
+        "ece_fixed_bins": np.average(
+            abs(result["gap"]), weights=result["n"]
+        ),
+        "observed_expected": divide(
+            df["_y"].sum(), df["_p"].sum()
+        ),
+    })
+
+    axes[0].plot(
+        result["mean_pd"],
+        result["observed_rate"],
+        "o-",
+        label=name,
+    )
+
+    axes[0].vlines(
+        result["mean_pd"],
+        result["lower"],
+        result["upper"],
+        alpha=0.4,
+    )
+
+    axes[1].plot(
+        result["mean_pd"],
+        result["gap"],
+        "o-",
+        label=name,
+    )
+
+axes[0].plot([0, 1], [0, 1], "--", color="gray")
+axes[1].axhline(0, linestyle="--", color="gray")
+
+axes[0].set(
+    xlabel="Mean predicted bad-event probability",
+    ylabel="Observed bad-event rate",
+    title="Calibration; Wilson 95% intervals",
+)
+
+axes[1].set(
+    xlabel="Mean predicted probability",
+    ylabel="Observed − predicted",
+    title="Calibration gap",
+)
+
+for ax in axes:
+    ax.legend()
+
+show_plot("04_calibration")
+show_table(pd.DataFrame(rows), "04_calibration_summary")
+
+
+from sklearn.linear_model import LogisticRegression
+
+if "test" not in evaluation:
+    print("Recalibration requires mature test outcomes.")
+
+elif evaluation["test"]["_y"].value_counts().min() < 4:
+    print("Insufficient outcome-class counts.")
+
+else:
+    fitting, assessment = split_data(evaluation["test"])
+
+    if fitting["_y"].nunique() != 2:
+        raise ValueError(
+            "Calibrator fitting subset needs both classes"
+        )
+
+    def logit_input(p):
+        p = np.clip(np.asarray(p), 1e-6, 1 - 1e-6)
+        return np.log(p / (1 - p)).reshape(-1, 1)
+
+    calibrator = LogisticRegression(
+        C=1e6, max_iter=1000
+    ).fit(
+        logit_input(fitting["_p"]),
+        fitting["_y"],
+    )
+
+    revised = assessment.copy()
+
+    revised["_p"] = calibrator.predict_proba(
+        logit_input(assessment["_p"])
+    )[:, 1]
+
+    show_table(
+        pd.DataFrame({
+            "original": performance(assessment),
+            "recalibrated_challenger": performance(revised),
+        }),
+        "04_heldout_recalibration",
+    )
+
+    print("Calibration intercept:", calibrator.intercept_[0])
+    print("Calibration slope:", calibrator.coef_[0, 0])
+
+    fig, ax = plt.subplots(figsize=(6, 5))
+
+    for label, data in [
+        ("original", assessment),
+        ("challenger", revised),
+    ]:
+        result = calibration_table(data)
+        ax.plot(
+            result["mean_pd"],
+            result["observed_rate"],
+            "o-",
+            label=label,
+        )
+
+    ax.plot([0, 1], [0, 1], "--", color="gray")
+    ax.set(
+        xlabel="Mean predicted probability",
+        ylabel="Observed bad-event rate",
+        title="Held-out recalibration",
+    )
+    ax.legend()
+    show_plot("04_recalibration_challenger")
+
+===================================================================================================
+# 5. Residuals and confirmed weakness regions
+==================================================================================================
+for name, df in evaluation.items():
+    work = df.copy()
+
+    work["residual"] = work["_y"] - work["_p"]
+
+    work["pearson_residual"] = (
+        work["residual"]
+        / np.sqrt(np.clip(
+            work["_p"] * (1 - work["_p"]),
+            1e-8,
+            None,
+        ))
+    )
+
+    show_table(
+        work[["residual", "pearson_residual"]].describe(),
+        f"05_{name}_residual_summary",
+    )
+
+    sample = work.sample(
+        min(10000, len(work)), random_state=SEED
+    )
+
+    fig, axes = plt.subplots(1, 2, figsize=(12, 4))
+
+    axes[0].scatter(
+        sample["_p"], sample["residual"],
+        s=5, alpha=0.15,
+    )
+    axes[0].axhline(0, color="gray")
+    axes[0].set(
+        xlabel="P(bad event)",
+        ylabel="y − p",
+        title=f"{name}: display sample",
+    )
+
+    axes[1].hist(work["residual"], bins=40)
+    axes[1].set(
+        xlabel="y − p",
+        ylabel="Count",
+        title="All-row residual distribution",
+    )
+
+    show_plot(f"05_{name}_residuals")
+
+
+from sklearn.tree import DecisionTreeRegressor, export_text
+
+if not FEATURES or "test" not in evaluation:
+    print(
+        "Weakness discovery requires original FEATURES "
+        "and mature test outcomes."
+    )
+
+else:
+    df = evaluation["test"]
+
+    columns = [
+        c for c in FEATURES
+        if (
+            pd.api.types.is_numeric_dtype(df[c])
+            and df[c].notna().any()
+        )
+    ]
+
+    if not columns or df["_y"].value_counts().min() < 4:
+        print("Insufficient features/outcome counts.")
+
+    else:
+        discovery, confirmation = split_data(df)
+
+        medians = (
+            discovery[columns]
+            .replace([np.inf, -np.inf], np.nan)
+            .median()
+            .fillna(0)
+        )
+
+        def clean_inputs(data):
+            return (
+                data[columns]
+                .replace([np.inf, -np.inf], np.nan)
+                .fillna(medians)
+            )
+
+        tree = DecisionTreeRegressor(
+            max_depth=2,
+            min_samples_leaf=MIN_N,
+            random_state=SEED,
+        )
+
+        tree.fit(
+            clean_inputs(discovery),
+            (discovery["_y"] - discovery["_p"]) ** 2,
+        )
+
+        rules = export_text(tree, feature_names=columns)
+        print(rules)
+
+        (OUTPUT / "05_weakness_rules.txt").write_text(rules)
+
+        confirmation = confirmation.copy()
+        confirmation["region"] = tree.apply(
+            clean_inputs(confirmation)
+        )
+
+        result = segment_performance(
+            confirmation, ["region"]
+        )
+
+        show_table(result, "05_confirmed_regions")
+
+        if not result.empty:
+            result.set_index("value")[[
+                "mean_pd", "bad_rate"
+            ]].plot.bar(figsize=(9, 4))
+
+            plt.ylabel("Rate")
+            plt.title("Weakness regions: confirmation subset")
+            show_plot("05_confirmed_regions")
+
+==========================================================================
+# 6. Temporal gaps, score drift and monitoring
+==========================================================================
+comparison = pd.DataFrame({
+    name: performance(df)
+    for name, df in evaluation.items()
+}).T
+
+show_table(comparison, "06_cohort_comparison")
+
+if not comparison.empty:
+    comparison[["auc", "brier"]].plot.bar(
+        subplots=True,
+        figsize=(10, 7),
+        legend=False,
+    )
+    plt.suptitle("Cohort gaps: temporal shift and possible optimism")
+    show_plot("06_cohort_gaps")
+
+
+def psi_table(reference, current):
+    interior = np.unique(np.quantile(
+        reference, np.linspace(0, 1, 11)[1:-1]
+    ))
+
+    if reference.min() == reference.max():
+        value = float(reference.iloc[0])
+        interior = np.array([
+            np.nextafter(value, -np.inf),
+            np.nextafter(value, np.inf),
+        ])
+
+    edges = np.r_[-np.inf, interior, np.inf]
+    a = np.histogram(reference, edges)[0]
+    b = np.histogram(current, edges)[0]
+
+    # Explicit pseudocount smoothing and normalization.
+    aa = (a + 0.5) / (a.sum() + 0.5 * len(a))
+    bb = (b + 0.5) / (b.sum() + 0.5 * len(b))
+
+    return pd.DataFrame({
+        "left": edges[:-1],
+        "right": edges[1:],
+        "reference_fraction": a / a.sum(),
+        "current_fraction": b / b.sum(),
+        "psi_contribution": (bb - aa) * np.log(bb / aa),
+    })
+
+
+reference = frames["test"]["_p"]
+rows = []
+
+for name, df in frames.items():
+    detail = psi_table(reference, df["_p"])
+    show_table(detail, f"06_{name}_psi_bins")
+
+    rows.append({
+        "dataset": name,
+        "score_psi_vs_test": detail["psi_contribution"].sum(),
+    })
+
+show_table(pd.DataFrame(rows), "06_score_psi")
+
+fig, ax = plt.subplots(figsize=(8, 4))
+
+for name, df in frames.items():
+    scores = np.sort(df["_p"])
+    ax.step(
+        scores,
+        np.arange(1, len(scores) + 1) / len(scores),
+        where="post",
+        label=name,
+    )
+
+ax.set(
+    xlabel="P(bad event)",
+    ylabel="Cumulative fraction",
+    title="Score empirical cumulative distributions",
+)
+ax.legend()
+show_plot("06_score_ecdf")
+
+
+for name, df in frames.items():
+    column, date_format = DATE_COLUMNS[name]
+
+    if column not in df:
+        print(f"{name}: missing date column {column}")
+        continue
+
+    base = evaluation.get(name, df).copy()
+
+    dates = pd.to_datetime(
+        base[column].astype("string").str.replace(
+            r"\.0$", "", regex=True
+        ),
+        format=date_format,
+        errors="coerce",
+    )
+
+    print(
+        name,
+        "unparsed/missing dates:",
+        int(dates.isna().sum()),
+    )
+
+    frequency = "Y" if date_format == "%Y" else "M"
+
+    base["period"] = dates.dt.to_period(
+        frequency
+    ).astype("string")
+
+    specification = {
+        "n": ("_p", "size"),
+        "mean_pd": ("_p", "mean"),
+    }
+
+    if name in evaluation:
+        specification["bad_rate"] = ("_y", "mean")
+
+    trend = (
+        base.dropna(subset=["period"])
+        .groupby("period")
+        .agg(**specification)
+    )
+
+    show_table(trend, f"06_{name}_temporal_rates")
+
+    if not trend.empty:
+        rate_columns = [
+            c for c in ["mean_pd", "bad_rate"]
+            if c in trend
+        ]
+
+        fig, axes = plt.subplots(
+            2, 1, figsize=(10, 7), sharex=True
+        )
+
+        trend[rate_columns].plot(
+            marker="o", ax=axes[0]
+        )
+        trend["n"].plot.bar(ax=axes[1])
+
+        axes[0].set_ylabel("Rate")
+        axes[0].set_title(f"{name}: temporal monitoring")
+        axes[1].set_ylabel("Eligible applications")
+
+        show_plot(f"06_{name}_temporal_monitoring")
+
+============================================================================================
+# 7. Reliability — conformal prediction sets
+============================================================================================
+if "test" not in evaluation:
+    print("Mature test outcomes required.")
+
+else:
+    fitting, assessment = split_data(
+        evaluation["test"],
+        stratify=False,
+    )
+
+    ALPHA = 0.10
+
+    nonconformity = np.where(
+        fitting["_y"] == 1,
+        1 - fitting["_p"],
+        fitting["_p"],
+    )
+
+    rank = int(np.ceil(
+        (len(nonconformity) + 1) * (1 - ALPHA)
+    ))
+
+    cutoff = (
+        np.sort(nonconformity)[rank - 1]
+        if rank <= len(nonconformity)
+        else np.inf
+    )
+
+    populations = {"heldout_test": assessment}
+
+    if "val" in evaluation:
+        populations["val"] = evaluation["val"]
+
+    rows = []
+
+    for name, df in populations.items():
+        include_good = df["_p"].to_numpy() <= cutoff
+        include_bad = 1 - df["_p"].to_numpy() <= cutoff
+
+        covered = np.where(
+            df["_y"] == 1,
+            include_bad,
+            include_good,
+        )
+
+        rows.append({
+            "dataset": name,
+            "n": len(df),
+            "nominal_coverage": 1 - ALPHA,
+            "empirical_coverage": covered.mean(),
+            "both_labels_fraction": (
+                include_good & include_bad
+            ).mean(),
+            "empty_set_fraction": (
+                ~include_good & ~include_bad
+            ).mean(),
+        })
+
+    result = pd.DataFrame(rows).set_index("dataset")
+    show_table(result, "07_reliability")
+
+    result[[
+        "empirical_coverage",
+        "both_labels_fraction",
+        "empty_set_fraction",
+    ]].plot.bar(figsize=(10, 4))
+
+    plt.axhline(
+        1 - ALPHA,
+        color="black",
+        linestyle="--",
+        label="Nominal coverage",
+    )
+    plt.ylim(0, 1)
+    plt.ylabel("Fraction")
+    plt.legend()
+    show_plot("07_reliability")
+
+==========================================================================================
+# 8. Resilience — segments and hypothetical stresses
+==========================================================================================
+for name, df in evaluation.items():
+    result = segment_performance(df, SEGMENT_COLUMNS)
+    show_table(result, f"08_{name}_segments")
+
+    if result.empty:
+        continue
+
+    result["label"] = (
+        result["feature"] + " = " + result["value"]
+    )
+
+    shown = (
+        result.loc[result["sufficient_sample"]]
+        .sort_values("brier", ascending=False)
+        .head(20)
+    )
+
+    if not shown.empty:
+        shown.set_index("label")[[
+            "mean_pd", "bad_rate"
+        ]].iloc[::-1].plot.barh(
+            figsize=(10, max(4, len(shown) * 0.3))
+        )
+
+        plt.xlabel("Rate")
+        plt.title(
+            f"{name}: exploratory segment ranking by Brier"
+        )
+        show_plot(f"08_{name}_segments")
+
+
+if model is None:
+    print("Stress rescoring requires MODEL_PATH and FEATURES.")
+
+else:
+    X = frames["test"][FEATURES].copy()
+    baseline = model_probability(X)
+    rows = []
+
+    for name, rules in STRESS_SCENARIOS.items():
+        changed = X.copy()
+
+        for feature, rule in rules.items():
+            changed[feature] = (
+                changed[feature] + rule.get("add", 0)
+            ).clip(
+                lower=rule.get("min"),
+                upper=rule.get("max"),
+            )
+
+        stressed = model_probability(changed)
+
+        rows.append({
+            "scenario": name,
+            "baseline_mean_pd": baseline.mean(),
+            "stressed_mean_pd": stressed.mean(),
+            "mean_pd_change": (
+                stressed - baseline
+            ).mean(),
+            "threshold_flip_rate": (
+                (stressed >= THRESHOLD)
+                != (baseline >= THRESHOLD)
+            ).mean(),
+        })
+
+    result = pd.DataFrame(rows)
+    show_table(result, "08_hypothetical_stress")
+
+    if not result.empty:
+        result.set_index("scenario")[[
+            "baseline_mean_pd",
+            "stressed_mean_pd",
+        ]].plot.bar(figsize=(9, 4))
+
+        plt.ylabel("Mean P(bad event)")
+        plt.title("Hypothetical scenario sensitivity")
+        show_plot("08_stress_sensitivity")
+
+===================================================================================
+# 9. Robustness — plausible input perturbations
+===================================================================================
+if model is None:
+    print("Requires MODEL_PATH and FEATURES.")
+
+else:
+    X = frames["test"][FEATURES].copy()
+    baseline = model_probability(X)
+    rng = np.random.default_rng(SEED)
+    rows = []
+
+    for feature, rule in ROBUSTNESS_RULES.items():
+        if not pd.api.types.is_numeric_dtype(X[feature]):
+            raise ValueError(
+                f"{feature}: numeric noise is inappropriate"
+            )
+
+        for repeat in range(10):
+            changed = X.copy()
+
+            changed[feature] = (
+                changed[feature]
+                + rng.normal(
+                    0, rule["sd"], len(changed)
+                )
+            ).clip(
+                lower=rule.get("min"),
+                upper=rule.get("max"),
+            )
+
+            if rule.get("integer"):
+                changed[feature] = changed[feature].round()
+
+            perturbed = model_probability(changed)
+            delta = abs(perturbed - baseline)
+
+            rows.append({
+                "feature": feature,
+                "repeat": repeat,
+                "mean_absolute_change": delta.mean(),
+                "p95_absolute_change": np.quantile(delta, 0.95),
+                "maximum_absolute_change": delta.max(),
+                "threshold_flip_rate": (
+                    (perturbed >= THRESHOLD)
+                    != (baseline >= THRESHOLD)
+                ).mean(),
+            })
+
+    result = pd.DataFrame(rows)
+    show_table(result, "09_input_robustness")
+
+    if not result.empty:
+        result.groupby("feature")[[
+            "mean_absolute_change",
+            "p95_absolute_change",
+            "threshold_flip_rate",
+        ]].mean().plot.bar(figsize=(10, 4))
+
+        plt.title("Mean sensitivity across perturbation repetitions")
+        show_plot("09_input_robustness")
+
+===========================================================================================
+# 10. Fairness — authorized group diagnostics
+==========================================================================================
+rows = []
+
+for name, df in evaluation.items():
+    for column in PROTECTED_COLUMNS:
+        if column not in df:
+            raise ValueError(f"Missing authorized attribute: {column}")
+
+        for value, group in df.groupby(
+            column, dropna=False
+        ):
+            approved = group["_p"] < THRESHOLD
+
+            row = performance(group)
+
+            lower, upper = wilson_interval(
+                int(approved.sum()), len(group)
+            )
+
+            row.update({
+                "dataset": name,
+                "attribute": column,
+                "group": str(value),
+                "approval_proxy_rate": approved.mean(),
+                "approval_lower": lower,
+                "approval_upper": upper,
+                "good_outcome_approval_proxy": (
+                    approved[group["_y"] == 0].mean()
+                ),
+                "bad_outcome_approval_proxy": (
+                    approved[group["_y"] == 1].mean()
+                ),
+                "sufficient_sample": (
+                    len(group) >= MIN_N
+                    and group["_y"].sum() >= MIN_EVENTS
+                    and (1 - group["_y"]).sum() >= MIN_EVENTS
+                ),
+            })
+
+            rows.append(row)
+
+result = pd.DataFrame(rows)
+show_table(result, "10_group_diagnostics")
+
+if result.empty:
+    print("No authorized PROTECTED_COLUMNS configured.")
+
+else:
+    for (dataset, attribute), group in result.groupby(
+        ["dataset", "attribute"]
+    ):
+        group = group.copy()
+        reference = REFERENCE_GROUPS.get(attribute)
+
+        if reference is not None:
+            reference_row = group.loc[
+                group["group"] == str(reference)
+            ]
+
+            if reference_row.empty:
+                raise ValueError(
+                    f"{attribute}: reference group not found"
+                )
+
+            reference_rate = reference_row[
+                "approval_proxy_rate"
+            ].iloc[0]
+
+            group["approval_gap_vs_reference"] = (
+                group["approval_proxy_rate"] - reference_rate
+            )
+
+            group["approval_ratio_vs_reference"] = (
+                group["approval_proxy_rate"] / reference_rate
+                if reference_rate else np.nan
+            )
+
+        show_table(group, f"10_{dataset}_{attribute}")
+
+        fig, ax = plt.subplots(figsize=(9, 5))
+
+        positions = np.arange(len(group))
+
+        ax.plot(
+            group["approval_proxy_rate"],
+            positions,
+            "o",
+        )
+
+        ax.hlines(
+            positions,
+            group["approval_lower"],
+            group["approval_upper"],
+        )
+
+        ax.set(
+            yticks=positions,
+            yticklabels=group["group"],
+            xlabel="Approval-proxy rate",
+            title=f"{dataset}: {attribute}",
+        )
+
+        show_plot(f"10_{dataset}_{attribute}")
+
+=========================================================================================================
+# 11. Direct fitted-model importance and partial dependence
+=========================================================================================================
+from sklearn.inspection import (
+    permutation_importance,
+    PartialDependenceDisplay,
+)
+
+if model is None or "test" not in evaluation:
+    print("Requires fitted model and mature test outcomes.")
+
+else:
+    data = evaluation["test"].sample(
+        min(1500, len(evaluation["test"])),
+        random_state=SEED,
+    )
+
+    X = data[FEATURES]
+
+    if data["_y"].nunique() != 2:
+        raise ValueError("Importance sample requires both classes")
+
+    def auc_scorer(estimator, X, y):
+        return roc_auc_score(
+            y, model_probability(X, estimator)
+        )
+
+    importance = permutation_importance(
+        model,
+        X,
+        data["_y"],
+        scoring=auc_scorer,
+        n_repeats=5,
+        random_state=SEED,
+    )
+
+    result = pd.DataFrame({
+        "feature": FEATURES,
+        "auc_drop": importance.importances_mean,
+        "repeat_sd": importance.importances_std,
+    }).sort_values("auc_drop")
+
+    show_table(result, "11_direct_model_importance")
+
+    result.tail(20).plot.barh(
+        x="feature",
+        y="auc_drop",
+        xerr="repeat_sd",
+        figsize=(9, 6),
+        legend=False,
+    )
+
+    plt.xlabel("AUC decrease after permutation")
+    plt.title("Actual fitted model; bars = permutation repeat SD")
+    show_plot("11_direct_model_importance")
+
+    numeric = [
+        c for c in FEATURES
+        if (
+            pd.api.types.is_numeric_dtype(X[c])
+            and X[c].nunique() > 5
+        )
+    ]
+
+    if numeric:
+        PartialDependenceDisplay.from_estimator(
+            model,
+            X,
+            numeric[:3],
+            method="brute",
+            response_method="predict_proba",
+        )
+
+        show_plot("11_direct_model_PDP")
+
+============================================================================================
+# 12. SHAP for the fitted XGBoost pipeline
+============================================================================================
+if not RUN_SHAP:
+    print("SHAP disabled.")
+
+elif model is None:
+    raise ValueError("Fitted model required")
+
+else:
+    import shap
+
+    raw = frames["test"][FEATURES].sample(
+        min(500, len(frames["test"])),
+        random_state=SEED,
+    )
+
+    if hasattr(model, "steps"):
+        estimator = model.steps[-1][1]
+
+        if len(model.steps) > 1:
+            preprocessing = model[:-1]
+            transformed = preprocessing.transform(raw)
+
+            try:
+                names = list(
+                    preprocessing.get_feature_names_out()
+                )
+            except (AttributeError, ValueError):
+                names = None
+        else:
+            transformed = raw.to_numpy()
+            names = list(raw.columns)
+    else:
+        estimator = model
+        transformed = raw.to_numpy()
+        names = list(raw.columns)
+
+    if not hasattr(estimator, "get_booster"):
+        raise ValueError(
+            "This SHAP adapter requires an XGBoost estimator."
+        )
+
+    if np.prod(transformed.shape) > 5_000_000:
+        raise ValueError(
+            "SHAP matrix too large; reduce sample size."
+        )
+
+    if hasattr(transformed, "toarray"):
+        transformed = transformed.toarray()
+
+    transformed = np.asarray(transformed)
+
+    if names is None:
+        names = [
+            f"transformed_feature_{i}"
+            for i in range(transformed.shape[1])
+        ]
+        print(
+            "Feature names unavailable. Map transformed "
+            "columns before interpreting results."
+        )
+
+    explainer = shap.TreeExplainer(
+        estimator,
+        model_output="raw",
+        feature_perturbation="tree_path_dependent",
+    )
+
+    values = np.asarray(explainer.shap_values(
+        transformed,
+        check_additivity=True,
+    ))
+
+    if values.ndim != 2:
+        raise ValueError(
+            "Unexpected SHAP output shape for binary XGBoost."
+        )
+
+    margin = estimator.predict(
+        transformed,
+        output_margin=True,
+    )
+
+    expected_value = float(
+        np.asarray(explainer.expected_value).squeeze()
+    )
+
+    reconstructed = expected_value + values.sum(axis=1)
+
+    if not np.allclose(
+        reconstructed,
+        margin,
+        rtol=1e-4,
+        atol=1e-4,
+    ):
+        raise ValueError("SHAP margin reconstruction failed")
+
+    result = pd.DataFrame({
+        "transformed_feature": names,
+        "mean_absolute_shap_margin": abs(values).mean(axis=0),
+    }).sort_values(
+        "mean_absolute_shap_margin",
+        ascending=False,
+    )
+
+    show_table(result, "12_shap_importance")
+
+    shap.summary_plot(
+        values,
+        transformed,
+        feature_names=names,
+        max_display=20,
+        show=False,
+    )
+    show_plot("12_shap_beeswarm")
+
+    shap.summary_plot(
+        values,
+        transformed,
+        feature_names=names,
+        plot_type="bar",
+        max_display=20,
+        show=False,
+    )
+    show_plot("12_shap_bar")
+
+=================================================================================
+# 13. Hyperparameter tuning with nested CV
+=================================================================================
+from sklearn.base import clone
+from sklearn.model_selection import (
+    StratifiedKFold,
+    StratifiedGroupKFold,
+    GridSearchCV,
+)
+
+if not RUN_TUNING:
+    print("Tuning disabled.")
+
+elif model is None or not PARAM_GRID:
+    raise ValueError("Fitted pipeline and PARAM_GRID required")
+
+elif "train" not in evaluation:
+    raise ValueError("Mature training outcomes required")
+
+else:
+    data = evaluation["train"]
+    X = data[FEATURES]
+    y = data["_y"]
+
+    groups = (
+        data[GROUP_COLUMN]
+        if GROUP_COLUMN else None
+    )
+
+    def cv_splits(X, y, groups, folds, seed):
+        if groups is not None:
+            cv = StratifiedGroupKFold(
+                n_splits=folds,
+                shuffle=True,
+                random_state=seed,
+            )
+        else:
+            cv = StratifiedKFold(
+                n_splits=folds,
+                shuffle=True,
+                random_state=seed,
+            )
+
+        splits = list(cv.split(X, y, groups))
+
+        for fitting, assessment in splits:
+            if (
+                y.iloc[fitting].nunique() != 2
+                or y.iloc[assessment].nunique() != 2
+            ):
+                raise ValueError(
+                    "A fold lacks an outcome class. Revise CV design."
+                )
+
+        return splits
+
+    outer = cv_splits(X, y, groups, 5, SEED)
+    rows = []
+
+    for fold, (fitting, assessment) in enumerate(outer):
+        inner_groups = (
+            groups.iloc[fitting]
+            if groups is not None else None
+        )
+
+        inner = cv_splits(
+            X.iloc[fitting],
+            y.iloc[fitting],
+            inner_groups,
+            3,
+            SEED + 1,
+        )
+
+        search = GridSearchCV(
+            clone(model),
+            PARAM_GRID,
+            cv=inner,
+            scoring="roc_auc",
+            n_jobs=1,
+            error_score="raise",
+        )
+
+        search.fit(
+            X.iloc[fitting],
+            y.iloc[fitting],
+        )
+
+        assessed = data.iloc[assessment].copy()
+
+        assessed["_p"] = model_probability(
+            X.iloc[assessment],
+            search.best_estimator_,
+        )
+
+        rows.append({
+            "outer_fold": fold,
+            **performance(assessed),
+        })
+
+    nested = pd.DataFrame(rows)
+    show_table(nested, "13_nested_tuning")
+
+    nested.set_index("outer_fold")[[
+        "auc", "brier"
+    ]].plot.bar(
+        subplots=True,
+        figsize=(9, 7),
+        legend=False,
+    )
+    show_plot("13_nested_tuning")
+
+    final_search = GridSearchCV(
+        clone(model),
+        PARAM_GRID,
+        cv=cv_splits(X, y, groups, 3, SEED + 1),
+        scoring="roc_auc",
+        n_jobs=1,
+        error_score="raise",
+    ).fit(X, y)
+
+    show_table(
+        pd.DataFrame(final_search.cv_results_),
+        "13_final_inner_selection",
+    )
+
+    (OUTPUT / "13_best_parameters.json").write_text(
+        json.dumps(
+            final_search.best_params_,
+            indent=2,
+            default=str,
+        )
+    )
+
+    if "test" in evaluation:
+        challenger = evaluation["test"].copy()
+
+        challenger["_p"] = model_probability(
+            challenger[FEATURES],
+            final_search.best_estimator_,
+        )
+
+        show_table(
+            pd.DataFrame({
+                "existing": performance(evaluation["test"]),
+                "challenger": performance(challenger),
+            }),
+            "13_challenger_test_comparison",
+        )
+
+===================================================================================
+# 14. Artifact replay — reproduce stored final-model scores
+===================================================================================
+if model is None:
+    print("Requires fitted model artifact.")
+
+else:
+    stored = frames["test"]["_p"].to_numpy()
+
+    replayed = model_probability(
+        frames["test"][FEATURES]
+    )
+
+    difference = replayed - stored
+
+    show_table(
+        pd.DataFrame([{
+            "n": len(difference),
+            "mean_absolute_difference": abs(difference).mean(),
+            "maximum_absolute_difference": abs(difference).max(),
+            "fraction_within_1e_8": (
+                abs(difference) <= 1e-8
+            ).mean(),
+        }]),
+        "14_artifact_replay",
+    )
+
+    indices = np.random.default_rng(SEED).choice(
+        len(stored),
+        size=min(10000, len(stored)),
+        replace=False,
+    )
+
+    fig, axes = plt.subplots(1, 2, figsize=(12, 4))
+
+    axes[0].scatter(
+        stored[indices],
+        replayed[indices],
+        s=4,
+        alpha=0.15,
+    )
+    axes[0].plot([0, 1], [0, 1], "--", color="gray")
+    axes[0].set(
+        xlabel="Stored probability",
+        ylabel="Replayed probability",
+        title="Final-model score replay",
+    )
+
+    axes[1].hist(difference, bins=40)
+    axes[1].set(
+        xlabel="Replayed − stored",
+        ylabel="Count",
+        title="Replay differences",
+    )
+
+    show_plot("14_artifact_replay")
+
+=======================================================================
+# 15. Optional incumbent comparison with paired bootstrap
+=======================================================================
+for name, score_column in INCUMBENT_SCORE_COLUMNS.items():
+    if name not in evaluation:
+        print(f"{name}: mature outcomes unavailable")
+        continue
+
+    df = evaluation[name].copy()
+
+    incumbent_p = pd.to_numeric(
+        df[score_column], errors="coerce"
+    )
+
+    if (
+        not np.isfinite(incumbent_p).all()
+        or not incumbent_p.between(0, 1).all()
+    ):
+        raise ValueError(f"{name}: invalid incumbent probabilities")
+
+    incumbent = df.copy()
+    incumbent["_p"] = incumbent_p
+
+    current_metrics = performance(df)
+    incumbent_metrics = performance(incumbent)
+
+    selected_metrics = [
+        "auc", "average_precision", "brier", "log_loss"
+    ]
+
+    rng = np.random.default_rng(SEED)
+    units = resampling_units(df)
+    draws = []
+
+    for _ in range(BOOTSTRAPS):
+        indices = sample_indices(df, rng, units)
+
+        current = performance(df.iloc[indices])
+        previous = performance(incumbent.iloc[indices])
+
+        draws.append({
+            metric: current[metric] - previous[metric]
+            for metric in selected_metrics
+        })
+
+    draws = pd.DataFrame(draws)
+
+    result = pd.DataFrame({
+        "current": {
+            metric: current_metrics[metric]
+            for metric in selected_metrics
+        },
+        "incumbent": {
+            metric: incumbent_metrics[metric]
+            for metric in selected_metrics
+        },
+        "difference": {
+            metric: (
+                current_metrics[metric] - incumbent_metrics[metric]
+            )
+            for metric in selected_metrics
+        },
+        "difference_lower": draws.quantile(0.025),
+        "difference_upper": draws.quantile(0.975),
+        "valid_bootstraps": draws.notna().sum(),
+    })
+
+    show_table(result, f"15_{name}_paired_comparison")
+
+    fig, ax = plt.subplots(figsize=(8, 4))
+    positions = np.arange(len(result))
+
+    ax.plot(result["difference"], positions, "o")
+    ax.hlines(
+        positions,
+        result["difference_lower"],
+        result["difference_upper"],
+    )
+    ax.axvline(0, color="gray", linestyle="--")
+
+    ax.set(
+        yticks=positions,
+        yticklabels=result.index,
+        xlabel="Current − incumbent",
+        title=f"{name}: paired metric differences",
+    )
+
+    show_plot(f"15_{name}_paired_comparison")
+
+============================================================================
+# 16. Approved validation criteria
+============================================================================
+# Format:
+# (dataset, metric, operator, approved_limit)
+ACCEPTANCE_RULES = [
+    # ("test", "auc", ">=", YOUR_APPROVED_LIMIT),
+]
+
+summary = pd.DataFrame({
+    name: performance(df)
+    for name, df in evaluation.items()
+}).T
+
+rows = []
+
+for dataset, metric, operator, limit in ACCEPTANCE_RULES:
+    value = (
+        summary.loc[dataset, metric]
+        if dataset in summary.index
+        else np.nan
+    )
+
+    if operator == ">=":
+        passed = value >= limit
+    elif operator == "<=":
+        passed = value <= limit
+    else:
+        raise ValueError("Use >= or <=")
+
+    rows.append({
+        "dataset": dataset,
+        "metric": metric,
+        "value": value,
+        "approved_limit": limit,
+        "status": (
+            "NOT EVALUABLE"
+            if not np.isfinite(value)
+            else "PASS"
+            if passed
+            else "REVIEW"
+        ),
+    })
+
+if rows:
+    show_table(
+        pd.DataFrame(rows),
+        "16_approved_validation_criteria",
+    )
+else:
+    print(
+        "No approved criteria configured. "
+        "Diagnostic results do not establish model approval."
+    )
+
+============================================================================
+# 17. MLflow tracking — run last
+============================================================================
+if not RUN_MLFLOW:
+    print("MLflow disabled.")
+
+else:
+    import mlflow
+
+    # Configure tracking URI and authentication externally.
+    # Example:
+    # mlflow.set_tracking_uri("https://approved-mlflow-server")
+
+    configuration = {
+        "target_definition": "1 = bad event",
+        "target_column": TARGET,
+        "score_columns": SCORE_COLUMNS,
+        "maturity": MATURE,
+        "population_filters": POPULATION_FILTERS,
+        "threshold": THRESHOLD,
+        "seed": SEED,
+        "bootstrap_repetitions": BOOTSTRAPS,
+        "group_column": GROUP_COLUMN,
+        "features": FEATURES,
+        "segments": SEGMENT_COLUMNS,
+        "date_columns": DATE_COLUMNS,
+        "robustness_rules": ROBUSTNESS_RULES,
+        "stress_scenarios": STRESS_SCENARIOS,
+        "parameter_grid": PARAM_GRID,
+        "protected_columns": PROTECTED_COLUMNS,
+        "reference_groups": REFERENCE_GROUPS,
+        "incumbent_score_columns": INCUMBENT_SCORE_COLUMNS,
+    }
+
+    lineage = {
+        "configuration": configuration,
+        "data": {
+            name: {
+                "filename": Path(path).name,
+                "sha256": hashlib.sha256(
+                    Path(path).read_bytes()
+                ).hexdigest(),
+                "eligible_rows": len(frames[name]),
+            }
+            for name, path in FILES.items()
+        },
+        "model_sha256": (
+            hashlib.sha256(
+                Path(MODEL_PATH).read_bytes()
+            ).hexdigest()
+            if MODEL_PATH else None
+        ),
+        "package_versions": {},
+    }
+
+    for package in [
+        "numpy",
+        "pandas",
+        "scikit-learn",
+        "matplotlib",
+        "mlflow",
+        "xgboost",
+        "shap",
+    ]:
+        try:
+            lineage["package_versions"][package] = (
+                importlib.metadata.version(package)
+            )
+        except importlib.metadata.PackageNotFoundError:
+            lineage["package_versions"][package] = "not installed"
+
+    lineage_path = OUTPUT / "17_validation_lineage.json"
+
+    lineage_path.write_text(
+        json.dumps(lineage, indent=2, default=str)
+    )
+
+    mlflow.set_experiment(MLFLOW_EXPERIMENT)
+
+    with mlflow.start_run(
+        run_name="complete-independent-validation"
+    ):
+        mlflow.log_params({
+            "seed": SEED,
+            "threshold": THRESHOLD,
+            "bootstrap_repetitions": BOOTSTRAPS,
+            "group_column": GROUP_COLUMN or "independent_rows",
+            "recent_outcomes_mature": MATURE["val"],
+            "positive_class": "bad_event",
+        })
+
+        for name, df in evaluation.items():
+            mlflow.log_metrics({
+                f"{name}_{key}": float(value)
+                for key, value in performance(df).items()
+                if np.isfinite(value)
+            })
+
+        # Generated summaries/charts, not raw borrower CSVs.
+        mlflow.log_artifacts(
+            str(OUTPUT),
+            artifact_path="validation_evidence",
+        )
+

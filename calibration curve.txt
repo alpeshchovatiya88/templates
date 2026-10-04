@@ -1,0 +1,645 @@
+===============================================================
+calibration curves and probability histograms
+==============================================================
+from sklearn.calibration import CalibrationDisplay
+from matplotlib.gridspec import GridSpec
+
+N_BINS = 10
+
+LABELS = {
+    "train": "Train: 2009–2015",
+    "test": "Test: 2021–2023",
+    "val": "Recent: 202510–202605",
+}
+
+COLORS = {
+    "train": "tab:blue",
+    "test": "tab:orange",
+    "val": "tab:green",
+}
+
+# "uniform": same probability boundaries across cohorts.
+# "quantile": approximately equal-sized groups within each cohort.
+STRATEGY = "uniform"
+
+fig = plt.figure(figsize=(14, 10))
+grid = GridSpec(3, 3, figure=fig)
+
+# Large calibration chart at the top.
+ax_calibration = fig.add_subplot(grid[:2, :])
+
+ax_calibration.plot(
+    [0, 1],
+    [0, 1],
+    "--",
+    color="black",
+    label="Perfect calibration",
+)
+
+for name, df in evaluation.items():
+    result = CalibrationDisplay.from_predictions(
+        y_true=df["_y"].to_numpy(),
+        y_prob=df["_p"].to_numpy(),
+        pos_label=1,
+        n_bins=N_BINS,
+        strategy=STRATEGY,
+        name=LABELS[name],
+        color=COLORS[name],
+        marker="o",
+        ax=ax_calibration,
+        ref_line=False,
+    )
+
+    # Save the exact points used by scikit-learn.
+    curve_points = pd.DataFrame({
+        "mean_predicted_probability": result.prob_pred,
+        "observed_bad_event_rate": result.prob_true,
+    })
+
+    curve_points["observed_minus_predicted"] = (
+        curve_points["observed_bad_event_rate"]
+        - curve_points["mean_predicted_probability"]
+    )
+
+    show_table(
+        curve_points,
+        f"04_{name}_{STRATEGY}_curve_points",
+    )
+
+ax_calibration.set(
+    xlabel="Mean predicted probability of a bad event",
+    ylabel="Observed bad-event rate",
+    title=f"Probability calibration curves — {STRATEGY} bins",
+    xlim=(0, 1),
+    ylim=(0, 1),
+)
+
+ax_calibration.legend(loc="best")
+ax_calibration.grid(alpha=0.25)
+
+# Histograms remain available even when outcomes are immature.
+for position, (name, df) in enumerate(frames.items()):
+    ax = fig.add_subplot(grid[2, position])
+
+    ax.hist(
+        df["_p"],
+        bins=np.linspace(0, 1, N_BINS + 1),
+        color=COLORS[name],
+        alpha=0.75,
+        edgecolor="white",
+    )
+
+    maturity_note = (
+        "Calibration evaluated"
+        if name in evaluation
+        else "Outcomes not confirmed mature"
+    )
+
+    ax.set(
+        xlabel="Predicted probability of a bad event",
+        ylabel="Applications",
+        title=f"{LABELS[name]}\n{maturity_note}",
+        xlim=(0, 1),
+    )
+
+show_plot(f"04_probability_calibration_{STRATEGY}")
+
+=============================================================================
+bin counts, uncertainty and calibration-gap chart
+=============================================================================
+fig, axes = plt.subplots(
+    1, 2,
+    figsize=(14, 5),
+)
+
+summary_rows = []
+
+for name, df in evaluation.items():
+    bins = calibration_table(df)
+
+    bins["small_bin"] = bins["n"] < MIN_N
+
+    show_table(
+        bins,
+        f"04_{name}_calibration_bin_details",
+    )
+
+    # Mean PD versus observed rate, with Wilson intervals.
+    axes[0].plot(
+        bins["mean_pd"],
+        bins["observed_rate"],
+        "o-",
+        color=COLORS[name],
+        label=LABELS[name],
+    )
+
+    axes[0].vlines(
+        bins["mean_pd"],
+        bins["lower"],
+        bins["upper"],
+        color=COLORS[name],
+        alpha=0.6,
+    )
+
+    # Positive gap = observed events exceed predicted events.
+    axes[1].plot(
+        bins["mean_pd"],
+        bins["gap"],
+        "o-",
+        color=COLORS[name],
+        label=LABELS[name],
+    )
+
+    observed = int(df["_y"].sum())
+    expected = float(df["_p"].sum())
+
+    summary_rows.append({
+        "dataset": name,
+        "n": len(df),
+        "observed_bad_events": observed,
+        "expected_bad_events": expected,
+        "observed_bad_rate": df["_y"].mean(),
+        "mean_predicted_probability": df["_p"].mean(),
+        "observed_expected_ratio": divide(observed, expected),
+        "ece_fixed_10_bins": np.average(
+            abs(bins["gap"]),
+            weights=bins["n"],
+        ),
+        "nonempty_bins": len(bins),
+        "small_bins": int(bins["small_bin"].sum()),
+    })
+
+axes[0].plot(
+    [0, 1], [0, 1],
+    "--",
+    color="black",
+    label="Perfect calibration",
+)
+
+axes[0].set(
+    xlabel="Mean predicted probability",
+    ylabel="Observed bad-event rate",
+    title="Calibration with Wilson 95% intervals",
+)
+
+axes[1].axhline(
+    0,
+    linestyle="--",
+    color="black",
+)
+
+axes[1].set(
+    xlabel="Mean predicted probability",
+    ylabel="Observed rate − predicted probability",
+    title="Calibration gap",
+)
+
+for ax in axes:
+    ax.legend()
+
+show_plot("04_calibration_uncertainty_and_gap")
+
+show_table(
+    pd.DataFrame(summary_rows),
+    "04_calibration_summary",
+)
+
+==========================================================
+check sensitivity to binning
+==========================================================
+fig, axes = plt.subplots(
+    1, 2,
+    figsize=(14, 6),
+    sharex=True,
+    sharey=True,
+)
+
+for ax, strategy in zip(
+    axes, ["uniform", "quantile"]
+):
+    ax.plot(
+        [0, 1], [0, 1],
+        "--",
+        color="black",
+        label="Perfect calibration",
+    )
+
+    for name, df in evaluation.items():
+        CalibrationDisplay.from_predictions(
+            y_true=df["_y"],
+            y_prob=df["_p"],
+            pos_label=1,
+            n_bins=N_BINS,
+            strategy=strategy,
+            name=LABELS[name],
+            color=COLORS[name],
+            marker="o",
+            ax=ax,
+            ref_line=False,
+        )
+
+    ax.set(
+        xlabel="Mean predicted probability",
+        ylabel="Observed bad-event rate",
+        title=f"{strategy.capitalize()} binning",
+        xlim=(0, 1),
+        ylim=(0, 1),
+    )
+
+    ax.legend()
+
+show_plot("04_calibration_binning_sensitivity")
+
+===================================================================
+COMPARE WITH CATBOOST
+===================================================================
+# X_cat_test must represent the same applications in the same order
+# as catboost_test_ids. Use the fitted challenger's required inputs.
+
+bad_class_position = list(catboost_model.classes_).index(1)
+
+catboost_predictions = pd.DataFrame({
+    "APPLICATION_NUMBER": catboost_test_ids,
+    "catboost_pred_proba": catboost_model.predict_proba(
+        X_cat_test
+    )[:, bad_class_position],
+})
+
+# Join by ID; do not assume two separately created CSVs have matching row order.
+df_test = pd.read_csv("df_scored_test.csv")
+
+if (
+    df_test["APPLICATION_NUMBER"].isna().any()
+    or catboost_predictions["APPLICATION_NUMBER"].isna().any()
+):
+    raise ValueError("Missing application IDs")
+
+if set(df_test["APPLICATION_NUMBER"]) != set(
+    catboost_predictions["APPLICATION_NUMBER"]
+):
+    raise ValueError("The two models do not cover the same applications")
+
+df_test = df_test.merge(
+    catboost_predictions,
+    on="APPLICATION_NUMBER",
+    how="left",
+    validate="one_to_one",
+)
+
+df_test.to_csv("df_scored_test_comparison.csv", index=False)
+
+==============================================================
+Cell 1 — load and validate the comparison population
+==============================================================
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+
+from sklearn.calibration import CalibrationDisplay
+from sklearn.metrics import (
+    roc_auc_score,
+    average_precision_score,
+    log_loss,
+    roc_curve,
+    precision_recall_curve,
+)
+
+FILE = "df_scored_test_comparison.csv"
+TARGET = "target"
+ID = "APPLICATION_NUMBER"
+
+SCORES = {
+    "XGBoost": "pred_proba",
+    "CatBoost": "catboost_pred_proba",
+}
+
+OUTCOMES_MATURE = True  # Confirm before running outcome-based comparisons.
+GROUP_COLUMN = None    # Optional borrower/group identifier.
+N_BINS = 10
+BOOTSTRAPS = 500
+SEED = 42
+
+OUTPUT = Path("xgb_catboost_comparison")
+OUTPUT.mkdir(exist_ok=True)
+
+COLORS = {
+    "XGBoost": "tab:blue",
+    "CatBoost": "tab:orange",
+}
+
+df = pd.read_csv(FILE)
+
+# Apply your approved population filter here, if required.
+# df = df.query('STATUS == "Funded"').copy()
+
+if not OUTCOMES_MATURE:
+    raise ValueError(
+        "Calibration and performance comparison require mature outcomes."
+    )
+
+if df.empty:
+    raise ValueError("Empty comparison population")
+
+if df[ID].isna().any() or df[ID].duplicated().any():
+    raise ValueError("Missing or duplicate application IDs")
+
+df[TARGET] = pd.to_numeric(df[TARGET], errors="coerce")
+
+if not df[TARGET].isin([0, 1]).all():
+    raise ValueError("Missing/nonbinary outcomes")
+
+df[TARGET] = df[TARGET].astype(int)
+
+if df[TARGET].nunique() != 2:
+    raise ValueError("Both outcome classes required for this comparison")
+
+for model_name, column in SCORES.items():
+    df[column] = pd.to_numeric(df[column], errors="coerce")
+
+    if (
+        not np.isfinite(df[column]).all()
+        or not df[column].between(0, 1).all()
+    ):
+        raise ValueError(f"{model_name}: invalid/missing probabilities")
+
+if GROUP_COLUMN:
+    if (
+        GROUP_COLUMN not in df
+        or df[GROUP_COLUMN].isna().any()
+    ):
+        raise ValueError("Missing borrower/group identifiers")
+
+print(
+    f"Applications: {len(df):,}\n"
+    f"Bad events: {df[TARGET].sum():,}\n"
+    f"Bad-event rate: {df[TARGET].mean():.2%}"
+)
+
+
+def save_plot(name):
+    plt.tight_layout()
+    plt.savefig(
+        OUTPUT / f"{name}.png",
+        dpi=160,
+        bbox_inches="tight",
+    )
+    plt.show()
+    plt.close()
+
+=========================================================================
+Cell 2 — probability calibration curves and histograms
+=========================================================================
+fig = plt.figure(figsize=(13, 10))
+grid = fig.add_gridspec(3, 2)
+
+# Compare both algorithms within the SAME population.
+for position, strategy in enumerate(["uniform", "quantile"]):
+    ax = fig.add_subplot(grid[:2, position])
+
+    ax.plot(
+        [0, 1], [0, 1],
+        "--",
+        color="black",
+        label="Perfect calibration",
+    )
+
+    for model_name, column in SCORES.items():
+        curve = CalibrationDisplay.from_predictions(
+            y_true=df[TARGET],
+            y_prob=df[column],
+            pos_label=1,
+            n_bins=N_BINS,
+            strategy=strategy,
+            name=model_name,
+            color=COLORS[model_name],
+            marker="o",
+            ref_line=False,
+            ax=ax,
+        )
+
+        points = pd.DataFrame({
+            "mean_predicted_probability": curve.prob_pred,
+            "observed_bad_event_rate": curve.prob_true,
+        })
+
+        points.to_csv(
+            OUTPUT / f"{model_name}_{strategy}_calibration.csv",
+            index=False,
+        )
+
+    ax.set(
+        xlabel="Mean predicted probability of a bad event",
+        ylabel="Observed bad-event rate",
+        title=f"Calibration: {strategy} bins",
+        xlim=(0, 1),
+        ylim=(0, 1),
+    )
+    ax.legend()
+    ax.grid(alpha=0.2)
+
+for position, (model_name, column) in enumerate(SCORES.items()):
+    ax = fig.add_subplot(grid[2, position])
+
+    ax.hist(
+        df[column],
+        bins=np.linspace(0, 1, 21),
+        color=COLORS[model_name],
+        edgecolor="white",
+        alpha=0.8,
+    )
+
+    ax.set(
+        xlabel="Predicted bad-event probability",
+        ylabel="Applications",
+        title=model_name,
+        xlim=(0, 1),
+    )
+
+save_plot("probability_calibration_comparison")
+
+==================================================================================
+Cell 3 — compare calibration, ranking and probability accuracy
+==================================================================================
+def model_metrics(y, p):
+    expected = p.sum()
+
+    return {
+        "AUC": roc_auc_score(y, p),
+        "Average_precision": average_precision_score(y, p),
+        "Brier": np.mean((y - p) ** 2),
+        "Log_loss": log_loss(y, p, labels=[0, 1]),
+        "Mean_PD": p.mean(),
+        "Observed_bad_rate": y.mean(),
+        "Observed_expected": (
+            y.sum() / expected if expected else np.nan
+        ),
+    }
+
+
+y = df[TARGET].to_numpy()
+
+comparison = pd.DataFrame({
+    model_name: model_metrics(
+        y, df[column].to_numpy()
+    )
+    for model_name, column in SCORES.items()
+}).T
+
+display(comparison)
+
+comparison.to_csv(
+    OUTPUT / "metric_comparison.csv",
+    index=True,
+)
+
+fig, axes = plt.subplots(1, 2, figsize=(13, 5))
+
+for model_name, column in SCORES.items():
+    p = df[column].to_numpy()
+
+    fpr, tpr, _ = roc_curve(y, p)
+
+    axes[0].plot(
+        fpr,
+        tpr,
+        color=COLORS[model_name],
+        label=(
+            f"{model_name}: "
+            f"AUC={comparison.loc[model_name, 'AUC']:.3f}"
+        ),
+    )
+
+    precision, recall, _ = precision_recall_curve(y, p)
+
+    axes[1].plot(
+        recall,
+        precision,
+        color=COLORS[model_name],
+        label=(
+            f"{model_name}: AP="
+            f"{comparison.loc[model_name, 'Average_precision']:.3f}"
+        ),
+    )
+
+axes[0].plot([0, 1], [0, 1], "--", color="gray")
+axes[1].axhline(y.mean(), linestyle="--", color="gray")
+
+axes[0].set(
+    xlabel="False positive rate",
+    ylabel="True positive rate",
+    title="ROC comparison",
+)
+
+axes[1].set(
+    xlabel="Recall",
+    ylabel="Precision",
+    title="Precision–recall comparison",
+)
+
+for ax in axes:
+    ax.legend()
+    ax.grid(alpha=0.2)
+
+save_plot("ranking_comparison")
+
+==============================================================================
+Cell 4 — paired bootstrap: are the differences distinguishable?
+==============================================================================
+rng = np.random.default_rng(SEED)
+
+METRICS = [
+    "AUC",
+    "Average_precision",
+    "Brier",
+    "Log_loss",
+]
+
+units = None
+
+if GROUP_COLUMN:
+    units = list(
+        df.groupby(GROUP_COLUMN, sort=False).indices.values()
+    )
+
+    if len(units) < 2:
+        raise ValueError("At least two independent groups required")
+
+draws = []
+
+for _ in range(BOOTSTRAPS):
+    if units is None:
+        indices = rng.integers(0, len(df), len(df))
+    else:
+        selected = rng.integers(0, len(units), len(units))
+        indices = np.concatenate([units[i] for i in selected])
+
+    sample = df.iloc[indices]
+    sample_y = sample[TARGET].to_numpy()
+
+    if np.unique(sample_y).size != 2:
+        continue
+
+    xgb = model_metrics(
+        sample_y,
+        sample[SCORES["XGBoost"]].to_numpy(),
+    )
+
+    cat = model_metrics(
+        sample_y,
+        sample[SCORES["CatBoost"]].to_numpy(),
+    )
+
+    draws.append({
+        metric: cat[metric] - xgb[metric]
+        for metric in METRICS
+    })
+
+if not draws:
+    raise ValueError("No valid bootstrap comparisons")
+
+draws = pd.DataFrame(draws)
+
+difference = pd.DataFrame({
+    "CatBoost_minus_XGBoost": (
+        comparison.loc["CatBoost", METRICS]
+        - comparison.loc["XGBoost", METRICS]
+    ),
+    "CI_lower": draws.quantile(0.025),
+    "CI_upper": draws.quantile(0.975),
+    "Valid_bootstraps": len(draws),
+})
+
+display(difference)
+
+difference.to_csv(
+    OUTPUT / "paired_metric_differences.csv",
+    index=True,
+)
+
+fig, ax = plt.subplots(figsize=(9, 5))
+positions = np.arange(len(difference))
+
+ax.plot(
+    difference["CatBoost_minus_XGBoost"],
+    positions,
+    "o",
+)
+
+ax.hlines(
+    positions,
+    difference["CI_lower"],
+    difference["CI_upper"],
+)
+
+ax.axvline(0, color="black", linestyle="--")
+
+ax.set(
+    yticks=positions,
+    yticklabels=difference.index,
+    xlabel="CatBoost − XGBoost",
+    title="Paired bootstrap 95% intervals",
+)
+
+save_plot("paired_metric_differences")
