@@ -1,192 +1,187 @@
-#Residuals
+# ------------------------------------------------------------
 
-for name, df in frames.items():
-    yt, ys, _ = finite(df)
-    resid = yt - ys
-    print(name, "mean residual", resid.mean(), "MAE", np.abs(resid).mean())
+# Derive illustrative sensitivity magnitudes from TRAIN only.
 
-df = val.copy()
-df["residual"] = y_true(df) - y_score(df)
-plt.scatter(df[SCORE_COL], df["residual"], s=4, alpha=0.15)
-plt.axhline(0, color="black")
-plt.xlabel("score")
-plt.ylabel("actual - score")
-plt.show()
-=============
-# Shallow tree on absolute error:
+# This block can run in the settings section, before frames load.
 
-from sklearn.tree import DecisionTreeRegressor, export_text
+# ------------------------------------------------------------
 
-df = val.copy()
-df["abs_residual"] = np.abs(y_true(df) - y_score(df))
-feats = feature_cols(df)[:40]
-X = df[feats].apply(pd.to_numeric, errors="coerce")
-mask = X.notna().all(axis=1)
-tree = DecisionTreeRegressor(max_depth=3, min_samples_leaf=200, random_state=0)
-tree.fit(X.loc[mask], df.loc[mask, "abs_residual"])
-print(export_text(tree, feature_names=feats, decimals=3))
-pd.Series(tree.feature_importances_, index=feats).sort_values(ascending=False).head(15)
+training_reference = pd.read_csv(
 
-===========
-# Reliability
+    FILES["train"],
 
-def psi(expected, actual, bins=10):
-    expected = expected[np.isfinite(expected)]
-    actual = actual[np.isfinite(actual)]
-    cuts = np.unique(np.quantile(expected, np.linspace(0, 1, bins + 1)))
-    cuts[0], cuts[-1] = -np.inf, np.inf
-    e = np.clip(np.histogram(expected, bins=cuts)[0] / len(expected), 1e-6, None)
-    a = np.clip(np.histogram(actual, bins=cuts)[0] / len(actual), 1e-6, None)
-    return float(np.sum((a - e) * np.log(a / e)))
+    usecols=FEATURES,
 
-print("PSI score train->test", psi(y_score(train), y_score(test)))
-print("PSI score train->val", psi(y_score(train), y_score(val)))
-print("PSI target train->val", psi(y_true(train), y_true(val)))
+)
 
-========
-rng = np.random.default_rng(0)
+def training_scale(column):
 
-def bootstrap_auc(df, n=400):
-    yt, ys, _ = finite(df)
-    stats = []
-    for _ in range(n):
-        idx = rng.integers(0, len(yt), len(yt))
-        if len(np.unique(yt[idx])) < 2:
-            continue
-        stats.append(roc_auc_score(yt[idx], ys[idx]))
-    return np.percentile(stats, [2.5, 50, 97.5])
+    values = pd.to_numeric(
 
-for name, df in frames.items():
-    lo, mid, hi = bootstrap_auc(df)
-    print(f"{name}: {mid:.4f}  95% CI [{lo:.4f}, {hi:.4f}]")
+        training_reference[column],
 
-========
-# Resilience
+        errors="coerce",
 
-def perf(yt, ys):
-    m = np.isfinite(yt) & np.isfinite(ys)
-    yt, ys = yt[m], ys[m]
-    if len(yt) < 50 or len(np.unique(yt)) < 2:
-        return np.nan
-    return roc_auc_score(yt, ys) if TASK == "classification" else mean_absolute_error(yt, ys)
+    ).replace([np.inf, -np.inf], np.nan).dropna()
 
-lo, hi = np.nanquantile(y_score(train), [0.05, 0.95])
-rows = []
-for name, df in frames.items():
-    yt, ys, _ = finite(df)
-    err = np.abs(yt - ys)
-    worst = err >= np.nanquantile(err, 0.9)
-    outer = (ys < lo) | (ys > hi)
-    rows.append({
-        "split": name,
-        "all": perf(yt, ys),
-        "worst_10pct_error": perf(yt[worst], ys[worst]),
-        "outer_score": perf(yt[outer], ys[outer]),
-        "outer_share": outer.mean(),
-    })
-pd.DataFrame(rows)
+    if len(values) < 2:
 
-===========
+        raise ValueError(
 
-from sklearn.cluster import KMeans
-from sklearn.preprocessing import StandardScaler
+            f"{column}: insufficient numeric training observations"
 
-df = val.copy()
-feats = feature_cols(df)[:25]
-X = df[feats].apply(pd.to_numeric, errors="coerce")
-mask = X.notna().all(axis=1)
-lab = KMeans(n_clusters=5, n_init=10, random_state=0).fit_predict(StandardScaler().fit_transform(X.loc[mask]))
-sub = df.loc[mask].copy()
-sub["cluster"] = lab
-sub["abs_err"] = np.abs(y_true(sub) - y_score(sub))
-sub.groupby("cluster").agg(n=("abs_err", "size"), mae=("abs_err", "mean"), bad_rate=(TARGET_COL, "mean"), avg_score=(SCORE_COL, "mean")).sort_values("mae", ascending=False)
+        )
 
-========
-# Robustness
+    scale = float(values.std(ddof=1))
 
-def slice_metric(df, col, min_n=200):
-    rows = []
-    for key, g in df.groupby(col, dropna=False):
-        if len(g) < min_n:
-            continue
-        yt, ys, _ = finite(g)
-        if len(np.unique(yt)) < 2:
-            continue
-        stat = roc_auc_score(yt, ys) if TASK == "classification" else mean_absolute_error(yt, ys)
-        rows.append({"slice": col, "value": key, "n": len(yt), "metric": stat, "bad_rate": yt.mean()})
-    return pd.DataFrame(rows)
+    if not np.isfinite(scale) or scale <= 0:
 
-slice_cols = [c for c in ["PROVINCE", "PRK_PROPERTY_TYPE", "PRD_LOAN_PURPOSE", "PRK_OCCUPANCY"] if c in val.columns]
-pd.concat([slice_metric(val, c) for c in slice_cols], ignore_index=True)
+        raise ValueError(
 
-# Explainability
+            f"{column}: no usable training variability. "
 
-from sklearn.ensemble import GradientBoostingRegressor
-from sklearn.inspection import permutation_importance, PartialDependenceDisplay
-from sklearn.model_selection import train_test_split
+            "Specify a justified sensitivity magnitude manually."
 
-df = val.copy()
-feats = feature_cols(df)
-X = df[feats].apply(pd.to_numeric, errors="coerce")
-y = df[SCORE_COL]
-mask = X.notna().all(axis=1) & y.notna()
-Xtr, Xte, ytr, yte = train_test_split(X.loc[mask], y.loc[mask], test_size=0.3, random_state=0)
+        )
 
-sur = GradientBoostingRegressor(max_depth=3, n_estimators=100, random_state=0)
-sur.fit(Xtr, ytr)
-print("surrogate R2", sur.score(Xte, yte))
+    return scale
 
-imp = permutation_importance(sur, Xte, yte, n_repeats=5, random_state=0, scoring="r2")
-pd.Series(imp.importances_mean, index=feats).sort_values(ascending=False).head(20)
+hpi_scale = training_scale("HPI_+4")
 
-=======
-# Weakness regions
+ue_scale = training_scale("UE_+4")
 
-MIN_N, MAE_LIFT, AUC_DROP = 300, 1.25, 0.05
-SLICE_COLS = [c for c in ["PROVINCE", "PRK_PROPERTY_TYPE", "PRK_OCCUPANCY", "PRD_LOAN_PURPOSE", "PRD_RATE_TYPE", "PRK_CONS_TYPE", "ECON_REGION"] if c in val.columns]
+# Small synthetic perturbation: 5% of training standard deviation.
 
-def weakness(df):
-    yt, ys, _ = finite(df)
-    book_mae = np.mean(np.abs(yt - ys))
-    book_auc = roc_auc_score(yt, ys)
-    rows = []
-    for col in SLICE_COLS:
-        for key, g in df.groupby(col, dropna=False):
-            if len(g) < MIN_N:
-                continue
-            gyt, gys, _ = finite(g)
-            if len(np.unique(gyt)) < 2:
-                continue
-            mae = np.mean(np.abs(gyt - gys))
-            auc = roc_auc_score(gyt, gys)
-            if mae > book_mae * MAE_LIFT or auc < book_auc - AUC_DROP:
-                rows.append({"feature": col, "value": key, "n": len(gyt), "mae": mae, "book_mae": book_mae, "auc": auc, "book_auc": book_auc, "bad_rate": gyt.mean(), "avg_score": gys.mean()})
-    return pd.DataFrame(rows).sort_values("mae", ascending=False)
+# Existing robustness code supports these rules.
 
-weak_val = weakness(val)
-weak_test = weakness(test)
-weak_val
+#
 
-========
-# Validation summary
+# No bounds are imposed here because the exact representation
 
-def auc(df):
-    yt, ys, _ = finite(df)
-    return roc_auc_score(yt, ys)
+# presented to your fitted pipeline must be confirmed first.
 
-def brier(df):
-    yt, ys, _ = finite(df)
-    return brier_score_loss(yt, np.clip(ys, 1e-6, 1 - 1e-6))
+ROBUSTNESS_RULES = {
 
-checks = [
-    ("val AUC >= 0.70", auc(val) >= 0.70, auc(val)),
-    ("test AUC >= 0.70", auc(test) >= 0.70, auc(test)),
-    ("AUC drop train-val <= 0.05", auc(train) - auc(val) <= 0.05, auc(train) - auc(val)),
-    ("val Brier <= train Brier + 0.02", brier(val) <= brier(train) + 0.02, brier(val)),
-    ("PSI score train->val <= 0.25", psi(y_score(train), y_score(val)) <= 0.25, psi(y_score(train), y_score(val))),
-    ("PSI score train->test <= 0.25", psi(y_score(train), y_score(test)) <= 0.25, psi(y_score(train), y_score(test))),
+    "HPI_+4": {
+
+        "sd": 0.05 * hpi_scale,
+
+    },
+
+    "UE_+4": {
+
+        "sd": 0.05 * ue_scale,
+
+    },
+
+}
+
+# Moderate statistical feature shifts: 0.5 training SD.
+
+# Existing stress code supports the "add" operation.
+
+STRESS_SCENARIOS = {
+
+    "lower_hpi_feature": {
+
+        "HPI_+4": {
+
+            "add": -0.5 * hpi_scale,
+
+        },
+
+    },
+
+    "higher_unemployment_change": {
+
+        "UE_+4": {
+
+            "add": 0.5 * ue_scale,
+
+        },
+
+    },
+
+    "combined_macro_feature_shift": {
+
+        "HPI_+4": {
+
+            "add": -0.5 * hpi_scale,
+
+        },
+
+        "UE_+4": {
+
+            "add": 0.5 * ue_scale,
+
+        },
+
+    },
+
+}
+
+# None of the listed features establishes an authorized
+
+# protected attribute. Keep fairness disabled until supplied.
+
+PROTECTED_COLUMNS = []
+
+REFERENCE_GROUPS = {}
+
+# Enable SHAP after checking installed SHAP/XGBoost compatibility.
+
+RUN_SHAP = False
+
+# Keep optional challenger refitting disabled initially.
+
+RUN_TUNING = False
+
+# Enable after configuring your approved MLflow tracking server.
+
+RUN_MLFLOW = False
+
+# Matches the "model" step in your uploaded sklearn pipeline.
+
+# Small four-combination development grid.
+
+PARAM_GRID = {
+
+    "model__max_depth": [4, 6],
+
+    "model__learning_rate": [0.03, 0.06],
+
+}
+
+# Use these for business-segment diagnostics, not protected groups.
+
+SEGMENT_COLUMNS = [
+
+    "CRD_SCORE_bin",
+
+    "ACTLTV_bin",
+
+    "DSR_DIFF_bin",
+
+    "NUM_OF_BOR_bin",
+
+    "PRK_PROPERTY_TYPE",
+
+    "PRD_PORT",
+
+    "PRK_NUM_OF_UNITS",
+
+    "POD_MARKET_CODE",
+
+    "PRD_LOAN_PURPOSE_bin",
+
 ]
-pd.DataFrame(checks, columns=["check", "pass", "value"])
 
+# Set this only if your scored CSV contains CatBoost probabilities.
 
+INCUMBENT_SCORE_COLUMNS = {
 
+    # "test": "catboost_pred_proba",
+
+}
+
+MLFLOW_EXPERIMENT = "SMI3-independent-validation"
