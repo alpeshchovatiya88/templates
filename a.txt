@@ -1,187 +1,887 @@
-# ------------------------------------------------------------
+# Reset outputs so rerunning this cell does not reuse old data.
 
-# Derive illustrative sensitivity magnitudes from TRAIN only.
+frames = {}
 
-# This block can run in the settings section, before frames load.
+evaluation = {}
 
-# ------------------------------------------------------------
+data_audit = []
 
-training_reference = pd.read_csv(
+overlap = []
 
-    FILES["train"],
+# Keep successfully loaded cohorts here until all checks pass.
 
-    usecols=FEATURES,
+_loaded_frames = {}
 
-)
+_loaded_evaluation = {}
 
-def training_scale(column):
+for name, file_path in FILES.items():
 
-    values = pd.to_numeric(
+    print(f"\nLoading cohort: {name}")
 
-        training_reference[column],
+    path = Path(file_path)
+
+    if not path.is_file():
+
+        record_status(
+
+            "data_controls",
+
+            "FAILED",
+
+            f"{name}: file not found: {path}",
+
+        )
+
+        raise FileNotFoundError(path)
+
+    if name not in SCORE_COLUMNS:
+
+        raise ValueError(
+
+            f"{name}: missing entry in SCORE_COLUMNS."
+
+        )
+
+    if name not in MATURE:
+
+        raise ValueError(
+
+            f"{name}: missing entry in MATURE. "
+
+            "Explicitly confirm whether outcomes are mature."
+
+        )
+
+    if not isinstance(MATURE[name], (bool, np.bool_)):
+
+        raise ValueError(
+
+            f"{name}: MATURE must be True or False."
+
+        )
+
+    score_column = SCORE_COLUMNS[name]
+
+    # Read IDs as strings to preserve leading zeros.
+
+    # low_memory=False avoids chunk-based mixed-type warnings.
+
+    df = pd.read_csv(
+
+        path,
+
+        dtype={ID_COLUMN: "string"},
+
+        low_memory=False,
+
+    )
+
+    raw_rows = len(df)
+
+    # Apply only the eligibility filters configured in Section 1.
+
+    # Each entry must be a pandas query expression or None.
+
+    population_filter = POPULATION_FILTERS.get(name)
+
+    if population_filter is not None:
+
+        if not isinstance(population_filter, str):
+
+            raise TypeError(
+
+                f"{name}: POPULATION_FILTERS entry must be "
+
+                "a pandas query string or None."
+
+            )
+
+        if population_filter.strip():
+
+            try:
+
+                df = df.query(
+
+                    population_filter,
+
+                    engine="python",
+
+                ).copy()
+
+            except Exception as exc:
+
+                raise ValueError(
+
+                    f"{name}: population filter failed: "
+
+                    f"{population_filter!r}"
+
+                ) from exc
+
+    df = df.reset_index(drop=True)
+
+    if df.empty:
+
+        record_status(
+
+            "data_controls",
+
+            "FAILED",
+
+            f"{name}: no eligible rows.",
+
+        )
+
+        raise ValueError(
+
+            f"{name}: no rows remain after population filtering."
+
+        )
+
+    # --------------------------------------------------------
+
+    # 3A. Required columns
+
+    # --------------------------------------------------------
+
+    required_columns = [ID_COLUMN, score_column]
+
+    if GROUP_COLUMN:
+
+        required_columns.append(GROUP_COLUMN)
+
+    if MATURE[name]:
+
+        required_columns.append(TARGET)
+
+    missing_columns = [
+
+        column
+
+        for column in required_columns
+
+        if column not in df.columns
+
+    ]
+
+    if missing_columns:
+
+        record_status(
+
+            "data_controls",
+
+            "FAILED",
+
+            f"{name}: missing required columns.",
+
+        )
+
+        raise ValueError(
+
+            f"{name}: missing columns: {missing_columns}. "
+
+            "Check the settings in Section 1."
+
+        )
+
+    # --------------------------------------------------------
+
+    # 3B. Application ID checks
+
+    # --------------------------------------------------------
+
+    id_text = df[ID_COLUMN].astype("string")
+
+    missing_ids = (
+
+        id_text.isna()
+
+        | id_text.str.strip().eq("").fillna(False)
+
+    )
+
+    if missing_ids.any():
+
+        record_status(
+
+            "data_controls",
+
+            "FAILED",
+
+            f"{name}: {int(missing_ids.sum())} missing/blank IDs.",
+
+        )
+
+        raise ValueError(
+
+            f"{name}: {int(missing_ids.sum())} rows have "
+
+            f"missing or blank {ID_COLUMN!r}."
+
+        )
+
+    # Count rows involved in duplicated IDs.
+
+    duplicate_id_rows = df[ID_COLUMN].duplicated(
+
+        keep=False
+
+    )
+
+    if duplicate_id_rows.any():
+
+        duplicate_summary = pd.DataFrame([{
+
+            "cohort": name,
+
+            "duplicate_id_rows": int(
+
+                duplicate_id_rows.sum()
+
+            ),
+
+            "duplicated_unique_ids": int(
+
+                df.loc[
+
+                    duplicate_id_rows, ID_COLUMN
+
+                ].nunique()
+
+            ),
+
+        }])
+
+        show_table(
+
+            duplicate_summary,
+
+            f"01_{name}_duplicate_id_audit",
+
+        )
+
+        record_status(
+
+            "data_controls",
+
+            "FAILED",
+
+            f"{name}: duplicate application IDs.",
+
+        )
+
+        raise ValueError(
+
+            f"{name}: duplicate {ID_COLUMN!r} values. "
+
+            "Confirm the intended observation unit and "
+
+            "deduplication rule before continuing."
+
+        )
+
+    # Group IDs may repeat; missing group IDs are not allowed
+
+    # when grouped resampling/CV is configured.
+
+    if GROUP_COLUMN:
+
+        group_text = df[GROUP_COLUMN].astype("string")
+
+        missing_groups = (
+
+            group_text.isna()
+
+            | group_text.str.strip().eq("").fillna(False)
+
+        )
+
+        if missing_groups.any():
+
+            record_status(
+
+                "data_controls",
+
+                "FAILED",
+
+                f"{name}: missing/blank group IDs.",
+
+            )
+
+            raise ValueError(
+
+                f"{name}: {int(missing_groups.sum())} rows "
+
+                f"have missing/blank {GROUP_COLUMN!r}."
+
+            )
+
+    # --------------------------------------------------------
+
+    # 3C. Probability checks
+
+    # --------------------------------------------------------
+
+    raw_probability = df[score_column].copy()
+
+    numeric_probability = pd.to_numeric(
+
+        raw_probability,
 
         errors="coerce",
 
-    ).replace([np.inf, -np.inf], np.nan).dropna()
+    )
 
-    if len(values) < 2:
+    probability_array = numeric_probability.to_numpy(
 
-        raise ValueError(
+        dtype=float,
 
-            f"{column}: insufficient numeric training observations"
+        na_value=np.nan,
+
+    )
+
+    valid_probability = (
+
+        np.isfinite(probability_array)
+
+        & (probability_array >= 0)
+
+        & (probability_array <= 1)
+
+    )
+
+    if not valid_probability.all():
+
+        probability_audit = pd.DataFrame([{
+
+            "cohort": name,
+
+            "score_column": score_column,
+
+            "rows": len(df),
+
+            "missing_or_nonnumeric": int(
+
+                np.isnan(probability_array).sum()
+
+            ),
+
+            "infinite": int(
+
+                np.isinf(probability_array).sum()
+
+            ),
+
+            "finite_outside_0_1": int(
+
+                (
+
+                    np.isfinite(probability_array)
+
+                    & (
+
+                        (probability_array < 0)
+
+                        | (probability_array > 1)
+
+                    )
+
+                ).sum()
+
+            ),
+
+            "invalid_total": int(
+
+                (~valid_probability).sum()
+
+            ),
+
+        }])
+
+        show_table(
+
+            probability_audit,
+
+            f"01_{name}_probability_audit",
 
         )
 
-    scale = float(values.std(ddof=1))
+        record_status(
 
-    if not np.isfinite(scale) or scale <= 0:
+            "data_controls",
 
-        raise ValueError(
+            "FAILED",
 
-            f"{column}: no usable training variability. "
-
-            "Specify a justified sensitivity magnitude manually."
+            f"{name}: invalid probabilities.",
 
         )
 
-    return scale
+        raise ValueError(
 
-hpi_scale = training_scale("HPI_+4")
+            f"{name}: {int((~valid_probability).sum())} "
 
-ue_scale = training_scale("UE_+4")
+            f"invalid probabilities in {score_column!r}. "
 
-# Small synthetic perturbation: 5% of training standard deviation.
+            "Probabilities must be finite and between 0 and 1."
 
-# Existing robustness code supports these rules.
+        )
 
-#
+    # Standard helper column used by later sections.
 
-# No bounds are imposed here because the exact representation
+    df["_p"] = probability_array
 
-# presented to your fitted pipeline must be confirmed first.
+    # Remove any pre-existing helper target from the input CSV.
 
-ROBUSTNESS_RULES = {
+    # Rebuild it only from the configured TARGET column.
 
-    "HPI_+4": {
+    if "_y" in df.columns:
 
-        "sd": 0.05 * hpi_scale,
+        df = df.drop(columns="_y")
 
-    },
+    # --------------------------------------------------------
 
-    "UE_+4": {
+    # 3D. Mature-outcome validation and diagnostics
 
-        "sd": 0.05 * ue_scale,
+    # --------------------------------------------------------
 
-    },
+    if MATURE[name]:
 
-}
+        raw_target = df[TARGET].copy()
 
-# Moderate statistical feature shifts: 0.5 training SD.
+        target_text = raw_target.astype("string").str.strip()
 
-# Existing stress code supports the "add" operation.
+        numeric_target = pd.to_numeric(
 
-STRESS_SCENARIOS = {
+            target_text,
 
-    "lower_hpi_feature": {
+            errors="coerce",
 
-        "HPI_+4": {
+        )
 
-            "add": -0.5 * hpi_scale,
+        source_missing = (
 
-        },
+            raw_target.isna()
 
-    },
+            | target_text.eq("").fillna(False)
 
-    "higher_unemployment_change": {
+        )
 
-        "UE_+4": {
+        nonnumeric = (
 
-            "add": 0.5 * ue_scale,
+            ~source_missing
 
-        },
+            & numeric_target.isna()
 
-    },
+        )
 
-    "combined_macro_feature_shift": {
+        nonbinary = (
 
-        "HPI_+4": {
+            numeric_target.notna()
 
-            "add": -0.5 * hpi_scale,
+            & ~numeric_target.isin([0, 1])
 
-        },
+        )
 
-        "UE_+4": {
+        invalid_target = (
 
-            "add": 0.5 * ue_scale,
+            source_missing
 
-        },
+            | nonnumeric
 
-    },
+            | nonbinary
 
-}
+        )
 
-# None of the listed features establishes an authorized
+        target_audit = pd.DataFrame([{
 
-# protected attribute. Keep fairness disabled until supplied.
+            "cohort": name,
 
-PROTECTED_COLUMNS = []
+            "target_column": TARGET,
 
-REFERENCE_GROUPS = {}
+            "rows": len(df),
 
-# Enable SHAP after checking installed SHAP/XGBoost compatibility.
+            "valid_0": int(
 
-RUN_SHAP = False
+                numeric_target.eq(0).sum()
 
-# Keep optional challenger refitting disabled initially.
+            ),
 
-RUN_TUNING = False
+            "valid_1": int(
 
-# Enable after configuring your approved MLflow tracking server.
+                numeric_target.eq(1).sum()
 
-RUN_MLFLOW = False
+            ),
 
-# Matches the "model" step in your uploaded sklearn pipeline.
+            "missing_or_blank": int(
 
-# Small four-combination development grid.
+                source_missing.sum()
 
-PARAM_GRID = {
+            ),
 
-    "model__max_depth": [4, 6],
+            "nonnumeric": int(
 
-    "model__learning_rate": [0.03, 0.06],
+                nonnumeric.sum()
 
-}
+            ),
 
-# Use these for business-segment diagnostics, not protected groups.
+            "numeric_but_not_0_or_1": int(
 
-SEGMENT_COLUMNS = [
+                nonbinary.sum()
 
-    "CRD_SCORE_bin",
+            ),
 
-    "ACTLTV_bin",
+            "invalid_total": int(
 
-    "DSR_DIFF_bin",
+                invalid_target.sum()
 
-    "NUM_OF_BOR_bin",
+            ),
 
-    "PRK_PROPERTY_TYPE",
+        }])
 
-    "PRD_PORT",
+        show_table(
 
-    "PRK_NUM_OF_UNITS",
+            target_audit,
 
-    "POD_MARKET_CODE",
+            f"01_{name}_target_audit",
 
-    "PRD_LOAN_PURPOSE_bin",
+        )
 
-]
+        if invalid_target.any():
 
-# Set this only if your scored CSV contains CatBoost probabilities.
+            invalid_values = (
 
-INCUMBENT_SCORE_COLUMNS = {
+                raw_target.loc[invalid_target]
 
-    # "test": "catboost_pred_proba",
+                .astype("string")
 
-}
+                .fillna("<MISSING>")
 
-MLFLOW_EXPERIMENT = "SMI3-independent-validation"
+                .value_counts(dropna=False)
+
+                .rename_axis("source_target_value")
+
+                .reset_index(name="rows")
+
+            )
+
+            show_table(
+
+                invalid_values,
+
+                f"01_{name}_invalid_target_values",
+
+            )
+
+            record_status(
+
+                "data_controls",
+
+                "FAILED",
+
+                f"{name}: "
+
+                f"{int(invalid_target.sum())} "
+
+                "missing/nonbinary outcomes.",
+
+            )
+
+            raise ValueError(
+
+                f"{name}: "
+
+                f"{int(invalid_target.sum())} "
+
+                f"invalid outcomes in {TARGET!r}. "
+
+                "See the target-audit tables above. "
+
+                "Confirm outcome coding, maturity, and "
+
+                "population eligibility before continuing."
+
+            )
+
+        df["_y"] = numeric_target.astype("int64")
+
+        _loaded_evaluation[name] = df.copy()
+
+        if df["_y"].nunique() < 2:
+
+            record_status(
+
+                f"{name}_outcome_classes",
+
+                "WARNING",
+
+                "Only one outcome class is present; "
+
+                "AUC and some diagnostics are undefined.",
+
+            )
+
+    else:
+
+        record_status(
+
+            f"{name}_outcome_metrics",
+
+            "SKIPPED",
+
+            "Outcome maturity not confirmed. "
+
+            "Score-based diagnostics remain available.",
+
+        )
+
+    _loaded_frames[name] = df.copy()
+
+    data_audit.append({
+
+        "cohort": name,
+
+        "raw_rows": raw_rows,
+
+        "eligible_rows": len(df),
+
+        "excluded_rows": raw_rows - len(df),
+
+        "mature": bool(MATURE[name]),
+
+        "evaluated_rows": (
+
+            len(df) if MATURE[name] else 0
+
+        ),
+
+        "unique_application_ids": df[ID_COLUMN].nunique(),
+
+        "score_column": score_column,
+
+        "mean_pd": df["_p"].mean(),
+
+        "bad_events": (
+
+            int(df["_y"].sum())
+
+            if MATURE[name]
+
+            else np.nan
+
+        ),
+
+        "bad_rate": (
+
+            df["_y"].mean()
+
+            if MATURE[name]
+
+            else np.nan
+
+        ),
+
+    })
+
+# ------------------------------------------------------------
+
+# 3E. Publish data only after every cohort passes loading checks
+
+# ------------------------------------------------------------
+
+frames = _loaded_frames
+
+evaluation = _loaded_evaluation
+
+show_table(
+
+    pd.DataFrame(data_audit),
+
+    "01_population_audit",
+
+)
+
+# ------------------------------------------------------------
+
+# 3F. Missingness across source columns
+
+# ------------------------------------------------------------
+
+missingness = pd.DataFrame({
+
+    name: df.drop(
+
+        columns=["_p", "_y"],
+
+        errors="ignore",
+
+    ).isna().mean()
+
+    for name, df in frames.items()
+
+})
+
+missingness.index.name = "column"
+
+show_table(
+
+    missingness,
+
+    "01_missingness",
+
+)
+
+# ------------------------------------------------------------
+
+# 3G. Cross-population identifier overlap
+
+# ------------------------------------------------------------
+
+identifiers = list(dict.fromkeys(
+
+    [ID_COLUMN]
+
+    + ([GROUP_COLUMN] if GROUP_COLUMN else [])
+
+))
+
+for first, second in combinations(frames.keys(), 2):
+
+    for identifier in identifiers:
+
+        first_values = set(
+
+            frames[first][identifier]
+
+            .dropna()
+
+            .astype("string")
+
+        )
+
+        second_values = set(
+
+            frames[second][identifier]
+
+            .dropna()
+
+            .astype("string")
+
+        )
+
+        shared = first_values.intersection(second_values)
+
+        overlap.append({
+
+            "first": first,
+
+            "second": second,
+
+            "identifier": identifier,
+
+            "first_unique_identifiers": len(first_values),
+
+            "second_unique_identifiers": len(second_values),
+
+            "shared_identifiers": len(shared),
+
+            "shared_fraction_of_first": (
+
+                len(shared) / len(first_values)
+
+                if first_values else np.nan
+
+            ),
+
+            "shared_fraction_of_second": (
+
+                len(shared) / len(second_values)
+
+                if second_values else np.nan
+
+            ),
+
+        })
+
+overlap_table = pd.DataFrame(
+
+    overlap,
+
+    columns=[
+
+        "first",
+
+        "second",
+
+        "identifier",
+
+        "first_unique_identifiers",
+
+        "second_unique_identifiers",
+
+        "shared_identifiers",
+
+        "shared_fraction_of_first",
+
+        "shared_fraction_of_second",
+
+    ],
+
+)
+
+show_table(
+
+    overlap_table,
+
+    "01_overlap",
+
+)
+
+if (
+
+    not overlap_table.empty
+
+    and overlap_table["shared_identifiers"].gt(0).any()
+
+):
+
+    record_status(
+
+        "population_overlap",
+
+        "REVIEW",
+
+        "Shared identifiers detected. Review independence "
+
+        "and potential leakage across populations.",
+
+    )
+
+else:
+
+    record_status(
+
+        "population_overlap",
+
+        "COMPLETED",
+
+        "No shared identifiers detected for configured IDs.",
+
+    )
+
+record_status(
+
+    "data_controls",
+
+    "COMPLETED",
+
+    "All configured cohorts passed loading, identifier, "
+
+    "probability, and applicable target checks.",
+
+)
+
+print("\nSection 3 completed.")
+
+print("Loaded cohorts:", list(frames))
+
+print("Outcome-evaluation cohorts:", list(evaluation))
