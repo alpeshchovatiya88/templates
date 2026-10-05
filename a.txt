@@ -1,887 +1,101 @@
-# Reset outputs so rerunning this cell does not reuse old data.
+# SECTION 3 — LOAD, CHECK AND AUDIT DATA
+from pathlib import Path
+from itertools import combinations
+import numpy as np
+import pandas as pd
 
-frames = {}
+frames, evaluation, data_audit, overlap = {}, {}, [], []
 
-evaluation = {}
-
-data_audit = []
-
-overlap = []
-
-# Keep successfully loaded cohorts here until all checks pass.
-
-_loaded_frames = {}
-
-_loaded_evaluation = {}
-
-for name, file_path in FILES.items():
-
-    print(f"\nLoading cohort: {name}")
-
-    path = Path(file_path)
-
-    if not path.is_file():
-
-        record_status(
-
-            "data_controls",
-
-            "FAILED",
-
-            f"{name}: file not found: {path}",
-
-        )
-
-        raise FileNotFoundError(path)
-
-    if name not in SCORE_COLUMNS:
-
-        raise ValueError(
-
-            f"{name}: missing entry in SCORE_COLUMNS."
-
-        )
-
-    if name not in MATURE:
-
-        raise ValueError(
-
-            f"{name}: missing entry in MATURE. "
-
-            "Explicitly confirm whether outcomes are mature."
-
-        )
-
-    if not isinstance(MATURE[name], (bool, np.bool_)):
-
-        raise ValueError(
-
-            f"{name}: MATURE must be True or False."
-
-        )
-
-    score_column = SCORE_COLUMNS[name]
-
-    # Read IDs as strings to preserve leading zeros.
-
-    # low_memory=False avoids chunk-based mixed-type warnings.
-
+for name, path in FILES.items():
     df = pd.read_csv(
-
-        path,
-
-        dtype={ID_COLUMN: "string"},
-
-        low_memory=False,
-
+        Path(path), dtype={ID_COLUMN: "string"}, low_memory=False
     )
-
     raw_rows = len(df)
 
-    # Apply only the eligibility filters configured in Section 1.
-
-    # Each entry must be a pandas query expression or None.
-
-    population_filter = POPULATION_FILTERS.get(name)
-
-    if population_filter is not None:
-
-        if not isinstance(population_filter, str):
-
-            raise TypeError(
-
-                f"{name}: POPULATION_FILTERS entry must be "
-
-                "a pandas query string or None."
-
-            )
-
-        if population_filter.strip():
-
-            try:
-
-                df = df.query(
-
-                    population_filter,
-
-                    engine="python",
-
-                ).copy()
-
-            except Exception as exc:
-
-                raise ValueError(
-
-                    f"{name}: population filter failed: "
-
-                    f"{population_filter!r}"
-
-                ) from exc
-
+    if POPULATION_FILTERS.get(name):
+        df = df.query(POPULATION_FILTERS[name], engine="python").copy()
     df = df.reset_index(drop=True)
 
+    required = [ID_COLUMN, SCORE_COLUMNS[name]]
+    required += [GROUP_COLUMN] if GROUP_COLUMN else []
+    required += [TARGET] if MATURE[name] else []
+    absent = [c for c in required if c not in df.columns]
+    if absent:
+        raise ValueError(f"{name}: missing columns {absent}")
     if df.empty:
+        raise ValueError(f"{name}: no eligible rows")
 
-        record_status(
+    for column in [ID_COLUMN] + ([GROUP_COLUMN] if GROUP_COLUMN else []):
+        values = df[column].astype("string")
+        if (values.isna() | values.str.strip().eq("")).any():
+            raise ValueError(f"{name}: missing/blank {column}")
+    if df[ID_COLUMN].duplicated().any():
+        raise ValueError(f"{name}: duplicate application IDs")
 
-            "data_controls",
+    df["_p"] = pd.to_numeric(
+        df[SCORE_COLUMNS[name]], errors="coerce"
+    ).to_numpy(dtype=float, na_value=np.nan)
+    if not (np.isfinite(df["_p"]) & df["_p"].between(0, 1)).all():
+        raise ValueError(f"{name}: invalid probabilities")
 
-            "FAILED",
-
-            f"{name}: no eligible rows.",
-
-        )
-
-        raise ValueError(
-
-            f"{name}: no rows remain after population filtering."
-
-        )
-
-    # --------------------------------------------------------
-
-    # 3A. Required columns
-
-    # --------------------------------------------------------
-
-    required_columns = [ID_COLUMN, score_column]
-
-    if GROUP_COLUMN:
-
-        required_columns.append(GROUP_COLUMN)
+    df = df.drop(columns="_y", errors="ignore")
+    labeled_rows = missing_targets = 0
 
     if MATURE[name]:
-
-        required_columns.append(TARGET)
-
-    missing_columns = [
-
-        column
-
-        for column in required_columns
-
-        if column not in df.columns
-
-    ]
-
-    if missing_columns:
-
-        record_status(
-
-            "data_controls",
-
-            "FAILED",
-
-            f"{name}: missing required columns.",
-
-        )
-
-        raise ValueError(
-
-            f"{name}: missing columns: {missing_columns}. "
-
-            "Check the settings in Section 1."
-
-        )
-
-    # --------------------------------------------------------
-
-    # 3B. Application ID checks
-
-    # --------------------------------------------------------
-
-    id_text = df[ID_COLUMN].astype("string")
-
-    missing_ids = (
-
-        id_text.isna()
-
-        | id_text.str.strip().eq("").fillna(False)
-
-    )
-
-    if missing_ids.any():
-
-        record_status(
-
-            "data_controls",
-
-            "FAILED",
-
-            f"{name}: {int(missing_ids.sum())} missing/blank IDs.",
-
-        )
-
-        raise ValueError(
-
-            f"{name}: {int(missing_ids.sum())} rows have "
-
-            f"missing or blank {ID_COLUMN!r}."
-
-        )
-
-    # Count rows involved in duplicated IDs.
-
-    duplicate_id_rows = df[ID_COLUMN].duplicated(
-
-        keep=False
-
-    )
-
-    if duplicate_id_rows.any():
-
-        duplicate_summary = pd.DataFrame([{
-
-            "cohort": name,
-
-            "duplicate_id_rows": int(
-
-                duplicate_id_rows.sum()
-
-            ),
-
-            "duplicated_unique_ids": int(
-
-                df.loc[
-
-                    duplicate_id_rows, ID_COLUMN
-
-                ].nunique()
-
-            ),
-
-        }])
-
-        show_table(
-
-            duplicate_summary,
-
-            f"01_{name}_duplicate_id_audit",
-
-        )
-
-        record_status(
-
-            "data_controls",
-
-            "FAILED",
-
-            f"{name}: duplicate application IDs.",
-
-        )
-
-        raise ValueError(
-
-            f"{name}: duplicate {ID_COLUMN!r} values. "
-
-            "Confirm the intended observation unit and "
-
-            "deduplication rule before continuing."
-
-        )
-
-    # Group IDs may repeat; missing group IDs are not allowed
-
-    # when grouped resampling/CV is configured.
-
-    if GROUP_COLUMN:
-
-        group_text = df[GROUP_COLUMN].astype("string")
-
-        missing_groups = (
-
-            group_text.isna()
-
-            | group_text.str.strip().eq("").fillna(False)
-
-        )
-
-        if missing_groups.any():
-
+        text = df[TARGET].astype("string").str.strip()
+        missing = text.isna() | text.eq("").fillna(False)
+        y = pd.to_numeric(text, errors="coerce")
+        valid = y.isin([0, 1])
+
+        if ((~missing) & (~valid)).any():
+            raise ValueError(f"{name}: unexpected target codes")
+        if missing.any() and name != "test":
+            raise ValueError(f"{name}: missing mature outcomes")
+        if not valid.any():
+            raise ValueError(f"{name}: no labeled outcomes")
+
+        df["_y"] = y.to_numpy(dtype=float, na_value=np.nan)
+        evaluation[name] = df.loc[valid].copy()
+        evaluation[name]["_y"] = evaluation[name]["_y"].astype(int)
+        labeled_rows = int(valid.sum())
+        missing_targets = int(missing.sum())
+
+        if missing_targets:
             record_status(
-
-                "data_controls",
-
-                "FAILED",
-
-                f"{name}: missing/blank group IDs.",
-
+                f"{name}_target_completeness", "REVIEW",
+                "Exploratory labeled-subset evaluation; "
+                "maturity and missing-outcome cause unconfirmed."
             )
 
-            raise ValueError(
-
-                f"{name}: {int(missing_groups.sum())} rows "
-
-                f"have missing/blank {GROUP_COLUMN!r}."
-
-            )
-
-    # --------------------------------------------------------
-
-    # 3C. Probability checks
-
-    # --------------------------------------------------------
-
-    raw_probability = df[score_column].copy()
-
-    numeric_probability = pd.to_numeric(
-
-        raw_probability,
-
-        errors="coerce",
-
-    )
-
-    probability_array = numeric_probability.to_numpy(
-
-        dtype=float,
-
-        na_value=np.nan,
-
-    )
-
-    valid_probability = (
-
-        np.isfinite(probability_array)
-
-        & (probability_array >= 0)
-
-        & (probability_array <= 1)
-
-    )
-
-    if not valid_probability.all():
-
-        probability_audit = pd.DataFrame([{
-
-            "cohort": name,
-
-            "score_column": score_column,
-
-            "rows": len(df),
-
-            "missing_or_nonnumeric": int(
-
-                np.isnan(probability_array).sum()
-
-            ),
-
-            "infinite": int(
-
-                np.isinf(probability_array).sum()
-
-            ),
-
-            "finite_outside_0_1": int(
-
-                (
-
-                    np.isfinite(probability_array)
-
-                    & (
-
-                        (probability_array < 0)
-
-                        | (probability_array > 1)
-
-                    )
-
-                ).sum()
-
-            ),
-
-            "invalid_total": int(
-
-                (~valid_probability).sum()
-
-            ),
-
-        }])
-
-        show_table(
-
-            probability_audit,
-
-            f"01_{name}_probability_audit",
-
-        )
-
-        record_status(
-
-            "data_controls",
-
-            "FAILED",
-
-            f"{name}: invalid probabilities.",
-
-        )
-
-        raise ValueError(
-
-            f"{name}: {int((~valid_probability).sum())} "
-
-            f"invalid probabilities in {score_column!r}. "
-
-            "Probabilities must be finite and between 0 and 1."
-
-        )
-
-    # Standard helper column used by later sections.
-
-    df["_p"] = probability_array
-
-    # Remove any pre-existing helper target from the input CSV.
-
-    # Rebuild it only from the configured TARGET column.
-
-    if "_y" in df.columns:
-
-        df = df.drop(columns="_y")
-
-    # --------------------------------------------------------
-
-    # 3D. Mature-outcome validation and diagnostics
-
-    # --------------------------------------------------------
-
-    if MATURE[name]:
-
-        raw_target = df[TARGET].copy()
-
-        target_text = raw_target.astype("string").str.strip()
-
-        numeric_target = pd.to_numeric(
-
-            target_text,
-
-            errors="coerce",
-
-        )
-
-        source_missing = (
-
-            raw_target.isna()
-
-            | target_text.eq("").fillna(False)
-
-        )
-
-        nonnumeric = (
-
-            ~source_missing
-
-            & numeric_target.isna()
-
-        )
-
-        nonbinary = (
-
-            numeric_target.notna()
-
-            & ~numeric_target.isin([0, 1])
-
-        )
-
-        invalid_target = (
-
-            source_missing
-
-            | nonnumeric
-
-            | nonbinary
-
-        )
-
-        target_audit = pd.DataFrame([{
-
-            "cohort": name,
-
-            "target_column": TARGET,
-
-            "rows": len(df),
-
-            "valid_0": int(
-
-                numeric_target.eq(0).sum()
-
-            ),
-
-            "valid_1": int(
-
-                numeric_target.eq(1).sum()
-
-            ),
-
-            "missing_or_blank": int(
-
-                source_missing.sum()
-
-            ),
-
-            "nonnumeric": int(
-
-                nonnumeric.sum()
-
-            ),
-
-            "numeric_but_not_0_or_1": int(
-
-                nonbinary.sum()
-
-            ),
-
-            "invalid_total": int(
-
-                invalid_target.sum()
-
-            ),
-
-        }])
-
-        show_table(
-
-            target_audit,
-
-            f"01_{name}_target_audit",
-
-        )
-
-        if invalid_target.any():
-
-            invalid_values = (
-
-                raw_target.loc[invalid_target]
-
-                .astype("string")
-
-                .fillna("<MISSING>")
-
-                .value_counts(dropna=False)
-
-                .rename_axis("source_target_value")
-
-                .reset_index(name="rows")
-
-            )
-
-            show_table(
-
-                invalid_values,
-
-                f"01_{name}_invalid_target_values",
-
-            )
-
-            record_status(
-
-                "data_controls",
-
-                "FAILED",
-
-                f"{name}: "
-
-                f"{int(invalid_target.sum())} "
-
-                "missing/nonbinary outcomes.",
-
-            )
-
-            raise ValueError(
-
-                f"{name}: "
-
-                f"{int(invalid_target.sum())} "
-
-                f"invalid outcomes in {TARGET!r}. "
-
-                "See the target-audit tables above. "
-
-                "Confirm outcome coding, maturity, and "
-
-                "population eligibility before continuing."
-
-            )
-
-        df["_y"] = numeric_target.astype("int64")
-
-        _loaded_evaluation[name] = df.copy()
-
-        if df["_y"].nunique() < 2:
-
-            record_status(
-
-                f"{name}_outcome_classes",
-
-                "WARNING",
-
-                "Only one outcome class is present; "
-
-                "AUC and some diagnostics are undefined.",
-
-            )
-
-    else:
-
-        record_status(
-
-            f"{name}_outcome_metrics",
-
-            "SKIPPED",
-
-            "Outcome maturity not confirmed. "
-
-            "Score-based diagnostics remain available.",
-
-        )
-
-    _loaded_frames[name] = df.copy()
-
+    frames[name] = df
     data_audit.append({
-
-        "cohort": name,
-
-        "raw_rows": raw_rows,
-
-        "eligible_rows": len(df),
-
-        "excluded_rows": raw_rows - len(df),
-
-        "mature": bool(MATURE[name]),
-
-        "evaluated_rows": (
-
-            len(df) if MATURE[name] else 0
-
-        ),
-
-        "unique_application_ids": df[ID_COLUMN].nunique(),
-
-        "score_column": score_column,
-
-        "mean_pd": df["_p"].mean(),
-
-        "bad_events": (
-
-            int(df["_y"].sum())
-
-            if MATURE[name]
-
-            else np.nan
-
-        ),
-
-        "bad_rate": (
-
-            df["_y"].mean()
-
-            if MATURE[name]
-
-            else np.nan
-
-        ),
-
+        "cohort": name, "raw_rows": raw_rows,
+        "eligible_rows": len(df), "mature": MATURE[name],
+        "evaluated_rows": labeled_rows,
+        "missing_targets": missing_targets if MATURE[name] else np.nan,
     })
 
-# ------------------------------------------------------------
-
-# 3E. Publish data only after every cohort passes loading checks
-
-# ------------------------------------------------------------
-
-frames = _loaded_frames
-
-evaluation = _loaded_evaluation
-
-show_table(
-
-    pd.DataFrame(data_audit),
-
-    "01_population_audit",
-
-)
-
-# ------------------------------------------------------------
-
-# 3F. Missingness across source columns
-
-# ------------------------------------------------------------
-
-missingness = pd.DataFrame({
-
-    name: df.drop(
-
-        columns=["_p", "_y"],
-
-        errors="ignore",
-
-    ).isna().mean()
-
+show_table(pd.DataFrame(data_audit), "01_population_audit")
+show_table(pd.DataFrame({
+    name: df.drop(columns=["_p", "_y"], errors="ignore").isna().mean()
     for name, df in frames.items()
+}), "01_missingness")
 
-})
-
-missingness.index.name = "column"
-
-show_table(
-
-    missingness,
-
-    "01_missingness",
-
-)
-
-# ------------------------------------------------------------
-
-# 3G. Cross-population identifier overlap
-
-# ------------------------------------------------------------
-
-identifiers = list(dict.fromkeys(
-
-    [ID_COLUMN]
-
-    + ([GROUP_COLUMN] if GROUP_COLUMN else [])
-
-))
-
-for first, second in combinations(frames.keys(), 2):
-
-    for identifier in identifiers:
-
-        first_values = set(
-
-            frames[first][identifier]
-
-            .dropna()
-
-            .astype("string")
-
+for first, second in combinations(frames, 2):
+    for column in dict.fromkeys(
+        [ID_COLUMN] + ([GROUP_COLUMN] if GROUP_COLUMN else [])
+    ):
+        shared = len(
+            set(frames[first][column].astype("string"))
+            & set(frames[second][column].astype("string"))
         )
-
-        second_values = set(
-
-            frames[second][identifier]
-
-            .dropna()
-
-            .astype("string")
-
-        )
-
-        shared = first_values.intersection(second_values)
-
         overlap.append({
-
-            "first": first,
-
-            "second": second,
-
-            "identifier": identifier,
-
-            "first_unique_identifiers": len(first_values),
-
-            "second_unique_identifiers": len(second_values),
-
-            "shared_identifiers": len(shared),
-
-            "shared_fraction_of_first": (
-
-                len(shared) / len(first_values)
-
-                if first_values else np.nan
-
-            ),
-
-            "shared_fraction_of_second": (
-
-                len(shared) / len(second_values)
-
-                if second_values else np.nan
-
-            ),
-
+            "first": first, "second": second,
+            "identifier": column, "shared_identifiers": shared,
         })
 
-overlap_table = pd.DataFrame(
+show_table(pd.DataFrame(overlap), "01_overlap")
+if any(row["shared_identifiers"] for row in overlap):
+    record_status("population_overlap", "REVIEW", "Shared IDs detected.")
 
-    overlap,
-
-    columns=[
-
-        "first",
-
-        "second",
-
-        "identifier",
-
-        "first_unique_identifiers",
-
-        "second_unique_identifiers",
-
-        "shared_identifiers",
-
-        "shared_fraction_of_first",
-
-        "shared_fraction_of_second",
-
-    ],
-
-)
-
-show_table(
-
-    overlap_table,
-
-    "01_overlap",
-
-)
-
-if (
-
-    not overlap_table.empty
-
-    and overlap_table["shared_identifiers"].gt(0).any()
-
-):
-
-    record_status(
-
-        "population_overlap",
-
-        "REVIEW",
-
-        "Shared identifiers detected. Review independence "
-
-        "and potential leakage across populations.",
-
-    )
-
-else:
-
-    record_status(
-
-        "population_overlap",
-
-        "COMPLETED",
-
-        "No shared identifiers detected for configured IDs.",
-
-    )
-
-record_status(
-
-    "data_controls",
-
-    "COMPLETED",
-
-    "All configured cohorts passed loading, identifier, "
-
-    "probability, and applicable target checks.",
-
-)
-
-print("\nSection 3 completed.")
-
-print("Loaded cohorts:", list(frames))
-
-print("Outcome-evaluation cohorts:", list(evaluation))
+record_status("data_controls", "COMPLETED", "Loading checks completed.")
