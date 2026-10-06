@@ -1,0 +1,769 @@
+# Settings
+
+from pathlib import Path
+from itertools import combinations
+from IPython.display import display
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+
+from sklearn.metrics import (
+    roc_auc_score, average_precision_score, roc_curve,
+    precision_recall_curve, log_loss, confusion_matrix
+)
+from sklearn.calibration import CalibrationDisplay
+from sklearn.model_selection import (
+    train_test_split, GroupShuffleSplit, StratifiedKFold,
+    StratifiedGroupKFold, GridSearchCV
+)
+from sklearn.linear_model import LogisticRegression
+from sklearn.base import clone
+from sklearn.tree import DecisionTreeRegressor, export_text
+
+FILES = {
+    "train": "df_scored_train.csv",
+    "test": "df_scored_test.csv",
+    "val": "df_scored_val.csv",
+}
+SCORE_COLUMNS = {name: "pred_proba" for name in FILES}
+TARGET = "target"
+ID_COLUMN = "APPLICATION_NUMBER"
+GROUP_COLUMN = None                 # Borrower ID, if available
+POPULATION_FILTERS = {}              # Approved pandas query strings
+MATURE = {"train": True, "test": True, "val": False}
+
+# Exploratory labeled-subset evaluation; excludes missing outcomes.
+ALLOW_MISSING_TARGET = {"train": False, "test": True, "val": True}
+
+FEATURES = [
+    "CRD_SCORE_bin", "CRA_JUDGEMENT",
+    "CRA_BANKRUPTCY_FORECLOSURE_IND", "HPI_+4", "UE_+4",
+    "ACTLTV_bin", "DSR_DIFF_bin", "NUM_OF_BOR_bin",
+    "PRK_PROPERTY_TYPE", "PRD_PORT", "PRK_NUM_OF_UNITS",
+    "POD_MARKET_CODE", "PRD_LOAN_PURPOSE_bin",
+]
+SEGMENT_COLUMNS = ["PRD_PORT", "PRK_PROPERTY_TYPE", "POD_MARKET_CODE"]
+DATE_COLUMNS = {
+    "train": ("BOOKYEAR", "%Y"),
+    "test": ("EFFECT_SID", "%Y%m"),
+    "val": ("EFFECT_SID", "%Y%m"),
+}
+PROTECTED_COLUMNS = []              # Authorized attributes only
+REFERENCE_GROUPS = {}
+INCUMBENT_SCORE_COLUMNS = {}         # Example: {"test": "catboost_pred_proba"}
+
+SEED, THRESHOLD, MIN_N, BOOTSTRAPS = 42, 0.10, 100, 100
+MODEL_PATH = "best_xgb.joblib"
+RUN_BOOTSTRAP = False                # Potentially slow on your datasets
+RUN_MODEL_TESTS = False
+RUN_SHAP = False
+RUN_TUNING = False
+RUN_MLFLOW = False
+PARAM_GRID = {"model__max_depth": [4, 6],
+              "model__learning_rate": [0.03, 0.06]}
+ACCEPTANCE_RULES = []                # Approved rules only
+# Example: [("test", "auc", ">=", YOUR_APPROVED_MINIMUM)]
+
+OUTPUT = Path("validation_outputs")
+OUTPUT.mkdir(exist_ok=True)
+execution_status = []
+
+==============================================================================================
+
+# Shared helpers
+
+def show_table(df, name):
+    df.to_csv(OUTPUT / f"{name}.csv", index=True)
+    display(df)
+
+def show_plot(name):
+    plt.tight_layout()
+    plt.savefig(OUTPUT / f"{name}.png", dpi=150)
+    plt.show()
+    plt.close()
+
+def record_status(test, state, detail=""):
+    execution_status.append(dict(test=test, state=state, detail=detail))
+    pd.DataFrame(execution_status).to_csv(
+        OUTPUT / "execution_status.csv", index=False
+    )
+
+def performance(d, threshold=THRESHOLD):
+    y, p = d["_y"].to_numpy(int), d["_p"].to_numpy(float)
+    both = len(np.unique(y)) == 2
+    tn, fp, fn, tp = confusion_matrix(
+        y, p >= threshold, labels=[0, 1]
+    ).ravel()
+    ratio = lambda a, b: a / b if b else np.nan
+    auc = roc_auc_score(y, p) if both else np.nan
+    fpr, tpr, _ = roc_curve(y, p) if both else ([], [], [])
+    return dict(
+        n=len(d), bad_events=int(y.sum()), bad_rate=y.mean(),
+        mean_pd=p.mean(), auc=auc, gini=2 * auc - 1,
+        ks=max(np.abs(np.array(tpr) - fpr)) if both else np.nan,
+        average_precision=average_precision_score(y, p) if both else np.nan,
+        brier=np.mean((y - p)**2), log_loss=log_loss(y, p, labels=[0, 1]),
+        recall=ratio(tp, tp + fn), precision=ratio(tp, tp + fp),
+        fpr=ratio(fp, fp + tn), flag_rate=np.mean(p >= threshold),
+        observed_expected=ratio(y.sum(), p.sum()),
+    )
+
+def calibration_table(d, bins=10, strategy="uniform"):
+    edges = (np.linspace(0, 1, bins + 1) if strategy == "uniform"
+             else np.quantile(d["_p"], np.linspace(0, 1, bins + 1)))
+    t = d.assign(bin=np.searchsorted(edges[1:-1], d["_p"])).groupby(
+        "bin"
+    ).agg(n=("_y", "size"), events=("_y", "sum"), mean_pd=("_p", "mean"))
+    r, n, z = t["events"] / t["n"], t["n"], 1.96
+    center = (r + z*z/(2*n)) / (1 + z*z/n)
+    half = z*np.sqrt(r*(1-r)/n + z*z/(4*n*n)) / (1 + z*z/n)
+    return t.assign(observed_rate=r, lower=center-half, upper=center+half,
+                    gap=r-t["mean_pd"], small_bin=n < MIN_N)
+
+def split_data(d, stratify=True):
+    if GROUP_COLUMN:
+        a, b = next(GroupShuffleSplit(
+            n_splits=1, test_size=.5, random_state=SEED
+        ).split(d, groups=d[GROUP_COLUMN]))
+        return d.iloc[a].copy(), d.iloc[b].copy()
+    return train_test_split(
+        d, test_size=.5, random_state=SEED,
+        stratify=d["_y"] if stratify else None
+    )
+
+def bootstrap_indices(d, rng):
+    if not GROUP_COLUMN:
+        return rng.integers(len(d), size=len(d))
+    groups = list(d.groupby(GROUP_COLUMN, sort=False).indices.values())
+    if len(groups) < 2:
+        raise ValueError("Bootstrap requires at least two groups.")
+    return np.concatenate([groups[i] for i in rng.integers(
+        len(groups), size=len(groups)
+    )])
+
+================================================================================================
+
+# Load train, test, val
+
+frames, evaluation, audit = {}, {}, []
+
+for name, path in FILES.items():
+    d = pd.read_csv(path, dtype={ID_COLUMN: "string"}, low_memory=False)
+    raw_n = len(d)
+    if POPULATION_FILTERS.get(name):
+        d = d.query(POPULATION_FILTERS[name], engine="python").copy()
+    d = d.reset_index(drop=True)
+    if d.empty:
+        raise ValueError(f"{name}: empty population")
+
+    for c in [ID_COLUMN] + ([GROUP_COLUMN] if GROUP_COLUMN else []):
+        s = d[c].astype("string")
+        if (s.isna() | s.str.strip().eq("")).any():
+            raise ValueError(f"{name}: missing/blank {c}")
+    if d[ID_COLUMN].duplicated().any():
+        raise ValueError(f"{name}: duplicate application IDs")
+
+    d["_p"] = pd.to_numeric(
+        d[SCORE_COLUMNS[name]], errors="coerce"
+    ).to_numpy(dtype=float, na_value=np.nan)
+    if not (np.isfinite(d["_p"]) & d["_p"].between(0, 1)).all():
+        raise ValueError(f"{name}: invalid probabilities")
+
+    d = d.drop(columns="_y", errors="ignore")
+    labeled_n, missing_n = 0, np.nan
+    if TARGET in d:
+        s = d[TARGET].astype("string").str.strip()
+        missing = s.isna() | s.eq("").fillna(False)
+        y = pd.to_numeric(s, errors="coerce")
+        if ((~missing) & (~y.isin([0, 1]))).any():
+            raise ValueError(f"{name}: unexpected target codes")
+        labeled_n, missing_n = int(y.isin([0, 1]).sum()), int(missing.sum())
+
+    if MATURE[name]:
+        if TARGET not in d:
+            raise ValueError(f"{name}: target column missing")
+        if missing_n and not ALLOW_MISSING_TARGET[name]:
+            raise ValueError(f"{name}: missing outcomes")
+        if not labeled_n:
+            raise ValueError(f"{name}: no labeled outcomes")
+        d["_y"] = y.to_numpy(dtype=float, na_value=np.nan)
+        evaluation[name] = d.loc[y.isin([0, 1])].copy()
+        evaluation[name]["_y"] = evaluation[name]["_y"].astype(int)
+        if missing_n:
+            record_status(name + "_targets", "REVIEW",
+                          "Labeled-subset evaluation; missing outcomes unresolved.")
+
+    frames[name] = d
+    audit.append(dict(cohort=name, raw_rows=raw_n, n=len(d),
+                      n_labeled_available=labeled_n,
+                      n_missing_target=missing_n,
+                      n_evaluated=len(evaluation.get(name, []))))
+
+show_table(pd.DataFrame(audit).set_index("cohort"), "01_population_audit")
+show_table(pd.DataFrame({
+    n: d.drop(columns=["_p", "_y"], errors="ignore").isna().mean()
+    for n, d in frames.items()
+}), "01_missingness")
+
+overlap = []
+for a, b in combinations(frames, 2):
+    for c in dict.fromkeys([ID_COLUMN] + ([GROUP_COLUMN] if GROUP_COLUMN else [])):
+        overlap.append(dict(first=a, second=b, identifier=c,
+            shared_identifiers=len(set(frames[a][c].astype(str))
+                                   & set(frames[b][c].astype(str)))))
+show_table(pd.DataFrame(overlap), "01_overlap")
+record_status("data_controls", "COMPLETED")
+
+=====================================================================================================
+
+# Performance, ROC, precision–recall and thresholds
+
+rows = []
+for name, d in frames.items():
+    r = dict(cohort=name, n=len(d), n_evaluated=0,
+             mean_pd_all=d["_p"].mean())
+    if name in evaluation:
+        r.update(performance(evaluation[name]))
+        r.update(n=len(d), n_evaluated=len(evaluation[name]))
+    rows.append(r)
+summary = pd.DataFrame(rows).set_index("cohort")
+show_table(summary, "02_performance")
+
+fig, axes = plt.subplots(1, 2, figsize=(10, 4))
+for name, d in evaluation.items():
+    if d["_y"].nunique() < 2:
+        continue
+    fpr, tpr, _ = roc_curve(d["_y"], d["_p"])
+    precision, recall, _ = precision_recall_curve(d["_y"], d["_p"])
+    axes[0].plot(fpr, tpr, label=name)
+    axes[1].plot(recall, precision, label=name)
+axes[0].plot([0, 1], [0, 1], "k--")
+axes[0].set(xlabel="False positive rate", ylabel="Recall", title="ROC")
+axes[1].set(xlabel="Recall", ylabel="Precision", title="Precision–recall")
+for ax in axes:
+    ax.legend()
+show_plot("02_discrimination")
+
+thresholds = pd.DataFrame([
+    dict(cohort=name, threshold=t, **performance(d, t))
+    for name, d in evaluation.items()
+    for t in [.01, .025, .05, .10, .20, .50]
+])
+show_table(thresholds, "02_threshold_sensitivity")
+
+=============================================================================================================
+
+# Calibration, uncertainty, gaps and bin counts
+
+fig, axes = plt.subplots(1, 3, figsize=(12, 3))
+for ax, (name, d) in zip(axes, frames.items()):
+    ax.hist(d["_p"], bins=30, edgecolor="white")
+    ax.set(title=f"{name}: n={len(d):,}", xlabel="Predicted probability")
+show_plot("03_probability_histograms")
+
+for name, d in evaluation.items():
+    t = calibration_table(d)
+    show_table(t, f"03_{name}_calibration")
+    fig, ax = plt.subplots(1, 3, figsize=(13, 3))
+
+    CalibrationDisplay.from_predictions(
+        d["_y"], d["_p"], n_bins=10, strategy="uniform",
+        pos_label=1, name=name, ax=ax[0]
+    )
+    ax[0].vlines(t["mean_pd"], t["lower"], t["upper"], color="gray")
+    ax[1].plot(t["mean_pd"], t["gap"], "o-")
+    ax[1].vlines(t["mean_pd"], t["lower"]-t["mean_pd"],
+                 t["upper"]-t["mean_pd"], color="gray")
+    ax[1].axhline(0, color="black", linestyle="--")
+    ax[1].set(xlabel="Mean predicted probability",
+              ylabel="Observed − predicted", title="Calibration gap")
+    ax[2].bar(t.index, t["n"])
+    ax[2].set(xlabel="Bin", ylabel="Count", title="Occupied bin counts")
+    show_plot(f"03_{name}_calibration")
+
+================================================================================================================
+
+# Binning sensitivity and experimental recalibration
+
+binning_results = []
+
+for name, d in evaluation.items():
+    fig, axes = plt.subplots(1, 2, figsize=(9, 3))
+    for ax, strategy in zip(axes, ["uniform", "quantile"]):
+        for bins in [5, 10, 20]:
+            t = calibration_table(d, bins, strategy)
+            ece = np.average(abs(t["gap"]), weights=t["n"])
+            binning_results.append(dict(cohort=name, strategy=strategy,
+                bins=bins, ece=ece, small_bins=int(t["small_bin"].sum())))
+            show_table(t, f"04_{name}_{strategy}_{bins}_bins")
+            ax.plot(t["mean_pd"], t["observed_rate"], "o-", label=str(bins))
+        ax.plot([0, 1], [0, 1], "k--")
+        ax.set(title=strategy, xlabel="Mean PD", ylabel="Observed bad rate")
+        ax.legend(title="Bins")
+    show_plot(f"04_{name}_binning")
+binning_results = pd.DataFrame(binning_results)
+show_table(binning_results, "04_binning_sensitivity")
+
+# Fit a calibrator on one subset; assess it on another.
+d = evaluation.get("test")
+if d is not None and d["_y"].value_counts().reindex([0, 1], fill_value=0).min() >= 4:
+    fit, assess = split_data(d)
+    if fit["_y"].nunique() == 2 and assess["_y"].nunique() == 2:
+        logit = lambda p: np.log(np.clip(p, 1e-6, 1-1e-6) /
+                                (1-np.clip(p, 1e-6, 1-1e-6))).reshape(-1, 1)
+        calibrator = LogisticRegression(C=1e6, max_iter=1000)
+        calibrator.fit(logit(fit["_p"].to_numpy()), fit["_y"])
+        revised = assess.copy()
+        revised["_p"] = calibrator.predict_proba(
+            logit(assess["_p"].to_numpy())
+        )[:, list(calibrator.classes_).index(1)]
+        show_table(pd.DataFrame({
+            "original": performance(assess),
+            "recalibrated": performance(revised)
+        }).T, "04_recalibration_experiment")
+
+========================================================================================================
+
+# Residuals, lift and temporal performance
+
+for name, d in evaluation.items():
+    residual = d["_y"] - d["_p"]
+    show_table(residual.describe().to_frame("residual"), f"05_{name}_residual")
+    fig, ax = plt.subplots(1, 2, figsize=(9, 3))
+    sample = d.sample(min(3000, len(d)), random_state=SEED)
+    ax[0].scatter(sample["_p"], sample["_y"]-sample["_p"], s=3, alpha=.2)
+    ax[0].set(xlabel="PD", ylabel="Target − PD")
+    ax[1].hist(residual, bins=30)
+    show_plot(f"05_{name}_residual")
+
+    # Keep tied scores together.
+    t = d.groupby("_p").agg(n=("_y", "size"), events=("_y", "sum"))
+    t = t.sort_index(ascending=False)
+    t["population_fraction"] = t["n"].cumsum() / len(d)
+    t["event_capture"] = t["events"].cumsum() / d["_y"].sum() if d["_y"].sum() else np.nan
+    t["lift"] = t["event_capture"] / t["population_fraction"]
+    show_table(t, f"05_{name}_lift")
+    plt.plot(t["population_fraction"], t["event_capture"], label=name)
+    plt.plot([0, 1], [0, 1], "k--")
+    plt.xlabel("Population fraction"); plt.ylabel("Bad-event capture")
+    plt.legend(); show_plot(f"05_{name}_gain")
+
+for name, d in frames.items():
+    c, fmt = DATE_COLUMNS[name]
+    if c not in d:
+        continue
+    dates = pd.to_datetime(
+        d[c].astype("string").str.replace(r"\.0$", "", regex=True),
+        format=fmt, errors="coerce"
+    )
+    record_status(name+"_dates", "REVIEW" if dates.isna().any() else "COMPLETED",
+                  f"{int(dates.isna().sum())} unparsed dates")
+    temp = d.assign(period=dates.dt.to_period("Y" if name=="train" else "M"))
+    t = temp.groupby("period").agg(n=("_p", "size"), mean_pd=("_p", "mean"))
+    if name in evaluation:
+        t["bad_rate"] = temp.groupby("period")["_y"].mean()
+        t["n_evaluated"] = temp.groupby("period")["_y"].count()
+    show_table(t, f"05_{name}_temporal")
+    t[["mean_pd"] + (["bad_rate"] if "bad_rate" in t else [])].plot()
+    show_plot(f"05_{name}_temporal")
+
+=================================================================================================================
+
+# Drift and optional bootstrap intervals
+
+reference = frames["test"]["_p"].to_numpy()
+edges = np.unique(np.quantile(reference, np.linspace(0, 1, 11)))
+if len(edges) < 2:
+    edges = np.array([np.nextafter(reference[0], -np.inf),
+                      np.nextafter(reference[0], np.inf)])
+edges[0], edges[-1] = -np.inf, np.inf
+
+drift = []
+for name, d in frames.items():
+    a = np.histogram(reference, edges)[0] + .5
+    b = np.histogram(d["_p"], edges)[0] + .5
+    a, b = a/a.sum(), b/b.sum()
+    drift.append(dict(cohort=name, score_psi_vs_test=np.sum((b-a)*np.log(b/a))))
+    p = np.sort(d["_p"].to_numpy())
+    plt.plot(p, np.arange(1, len(p)+1)/len(p), label=name)
+plt.xlabel("PD"); plt.ylabel("Cumulative fraction"); plt.legend()
+show_plot("06_score_drift")
+show_table(pd.DataFrame(drift), "06_score_psi")
+
+if RUN_BOOTSTRAP:
+    intervals = []
+    for name, d in evaluation.items():
+        rng = np.random.default_rng(SEED)
+        draws = pd.DataFrame([
+            performance(d.iloc[bootstrap_indices(d, rng)])
+            for _ in range(BOOTSTRAPS)
+        ])
+        for metric in ["auc", "brier", "log_loss", "bad_rate"]:
+            v = draws[metric].dropna()
+            intervals.append(dict(
+                cohort=name, metric=metric, estimate=performance(d)[metric],
+                lower=v.quantile(.025), upper=v.quantile(.975),
+                valid_bootstraps=len(v)
+            ))
+    show_table(pd.DataFrame(intervals), "06_bootstrap_intervals")
+else:
+    record_status("bootstrap", "SKIPPED", "RUN_BOOTSTRAP=False")
+
+==========================================================================================================
+
+# Reliability and weakness-region discovery
+
+d = evaluation.get("test")
+
+# Split-conformal prediction-set experiment.
+if d is not None and len(d) >= 20:
+    calibration, assess = split_data(d, stratify=False)
+    scores = np.where(calibration["_y"] == 1,
+                      1-calibration["_p"], calibration["_p"])
+    rank = int(np.ceil((len(scores)+1)*.90))
+    q = np.sort(scores)[rank-1] if rank <= len(scores) else np.inf
+    rows = []
+    for name, part in [("test_holdout", assess)] + [
+        ("val", evaluation["val"])
+    ] if "val" in evaluation else [("test_holdout", assess)]:
+        good, bad = part["_p"] <= q, 1-part["_p"] <= q
+        covered = np.where(part["_y"] == 1, bad, good)
+        rows.append(dict(cohort=name, n=len(part), coverage=covered.mean(),
+                         ambiguous=(good & bad).mean(),
+                         empty=(~good & ~bad).mean()))
+    show_table(pd.DataFrame(rows), "08_prediction_set_reliability")
+
+# Discover error regions, then assess them on a separate subset.
+if d is not None and len(d) >= 4*MIN_N:
+    discovery, confirmation = split_data(d, stratify=False)
+    cols = [c for c in FEATURES if c in d
+            and pd.api.types.is_numeric_dtype(d[c])]
+    cols = [c for c in cols if discovery[c].notna().any()]
+    if cols:
+        medians = discovery[cols].median()
+        tree = DecisionTreeRegressor(
+            max_depth=2, min_samples_leaf=MIN_N, random_state=SEED
+        ).fit(discovery[cols].fillna(medians),
+              (discovery["_y"]-discovery["_p"])**2)
+        print(export_text(tree, feature_names=cols))
+        confirmation = confirmation.assign(
+            region=tree.apply(confirmation[cols].fillna(medians))
+        )
+        show_table(pd.DataFrame([
+            dict(region=region, **performance(part))
+            for region, part in confirmation.groupby("region")
+        ]), "08_confirmed_error_regions")
+
+=====================================================================================================
+
+# Model replay, robustness, stress and explainability
+
+model = None
+if RUN_MODEL_TESTS:
+    import joblib
+    from sklearn.inspection import permutation_importance
+
+    model = joblib.load(MODEL_PATH)       # Trusted model artifact only
+    if set(model.classes_) != {0, 1}:
+        raise ValueError("Expected model classes 0 and 1")
+    expected = list(getattr(model, "feature_names_in_", FEATURES))
+    if set(expected) != set(FEATURES):
+        raise ValueError("Model feature names do not match FEATURES")
+    FEATURES = expected
+
+    def model_probability(X, estimator=None):
+        estimator = model if estimator is None else estimator
+        p = estimator.predict_proba(X)[:, list(estimator.classes_).index(1)]
+        if not (np.isfinite(p) & (p >= 0) & (p <= 1)).all():
+            raise ValueError("Invalid model probabilities")
+        return p
+
+    for name, d in frames.items():
+        X = d[FEATURES].copy()
+        base = model_probability(X)
+
+        # Full fitted model should not be compared to training OOF scores.
+        if name != "train":
+            show_table(pd.DataFrame([dict(
+                mean_absolute_gap=np.mean(abs(base-d["_p"])),
+                max_absolute_gap=np.max(abs(base-d["_p"]))
+            )]), f"09_{name}_replay")
+
+        changes = []
+        for c, direction in [("HPI_+4", -1), ("UE_+4", 1)]:
+            scale = pd.to_numeric(frames["train"][c], errors="coerce").std()
+            if not np.isfinite(scale) or scale == 0:
+                continue
+            rng = np.random.default_rng(SEED)
+            for label, delta in [
+                ("measurement_noise", rng.normal(0, .05*scale, len(X))),
+                ("statistical_stress", direction*.5*scale)
+            ]:
+                altered = X.copy()
+                altered[c] = pd.to_numeric(altered[c], errors="raise") + delta
+                p = model_probability(altered)
+                changes.append(dict(feature=c, scenario=label,
+                    mean_pd_change=np.mean(p-base),
+                    mean_absolute_change=np.mean(abs(p-base)),
+                    p95_absolute_change=np.quantile(abs(p-base), .95),
+                    threshold_flip_rate=np.mean((p>=THRESHOLD)!=(base>=THRESHOLD))))
+        show_table(pd.DataFrame(changes), f"09_{name}_sensitivity")
+
+        # Adjacent observed bin levels; no Gaussian noise on bin codes.
+        bin_changes = []
+        for c in ["CRD_SCORE_bin", "ACTLTV_bin", "DSR_DIFF_bin"]:
+            levels = np.sort(pd.to_numeric(
+                frames["train"][c], errors="raise").dropna().unique())
+            v = pd.to_numeric(X[c], errors="raise")
+            if not v.dropna().isin(levels).all():
+                raise ValueError(f"{name}: unseen {c} levels")
+            for step in [-1, 1]:
+                altered = X.copy()
+                pos = np.searchsorted(levels, v.fillna(levels[0]))
+                altered[c] = np.where(v.isna(), np.nan,
+                    levels[np.clip(pos+step, 0, len(levels)-1)])
+                p = model_probability(altered)
+                bin_changes.append(dict(feature=c, step=step,
+                    mean_pd_change=np.mean(p-base),
+                    mean_absolute_change=np.mean(abs(p-base))))
+        show_table(pd.DataFrame(bin_changes), f"09_{name}_bin_sensitivity")
+
+    for name, d in evaluation.items():
+        sample = d.sample(min(1500, len(d)), random_state=SEED)
+        if sample["_y"].nunique() < 2:
+            continue
+        result = permutation_importance(
+            model, sample[FEATURES], sample["_y"], scoring="roc_auc",
+            n_repeats=3, random_state=SEED
+        )
+        t = pd.DataFrame(dict(feature=FEATURES,
+            auc_drop=result.importances_mean,
+            repeat_sd=result.importances_std)).set_index("feature")
+        show_table(t, f"09_{name}_permutation_importance")
+        t["auc_drop"].sort_values().plot.barh()
+        show_plot(f"09_{name}_permutation_importance")
+
+    # Partial dependence using the full fitted pipeline.
+    X = frames["test"][FEATURES].sample(
+        min(1000, len(frames["test"])), random_state=SEED
+    )
+    for c in ["HPI_+4", "UE_+4"]:
+        grid = np.unique(np.nanquantile(pd.to_numeric(X[c]), np.linspace(.05,.95,10)))
+        means = [model_probability(X.assign(**{c: value})).mean() for value in grid]
+        plt.plot(grid, means, "o-")
+        plt.xlabel(c); plt.ylabel("Mean predicted probability")
+        show_plot(f"09_{c}_partial_dependence")
+else:
+    record_status("model_tests", "SKIPPED", "RUN_MODEL_TESTS=False")
+
+========================================================================================================
+
+# Optional SHAP for the XGBoost pipeline
+
+if RUN_SHAP:
+    if model is None:
+        raise ValueError("Enable RUN_MODEL_TESTS before SHAP")
+    import shap
+
+    X = frames["test"][FEATURES].sample(
+        min(300, len(frames["test"])), random_state=SEED
+    )
+    estimator = model.steps[-1][1]
+    if not hasattr(estimator, "get_booster"):
+        raise ValueError("This SHAP cell expects an XGBoost final estimator")
+
+    preprocessing = model[:-1]
+    transformed = preprocessing.transform(X)
+    if transformed.shape[0] * transformed.shape[1] > 5_000_000:
+        raise ValueError("Transformed SHAP matrix is too large")
+    if hasattr(transformed, "toarray"):
+        transformed = transformed.toarray()
+    try:
+        names = preprocessing.get_feature_names_out()
+    except (AttributeError, ValueError):
+        names = [f"transformed_feature_{i}"
+                 for i in range(transformed.shape[1])]
+
+    explainer = shap.TreeExplainer(
+        estimator, model_output="raw",
+        feature_perturbation="tree_path_dependent"
+    )
+    explanation = explainer(transformed, check_additivity=True)
+    if explanation.values.ndim != 2:
+        raise ValueError("Unexpected SHAP output shape")
+    margin = estimator.predict(transformed, output_margin=True)
+    if not np.allclose(
+        explanation.base_values + explanation.values.sum(axis=1),
+        margin, atol=1e-4, rtol=1e-4
+    ):
+        raise ValueError("SHAP margin reconstruction failed")
+
+    explanation.feature_names = list(names)
+    show_table(pd.DataFrame({
+        "mean_absolute_shap": abs(explanation.values).mean(axis=0)
+    }, index=names), "10_shap_importance")
+    shap.plots.beeswarm(explanation, show=False)
+    show_plot("10_shap_beeswarm")
+else:
+    record_status("SHAP", "SKIPPED", "RUN_SHAP=False")
+
+=========================================================================================================
+
+# CatBoost comparison and optional nested tuning
+
+# Difference = XGBoost minus CatBoost.
+comparison = []
+comparison_intervals = []
+
+for name, column in INCUMBENT_SCORE_COLUMNS.items():
+    if name not in evaluation:
+        continue
+    d = evaluation[name]
+    other = d.copy()
+    other["_p"] = pd.to_numeric(d[column], errors="raise").astype(float)
+    if not (np.isfinite(other["_p"]) & other["_p"].between(0, 1)).all():
+        raise ValueError(f"{name}: invalid challenger probabilities")
+
+    a, b = performance(d), performance(other)
+    for metric in ["auc", "average_precision", "brier", "log_loss"]:
+        comparison.append(dict(cohort=name, metric=metric,
+            xgboost=a[metric], catboost=b[metric], difference=a[metric]-b[metric]))
+
+    if RUN_BOOTSTRAP:
+        rng = np.random.default_rng(SEED)
+        draws = []
+        for _ in range(BOOTSTRAPS):
+            idx = bootstrap_indices(d, rng)
+            a, b = performance(d.iloc[idx]), performance(other.iloc[idx])
+            draws.append({m: a[m]-b[m]
+                          for m in ["auc", "average_precision", "brier", "log_loss"]})
+        for metric, v in pd.DataFrame(draws).items():
+            comparison_intervals.append(dict(cohort=name, metric=metric,
+                lower=v.quantile(.025), upper=v.quantile(.975),
+                valid_bootstraps=v.notna().sum()))
+
+show_table(pd.DataFrame(comparison), "11_challenger_comparison")
+show_table(pd.DataFrame(comparison_intervals), "11_paired_difference_intervals")
+
+# Positive AUC/AP differences favor XGBoost; negative Brier/log-loss differences favor XGBoost. 
+# Both models must use identical outcomes, horizons and records.
+
+if RUN_TUNING:
+    if model is None:
+        raise ValueError("Enable RUN_MODEL_TESTS before tuning")
+    d = evaluation["train"]
+    X, y = d[FEATURES], d["_y"]
+
+    def cv_splits(X, y, groups, folds):
+        cv = (StratifiedGroupKFold(folds, shuffle=True, random_state=SEED)
+              if groups is not None else
+              StratifiedKFold(folds, shuffle=True, random_state=SEED))
+        splits = list(cv.split(X, y, groups))
+        for a, b in splits:
+            if y.iloc[a].nunique() < 2 or y.iloc[b].nunique() < 2:
+                raise ValueError("A CV fold contains only one outcome class")
+        return splits
+
+    groups = d[GROUP_COLUMN] if GROUP_COLUMN else None
+    nested = []
+    for fold, (a, b) in enumerate(cv_splits(X, y, groups, 5), 1):
+        inner_groups = groups.iloc[a] if groups is not None else None
+        search = GridSearchCV(
+            clone(model), PARAM_GRID, scoring="roc_auc",
+            cv=cv_splits(X.iloc[a], y.iloc[a], inner_groups, 3),
+            n_jobs=1, error_score="raise"
+        ).fit(X.iloc[a], y.iloc[a])
+        assess = d.iloc[b].copy()
+        assess["_p"] = model_probability(X.iloc[b], search.best_estimator_)
+        nested.append(dict(fold=fold, **performance(assess)))
+    show_table(pd.DataFrame(nested), "11_nested_cv")
+
+    search = GridSearchCV(
+        clone(model), PARAM_GRID, scoring="roc_auc",
+        cv=cv_splits(X, y, groups, 3), n_jobs=1, error_score="raise"
+    ).fit(X, y)
+    show_table(pd.DataFrame(search.cv_results_), "11_tuning_results")
+    print("Best parameters:", search.best_params_)
+else:
+    record_status("tuning", "SKIPPED", "RUN_TUNING=False")
+
+
+==================================================================================================================
+
+# Approved checks and MLflow
+
+checks = []
+for cohort, metric, operator, limit in ACCEPTANCE_RULES:
+    value = summary.loc[cohort, metric]
+    if operator not in [">=", "<="]:
+        raise ValueError("Supported operators: >= and <=")
+    passed = (value >= limit if operator == ">=" else value <= limit)
+    checks.append(dict(cohort=cohort, metric=metric, value=value,
+                      operator=operator, limit=limit,
+                      status="PASS" if np.isfinite(value) and passed else "REVIEW"))
+show_table(pd.DataFrame(checks), "12_approved_checks")
+
+if RUN_MLFLOW:
+    import os, json, hashlib
+    import importlib.metadata as metadata
+    import mlflow
+
+    uri = os.getenv("MLFLOW_TRACKING_URI") or os.getenv("MLFLOW_TRACKING_SERVER_ARN")
+    if not uri:
+        raise ValueError("Set your authorized MLflow tracking URI/ARN")
+    mlflow.set_tracking_uri(uri)
+    mlflow.set_experiment("SMI3-independent-validation")
+
+    def sha256(path):
+        h = hashlib.sha256()
+        with open(path, "rb") as f:
+            for chunk in iter(lambda: f.read(1024*1024), b""):
+                h.update(chunk)
+        return h.hexdigest()
+
+    lineage = {name: sha256(path) for name, path in FILES.items()}
+    if model is not None:
+        lineage["model"] = sha256(MODEL_PATH)
+    versions = {}
+    for package in ["numpy", "pandas", "scikit-learn", "matplotlib",
+                    "mlflow", "xgboost", "shap"]:
+        try:
+            versions[package] = metadata.version(package)
+        except metadata.PackageNotFoundError:
+            versions[package] = "not installed"
+
+    config = dict(
+        files=FILES, target=TARGET, positive_class=1,
+        score_columns=SCORE_COLUMNS, maturity=MATURE,
+        allow_missing_target=ALLOW_MISSING_TARGET,
+        filters=POPULATION_FILTERS, features=FEATURES,
+        threshold=THRESHOLD, seed=SEED, group_column=GROUP_COLUMN,
+        bootstraps=BOOTSTRAPS, param_grid=PARAM_GRID,
+        acceptance_rules=ACCEPTANCE_RULES,
+        model_tests=RUN_MODEL_TESTS, shap=RUN_SHAP, tuning=RUN_TUNING
+    )
+    for filename, contents in [
+        ("configuration", config), ("lineage", lineage), ("versions", versions)
+    ]:
+        (OUTPUT / f"{filename}.json").write_text(
+            json.dumps(contents, indent=2, default=str)
+        )
+
+    with mlflow.start_run(run_name="train-test-val-validation"):
+        mlflow.log_params({"seed": SEED, "threshold": THRESHOLD,
+                           "positive_class": 1, "val_mature": MATURE["val"]})
+        for name, row in summary.iterrows():
+            for metric, value in row.items():
+                if isinstance(value, (int, float, np.number)) and np.isfinite(value):
+                    mlflow.log_metric(f"{name}_{metric}", float(value))
+        for _, row in binning_results.iterrows():
+            mlflow.log_metric(
+                f"{row['cohort']}_ece_{row['strategy']}_{int(row['bins'])}",
+                float(row["ece"])
+            )
+        mlflow.log_artifacts(str(OUTPUT), artifact_path="validation_evidence")
+    record_status("MLflow", "COMPLETED")
+else:
+    record_status("MLflow", "SKIPPED", "RUN_MLFLOW=False")
+
+display(pd.DataFrame(execution_status))
