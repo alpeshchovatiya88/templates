@@ -1,101 +1,98 @@
-# SECTION 3 — LOAD, CHECK AND AUDIT DATA
-from pathlib import Path
-from itertools import combinations
-import numpy as np
-import pandas as pd
+# SECTION 4 — PERFORMANCE, ROC, PR AND THRESHOLDS
+STATUS_COLUMN = "STATUS"   # Change to "STAUS" if needed
 
-frames, evaluation, data_audit, overlap = {}, {}, [], []
+# Full scored population: used for total n.
+test_all = frames["test"]
+declined_all = test_all[STATUS_COLUMN].astype("string").str.contains(
+    "declined", case=False, regex=False, na=False
+)
 
-for name, path in FILES.items():
-    df = pd.read_csv(
-        Path(path), dtype={ID_COLUMN: "string"}, low_memory=False
+# Labeled population: used for outcome metrics.
+test = evaluation["test"]
+declined = test[STATUS_COLUMN].astype("string").str.contains(
+    "declined", case=False, regex=False, na=False
+)
+
+populations = {
+    "train": frames["train"],
+    "test with declined": test_all,
+    "test without declined": test_all.loc[~declined_all],
+    "val": frames["val"],
+}
+scored = {
+    "test with declined": test,
+    "test without declined": test.loc[~declined],
+}
+for name in ["train", "val"]:
+    if name in evaluation:
+        scored[name] = evaluation[name]
+
+# 4A. Performance table
+rows = []
+for label, full in populations.items():
+    d = scored.get(label)
+    n_evaluated = len(d) if d is not None else 0
+
+    row = {
+        "population": label,
+        "n": len(full),
+        "n_evaluated": n_evaluated,
+        "n_not_evaluated": len(full) - n_evaluated,
+        "mean_pd_all": full["_p"].mean(),
+    }
+
+    if d is not None and not d.empty:
+        row.update(performance(d))
+        row["n"] = len(full)  # Preserve total population count.
+
+    rows.append(row)
+
+summary = pd.DataFrame(rows).set_index("population")
+show_table(summary, "02_performance")
+
+# 4B. ROC and precision–recall curves
+fig, axes = plt.subplots(1, 2, figsize=(12, 4))
+
+for label in populations:
+    d = scored.get(label)
+    if d is None or d["_y"].nunique() < 2:
+        continue
+
+    fpr, tpr, _ = roc_curve(d["_y"], d["_p"])
+    precision, recall, _ = precision_recall_curve(d["_y"], d["_p"])
+
+    axes[0].plot(
+        fpr, tpr,
+        label=f"{label} (AUC={roc_auc_score(d['_y'], d['_p']):.3f})"
     )
-    raw_rows = len(df)
+    axes[1].plot(recall, precision, label=label)
 
-    if POPULATION_FILTERS.get(name):
-        df = df.query(POPULATION_FILTERS[name], engine="python").copy()
-    df = df.reset_index(drop=True)
+axes[0].plot([0, 1], [0, 1], "k--")
+axes[0].set(title="ROC", xlabel="False positive rate", ylabel="Recall")
+axes[1].set(
+    title="Precision–recall", xlabel="Recall", ylabel="Precision"
+)
+for ax in axes:
+    ax.legend(fontsize=8)
 
-    required = [ID_COLUMN, SCORE_COLUMNS[name]]
-    required += [GROUP_COLUMN] if GROUP_COLUMN else []
-    required += [TARGET] if MATURE[name] else []
-    absent = [c for c in required if c not in df.columns]
-    if absent:
-        raise ValueError(f"{name}: missing columns {absent}")
-    if df.empty:
-        raise ValueError(f"{name}: no eligible rows")
+show_plot("02_discrimination_with_without_declined")
 
-    for column in [ID_COLUMN] + ([GROUP_COLUMN] if GROUP_COLUMN else []):
-        values = df[column].astype("string")
-        if (values.isna() | values.str.strip().eq("")).any():
-            raise ValueError(f"{name}: missing/blank {column}")
-    if df[ID_COLUMN].duplicated().any():
-        raise ValueError(f"{name}: duplicate application IDs")
+# 4C. Threshold sensitivity
+threshold_rows = []
+for label in populations:
+    d = scored.get(label)
+    if d is None or d.empty:
+        continue
 
-    df["_p"] = pd.to_numeric(
-        df[SCORE_COLUMNS[name]], errors="coerce"
-    ).to_numpy(dtype=float, na_value=np.nan)
-    if not (np.isfinite(df["_p"]) & df["_p"].between(0, 1)).all():
-        raise ValueError(f"{name}: invalid probabilities")
-
-    df = df.drop(columns="_y", errors="ignore")
-    labeled_rows = missing_targets = 0
-
-    if MATURE[name]:
-        text = df[TARGET].astype("string").str.strip()
-        missing = text.isna() | text.eq("").fillna(False)
-        y = pd.to_numeric(text, errors="coerce")
-        valid = y.isin([0, 1])
-
-        if ((~missing) & (~valid)).any():
-            raise ValueError(f"{name}: unexpected target codes")
-        if missing.any() and name != "test":
-            raise ValueError(f"{name}: missing mature outcomes")
-        if not valid.any():
-            raise ValueError(f"{name}: no labeled outcomes")
-
-        df["_y"] = y.to_numpy(dtype=float, na_value=np.nan)
-        evaluation[name] = df.loc[valid].copy()
-        evaluation[name]["_y"] = evaluation[name]["_y"].astype(int)
-        labeled_rows = int(valid.sum())
-        missing_targets = int(missing.sum())
-
-        if missing_targets:
-            record_status(
-                f"{name}_target_completeness", "REVIEW",
-                "Exploratory labeled-subset evaluation; "
-                "maturity and missing-outcome cause unconfirmed."
-            )
-
-    frames[name] = df
-    data_audit.append({
-        "cohort": name, "raw_rows": raw_rows,
-        "eligible_rows": len(df), "mature": MATURE[name],
-        "evaluated_rows": labeled_rows,
-        "missing_targets": missing_targets if MATURE[name] else np.nan,
-    })
-
-show_table(pd.DataFrame(data_audit), "01_population_audit")
-show_table(pd.DataFrame({
-    name: df.drop(columns=["_p", "_y"], errors="ignore").isna().mean()
-    for name, df in frames.items()
-}), "01_missingness")
-
-for first, second in combinations(frames, 2):
-    for column in dict.fromkeys(
-        [ID_COLUMN] + ([GROUP_COLUMN] if GROUP_COLUMN else [])
-    ):
-        shared = len(
-            set(frames[first][column].astype("string"))
-            & set(frames[second][column].astype("string"))
-        )
-        overlap.append({
-            "first": first, "second": second,
-            "identifier": column, "shared_identifiers": shared,
+    for threshold in [.01, .025, .05, .10, .20, .50]:
+        metrics = performance(d, threshold)
+        metrics["n"] = len(populations[label])
+        threshold_rows.append({
+            "population": label,
+            "threshold": threshold,
+            "n_evaluated": len(d),
+            **metrics,
         })
 
-show_table(pd.DataFrame(overlap), "01_overlap")
-if any(row["shared_identifiers"] for row in overlap):
-    record_status("population_overlap", "REVIEW", "Shared IDs detected.")
-
-record_status("data_controls", "COMPLETED", "Loading checks completed.")
+thresholds = pd.DataFrame(threshold_rows)
+show_table(thresholds, "02_threshold_sensitivity")
