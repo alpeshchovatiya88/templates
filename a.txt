@@ -1,122 +1,246 @@
-# SECTION 4 — PERFORMANCE, ROC, PR AND THRESHOLDS
-STATUS_COLUMN = "STATUS"   # Change to "STAUS" if needed
+# SECTION 7 — RESIDUALS, GAIN/LIFT AND TEMPORAL RESULTS
 
-# Full scored population: used for total n.
-test_all = frames["test"]
-declined_all = test_all[STATUS_COLUMN].astype("string").str.contains(
+from matplotlib.ticker import PercentFormatter
+
+STATUS_COLUMN = "STATUS"  # Change only if your CSV uses another spelling
+
+# Verify these columns define the population dates.
+# Change a column only after confirming its meaning.
+DATE_COLUMNS = {
+    "train": ("BOOKYEAR", "%Y"),
+    "test":  ("EFFECT_SID", "%Y%m"),
+    "val":   ("EFFECT_SID", "%Y%m"),
+}
+EXPECTED_WINDOWS = {
+    "train": ("2009-01-01", "2015-12-31"),
+    "test":  ("2021-01-01", "2023-12-31"),
+    "val":   ("2025-10-01", "2026-06-30"),
+}
+
+def report(table, filename, title):
+    print(f"\n{title}")
+    show_table(table, filename)
+
+declined = frames["test"][STATUS_COLUMN].astype("string").str.contains(
     "declined", case=False, regex=False, na=False
 )
 
-# Labeled population: used for outcome metrics.
-test = evaluation["test"]
-declined = test[STATUS_COLUMN].astype("string").str.contains(
-    "declined", case=False, regex=False, na=False
-)
-
-populations = {
-    "train": frames["train"],
-    "test with declined": test_all,
-    "test without declined": test_all.loc[~declined_all],
-    "val": frames["val"],
+datasets = {
+    "train": ("train", frames["train"]),
+    "test_with_declined": ("test", frames["test"]),
+    "test_without_declined": ("test", frames["test"].loc[~declined]),
+    "val": ("val", frames["val"]),
 }
-scored = {
-    "test with declined": test,
-    "test without declined": test.loc[~declined],
-}
-for name in ["train", "val"]:
-    if name in evaluation:
-        scored[name] = evaluation[name]
 
-# 4A. Performance table
-rows = []
-for label, full in populations.items():
-    d = scored.get(label)
-    n_evaluated = len(d) if d is not None else 0
+for key, (cohort, source) in datasets.items():
+    full = source.copy()
+    title = key.replace("_", " ").upper()
 
-    row = {
-        "population": label,
+    # Rebuild outcomes by application ID; preserve missing outcomes.
+    full["_y"] = np.nan
+    if MATURE[cohort] and cohort in evaluation:
+        labels = evaluation[cohort].set_index(ID_COLUMN)["_y"]
+        if not labels.index.is_unique:
+            raise ValueError(f"{cohort}: duplicate evaluated IDs")
+        full["_y"] = full[ID_COLUMN].map(labels)
+
+    d = full.loc[full["_y"].notna()].copy()
+    subtitle = f"total n={len(full):,}; evaluated n={len(d):,}"
+
+    report(pd.DataFrame([{
+        "population": title,
         "n": len(full),
-        "n_evaluated": n_evaluated,
-        "n_not_evaluated": len(full) - n_evaluated,
-        "mean_pd_all": full["_p"].mean(),
-    }
+        "n_evaluated": len(d),
+        "n_not_evaluated": len(full) - len(d),
+    }]), f"05_{key}_population", f"{title} — {subtitle}")
 
-    if d is not None and not d.empty:
-        row.update(performance(d))
-        row["n"] = len(full)  # Preserve total population count.
+    # --------------------------------------------------------
+    # A. Residuals: actual target minus predicted probability
+    # --------------------------------------------------------
+    if not d.empty:
+        residual = d["_y"] - d["_p"]
+        report(
+            residual.describe().to_frame("target_minus_PD"),
+            f"05_{key}_residual",
+            f"{title} — residual summary; evaluated n={len(d):,}",
+        )
 
-    rows.append(row)
+        sample = d.sample(min(3000, len(d)), random_state=SEED)
+        fig, axes = plt.subplots(1, 2, figsize=(11, 3.5))
+        fig.suptitle(f"{title} — residual diagnostics")
 
-summary = pd.DataFrame(rows).set_index("population")
-show_table(summary, "02_performance")
+        for target, label in [(0, "Actual good"), (1, "Actual bad")]:
+            part = sample.loc[sample["_y"] == target]
+            axes[0].scatter(
+                part["_p"], part["_y"] - part["_p"],
+                s=8, alpha=.4, label=label,
+            )
+        axes[0].set(
+            title=f"Sample: {len(sample):,} evaluated records",
+            xlabel="Predicted bad-event probability",
+            ylabel="Target − predicted probability",
+        )
+        axes[0].legend()
 
-# 4B. ROC and precision–recall curves
-fig, axes = plt.subplots(1, 2, figsize=(12, 4))
+        axes[1].hist(residual, bins=30)
+        axes[1].set(
+            title=f"All {len(d):,} evaluated records",
+            xlabel="Target − predicted probability",
+            ylabel="Record count",
+        )
+        show_plot(f"05_{key}_residual")
 
-for label in populations:
-    d = scored.get(label)
-    if d is None or d["_y"].nunique() < 2:
+        # ----------------------------------------------------
+        # B. Cumulative gain/lift; keep equal scores together
+        # ----------------------------------------------------
+        t = d.groupby("_p").agg(
+            n=("_y", "size"), events=("_y", "sum")
+        ).sort_index(ascending=False)
+
+        t["cumulative_n"] = t["n"].cumsum()
+        t["cumulative_bad_events"] = t["events"].cumsum()
+        t["population_fraction"] = t["cumulative_n"] / len(d)
+
+        total_events = d["_y"].sum()
+        t["event_capture"] = (
+            t["cumulative_bad_events"] / total_events
+            if total_events else np.nan
+        )
+        t["lift"] = t["event_capture"] / t["population_fraction"]
+
+        # Show top 10%, 20%, ... 100%, including complete ties.
+        requested = np.arange(1, 11) / 10
+        positions = np.minimum(
+            np.searchsorted(t["cumulative_n"],
+                            np.ceil(requested * len(d))),
+            len(t) - 1,
+        )
+        lift = t.iloc[positions][[
+            "cumulative_n", "cumulative_bad_events",
+            "population_fraction", "event_capture", "lift",
+        ]].copy()
+        lift.index = pd.Index(
+            (requested * 100).astype(int),
+            name="requested_top_percent",
+        )
+        report(
+            lift, f"05_{key}_lift_summary",
+            f"{title} — cumulative lift; evaluated n={len(d):,}",
+        )
+
+        fig, ax = plt.subplots(figsize=(6, 4))
+        ax.plot(
+            np.r_[0, t["population_fraction"]],
+            np.r_[0, t["event_capture"]],
+            label=title,
+        )
+        ax.plot([0, 1], [0, 1], "k--", label="Random selection")
+        ax.set(
+            title=f"{title} — cumulative bad-event capture",
+            xlabel="Highest-risk fraction of evaluated population",
+            ylabel="Fraction of all bad events captured",
+            xlim=(0, 1), ylim=(0, 1),
+        )
+        ax.xaxis.set_major_formatter(PercentFormatter(1))
+        ax.yaxis.set_major_formatter(PercentFormatter(1))
+        ax.legend()
+        show_plot(f"05_{key}_gain")
+    else:
+        print(f"{title}: no outcome diagnostics; maturity/labels unavailable.")
+
+    # --------------------------------------------------------
+    # C. Audit dates BEFORE producing temporal results
+    # --------------------------------------------------------
+    column, fmt = DATE_COLUMNS[cohort]
+    if column not in full:
+        print(f"{title}: temporal results skipped; {column!r} missing.")
         continue
 
-    fpr, tpr, _ = roc_curve(d["_y"], d["_p"])
-    precision, recall, _ = precision_recall_curve(d["_y"], d["_p"])
+    raw = full[column].astype("string").str.strip()
+    raw = raw.str.replace(r"\.0$", "", regex=True)
+    dates = pd.to_datetime(raw, format=fmt, errors="coerce")
+    start, end = EXPECTED_WINDOWS[cohort]
+    invalid = dates.isna()
+    outside = dates.notna() & ~dates.between(start, end)
 
-    axes[0].plot(
-        fpr, tpr,
-        label=f"{label} (AUC={roc_auc_score(d['_y'], d['_p']):.3f})"
+    report(pd.DataFrame([{
+        "date_column": column,
+        "expected_start": start,
+        "expected_end": end,
+        "earliest_parsed_date": dates.min(),
+        "latest_parsed_date": dates.max(),
+        "n": len(full),
+        "unparsed_dates": int(invalid.sum()),
+        "outside_window": int(outside.sum()),
+    }]), f"05_{key}_date_audit", f"{title} — date audit")
+
+    if invalid.any() or outside.any():
+        unexpected = (
+            raw.loc[invalid | outside]
+            .fillna("<MISSING>")
+            .value_counts()
+            .rename_axis("source_date_value")
+            .to_frame("rows")
+        )
+        report(
+            unexpected, f"05_{key}_unexpected_dates",
+            f"{title} — unexpected source dates in {column}",
+        )
+        record_status(
+            key + "_temporal", "REVIEW",
+            "Unexpected dates; reconcile date column and population."
+        )
+        print(f"{title}: temporal chart skipped. No records were deleted.")
+        continue
+
+    full["period"] = dates.dt.to_period(
+        "Y" if cohort == "train" else "M"
     )
-    axes[1].plot(recall, precision, label=label)
+    full["_p_evaluated"] = full["_p"].where(full["_y"].notna())
 
-axes[0].plot([0, 1], [0, 1], "k--")
-axes[0].set(title="ROC", xlabel="False positive rate", ylabel="Recall")
-axes[1].set(
-    title="Precision–recall", xlabel="Recall", ylabel="Precision"
-)
-for ax in axes:
-    ax.legend(fontsize=8)
+    temporal = full.groupby("period").agg(
+        n=("_p", "size"),
+        n_evaluated=("_y", "count"),
+        mean_pd_all=("_p", "mean"),
+        mean_pd_evaluated=("_p_evaluated", "mean"),
+        bad_rate=("_y", "mean"),
+    )
+    temporal["n_not_evaluated"] = temporal["n"] - temporal["n_evaluated"]
 
-show_plot("02_discrimination_with_without_declined")
+    assert temporal["n"].sum() == len(full)
+    assert temporal["n_evaluated"].sum() == len(d)
 
-# 4C. Threshold sensitivity
-threshold_rows = []
-for label in populations:
-    d = scored.get(label)
-    if d is None or d.empty:
-        continue
+    report(
+        temporal, f"05_{key}_temporal_checked",
+        f"{title} — temporal results grouped by {column}",
+    )
 
-    for threshold in [.01, .025, .05, .10, .20, .50]:
-        metrics = performance(d, threshold)
-        metrics["n"] = len(populations[label])
-        threshold_rows.append({
-            "population": label,
-            "threshold": threshold,
-            "n_evaluated": len(d),
-            **metrics,
-        })
+    # Use actual observed periods as labels.
+    x = np.arange(len(temporal))
+    fig, axes = plt.subplots(1, 2, figsize=(12, 4))
+    fig.suptitle(f"{title} — temporal diagnostics by {column}")
 
-thresholds = pd.DataFrame(threshold_rows)
-show_table(thresholds, "02_threshold_sensitivity")
+    if len(d):
+        axes[0].plot(x, temporal["mean_pd_evaluated"], "o-",
+                     label="Mean PD — evaluated records")
+        axes[0].plot(x, temporal["bad_rate"], "o-",
+                     label="Bad rate — same evaluated records")
+    else:
+        axes[0].plot(x, temporal["mean_pd_all"], "o-",
+                     label="Mean PD — all scored records")
 
+    axes[0].set(title="Predicted and observed rates", ylabel="Rate")
+    axes[0].yaxis.set_major_formatter(PercentFormatter(1))
+    axes[0].legend(fontsize=8)
 
-================
+    axes[1].plot(x, temporal["n"], "o-", label="All scored records")
+    axes[1].plot(x, temporal["n_evaluated"], "o-", label="Evaluated records")
+    axes[1].set(title="Population counts", ylabel="Record count")
+    axes[1].legend(fontsize=8)
 
+    for ax in axes:
+        ax.set_xticks(x)
+        ax.set_xticklabels(temporal.index.astype(str), rotation=90)
+        ax.set_xlabel("Observed period")
 
-normal_distress = baseline + age_adjustment
-
-low_ltv = df["ACTLTV"].le(threshold)
-
-df["low_ltv"] = low_ltv
-
-# Original method
-df["result_where"] = normal_distress.where(
-    ~low_ltv, distress_low_ltv
-)
-
-# New method
-df["result_mask"] = normal_distress.mask(
-    low_ltv, distress_low_ltv
-)
-
-display(df)
-
-
+    show_plot(f"05_{key}_temporal_checked")
