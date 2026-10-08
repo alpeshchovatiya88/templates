@@ -101,129 +101,22 @@ show_table(thresholds, "02_threshold_sensitivity")
 ================
 
 
-import pandas as pd
-import numpy as np
+normal_distress = baseline + age_adjustment
 
-df = pd.DataFrame({
-    "ACTLTV": [75, 80, 81, 90, 95, np.nan],
-    "market": ["A", "A", "A", "C", None, "A"],
-    "tenure": ["C", "C", "C", "F", "C", "C"],
-    "age_at_claim": [28, 28, 28, 30, 28, 28],
-    "baseline": [0.30, 0.30, 0.30, 0.35, 0.30, 0.30],
-    "age_adjustment": [0.03, 0.03, 0.03, 0.05, 0.03, 0.03]
-})
-
-df
-
-=======
-
-
-market = df["market"]
-tenure = df["tenure"]
-age_at_claim = df["age_at_claim"]
-baseline = df["baseline"]
-age_adjustment = df["age_adjustment"]
-
-# YAML parameters
-distress_low_ltv_threshold = 80
-distress_low_ltv = 0.19
-
-# Exact logic from your code
-low_ltv = df["ACTLTV"].le(
-    float(distress_low_ltv_threshold)
-)
-
-df["distress_factor_perc_lgd"] = (
-    (baseline + age_adjustment)
-    .where(~low_ltv, float(distress_low_ltv))
-    .where(
-        market.notna()
-        & tenure.notna()
-        & age_at_claim.notna()
-        & df["ACTLTV"].notna()
-    )
-    .astype("float64")
-)
-
-df
-
-=========
-
-
-expected = pd.Series(
-    [0.19, 0.19, 0.33, 0.40, np.nan, np.nan],
-    index=df.index
-)
-
-df["expected"] = expected
-
-df["passed"] = np.isclose(
-    df["distress_factor_perc_lgd"],
-    df["expected"],
-    equal_nan=True
-)
-
-display(df[[
-    "ACTLTV",
-    "baseline",
-    "age_adjustment",
-    "distress_factor_perc_lgd",
-    "expected",
-    "passed"
-]])
-
-assert df["passed"].all(), "Logic test failed!"
-
-print("All distress logic tests passed!")
-
-
-============
-
+low_ltv = df["ACTLTV"].le(threshold)
 
 df["low_ltv"] = low_ltv
-df["not_low_ltv"] = ~low_ltv
 
-df["before_override"] = baseline + age_adjustment
-
-df["after_override"] = (
-    (baseline + age_adjustment)
-    .where(~low_ltv, distress_low_ltv)
+# Original method
+df["result_where"] = normal_distress.where(
+    ~low_ltv, distress_low_ltv
 )
 
-df["valid_inputs"] = (
-    market.notna()
-    & tenure.notna()
-    & age_at_claim.notna()
-    & df["ACTLTV"].notna()
+# New method
+df["result_mask"] = normal_distress.mask(
+    low_ltv, distress_low_ltv
 )
 
-display(df[[
-    "ACTLTV",
-    "low_ltv",
-    "not_low_ltv",
-    "before_override",
-    "after_override",
-    "valid_inputs",
-    "distress_factor_perc_lgd"
-]])
+display(df)
 
 
-===========
-
-
-test_ltv = pd.Series([79.99, 80.00, 80.01, 81.00])
-
-base_distress = pd.Series([0.33] * len(test_ltv))
-
-low_ltv_test = test_ltv.le(80)
-
-final_distress = base_distress.where(
-    ~low_ltv_test,
-    0.19
-)
-
-display(pd.DataFrame({
-    "ACTLTV": test_ltv,
-    "low_ltv": low_ltv_test,
-    "final_distress": final_distress
-}))
