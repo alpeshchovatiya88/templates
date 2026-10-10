@@ -1,18 +1,83 @@
-# Validate and pass CatBoost hyperparameters
-hyperparameters = config.get("hyperparameters")
+# ============================================================
+# CATBOOST TRAINING
+# ============================================================
 
-if not isinstance(hyperparameters, dict) or not hyperparameters:
-    raise ValueError(
-        f"Missing hyperparameters in {config_file}. "
-        f"Available config keys: {list(config.keys())}"
-    )
+hyperparameters:
+  label: "target"
+  random_state: 42
+  n_splits: 5
+  scoring: "roc_auc"
+  use_grid_search: true
+  stratify_cols: ["target", "ECON_REGION", "BOOKYEAR", "CRD_SCORE_bin"]
 
-if "catboost_params" not in hyperparameters:
-    raise ValueError(
-        "catboost_params missing from train_config.yaml"
-    )
+  # ==========================================================
+  # CATBOOST MODEL
+  # ==========================================================
 
-pipeline_kwargs["hyperparameters"] = hyperparameters
+  catboost_params:
+    iterations: 400
+    learning_rate: 0.06
+    depth: 6
+    loss_function: "Logloss"
+    eval_metric: "AUC"
+    thread_count: -1
+    random_state: 42
+    verbose: false
+    allow_writing_files: false
 
-print("CatBoost hyperparameters loaded successfully")
-print("Hyperparameter keys:", list(hyperparameters.keys()))
+    monotone_constraints:
+      CRA_JUDGEMENT: 1
+      CRA_BANKRUPTCY_FORECLOSURE_IND: 1
+      DSR_DIFF_bin: 1
+      PRD_PORT: -1
+      CRD_SCORE_bin: -1
+      ACTLTV_bin: 1
+      NUM_OF_BOR_bin: -1
+      PRD_LOAN_PURPOSE_bin: -1
+      POD_MARKET_CODE_bin: 1
+
+  binary_monotone_cols: ["CRA_JUDGEMENT", "CRA_BANKRUPTCY_FORECLOSURE_IND", "PRD_PORT"]
+
+  ord_cols: ["CRD_SCORE_bin", "PRK_NUM_OF_UNITS", "NUM_OF_BOR_bin", "PRD_LOAN_PURPOSE_bin", "POD_MARKET_CODE_bin"]
+
+  # ==========================================================
+  # OPTIONAL GRID SEARCH
+  # ==========================================================
+
+  catboost_grid:
+    iterations: [200, 400]
+    depth: [4, 6, 8]
+    learning_rate: [0.03, 0.06]
+
+  # ==========================================================
+  # SHAP
+  # ==========================================================
+
+  compute_shap: "True"
+  shap_sample: 5000
+  shap_top_k: 5
+  shap_subgroups: ["All"]
+  shap_dep_enabled: "True"
+  shap_interaction_index: null
+  shap_max_levels: 12
+  shap_min_rows: 200
+
+# ============================================================
+# ANALYSIS-ONLY / EXCLUDED MODEL FEATURES
+# ============================================================
+
+exclude_from_training:
+  - "ACTLTV"
+  - "APPLICATION_NUMBER"
+  - "BOOKYEAR"
+  - "BORYREMP"
+  - "category"
+  - "CRA_COLLECTION"
+  - "CRD_MONTHS_TU"
+  - "CRD_OPEN_TRADE_TU"
+  - "CRD_PUBLIC_DEROG_TU"
+  - "CRD_SCORE"
+  - "CRD_SCORE_avg"
+  - "CRD_SCORE_max"
+  - "DSR_DIFF"
+  - "ECON_REGION"
