@@ -2,36 +2,50 @@
 import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
+import ipywidgets as widgets
+from IPython.display import display
 
-def plot_seed_stats(
+def plot_seed_sensitivity(
     dfs,
     decile_col,
     value_col,
     region_col="ECON_REGION",
     agg="sum",
-    title=None,
-    decimals=2
+    baseline="RS42",
+    decimals=2,
+    title=None
 ):
+    if baseline not in dfs:
+        raise ValueError(f"{baseline} must be included in dfs")
+
     seeds = list(dfs)
-    colors = ["#2563EB", "#F97316", "#10B981", "#8B5CF6"]
+    palette = ["#2563EB", "#F97316", "#10B981", "#8B5CF6"]
+    colors = {
+        seed: palette[i % len(palette)]
+        for i, seed in enumerate(seeds)
+    }
 
     def fmt(v):
         if pd.isna(v):
-            return "—"
+            return "N/A"
         if abs(v) >= 1e6:
             return f"{v / 1e6:,.2f}M"
         if abs(v) >= 1e3:
             return f"{v / 1e3:,.2f}K"
         return f"{v:,.{decimals}f}"
 
+    def signed(v):
+        return f"{'+' if v > 0 else ''}{fmt(v)}" if pd.notna(v) else "N/A"
+
     # Prepare data
     frames = []
 
     for seed, df in dfs.items():
         temp = df[[decile_col, value_col, region_col]].copy()
+
         temp["Seed"] = seed
         temp["Decile"] = pd.to_numeric(
-            temp[decile_col].astype(str).str.extract(
+            temp[decile_col].astype("string").str.extract(
                 r"(\d+)", expand=False
             ),
             errors="coerce"
@@ -47,252 +61,220 @@ def plot_seed_stats(
 
     deciles = sorted(data["Decile"].unique())
     regions = sorted(data[region_col].dropna().unique(), key=str)
-    region_options = ["All Regions"] + list(regions)
 
-    # Precompute statistics for every region
-    region_stats = {}
+    decile_filter = widgets.Dropdown(
+        options=[("All Deciles", None)] +
+                [(f"Decile {d}", d) for d in deciles],
+        value=None,
+        description="Decile:"
+    )
 
-    for region in region_options:
-        subset = (
-            data if region == "All Regions"
-            else data[data[region_col] == region]
-        )
+    region_filter = widgets.Dropdown(
+        options=[("All Regions", None)] +
+                [(str(r), r) for r in regions],
+        value=None,
+        description="ECON_REGION:",
+        style={"description_width": "initial"}
+    )
 
-        stats = (
-            subset.groupby(["Seed", "Decile"])[value_col]
-            .agg(
-                total=agg,
-                min="min",
-                max="max",
-                avg="mean",
-                p10=lambda x: x.quantile(0.10),
-                p20=lambda x: x.quantile(0.20),
-                p50=lambda x: x.quantile(0.50)
-            )
-        )
+    output = widgets.Output()
 
-        region_stats[str(region)] = stats
+    def update_chart(change=None):
+        with output:
+            output.clear_output(wait=True)
 
-    fig = go.Figure()
+            subset = data
 
-    # Build traces for every region and seed
-    # Region dropdown switches between these traces
-    for region in region_options:
-        stats = region_stats[str(region)]
+            if region_filter.value is not None:
+                subset = subset[
+                    subset[region_col] == region_filter.value
+                ]
 
-        for i, seed in enumerate(seeds):
-            if seed in stats.index.get_level_values("Seed"):
-                rows = stats.xs(seed, level="Seed")
-            else:
-                rows = pd.DataFrame()
+            if decile_filter.value is not None:
+                subset = subset[
+                    subset["Decile"] == decile_filter.value
+                ]
 
-            totals = []
-            labels = []
-            inside_labels = []
-            hover_labels = []
-
-            for d in deciles:
-                if d in rows.index:
-                    r = rows.loc[d]
-                    total = r["total"]
-
-                    totals.append(total)
-                    labels.append(f"<b>{fmt(total)}</b>")
-
-                    inside_labels.append(
-                        f"<b>Min:</b> {fmt(r['min'])}<br>"
-                        f"<b>Max:</b> {fmt(r['max'])}<br>"
-                        f"<b>Avg:</b> {fmt(r['avg'])}<br>"
-                        f"<b>P10:</b> {fmt(r['p10'])}<br>"
-                        f"<b>P20:</b> {fmt(r['p20'])}<br>"
-                        f"<b>P50:</b> {fmt(r['p50'])}"
-                    )
-
-                    hover_labels.append(
-                        f"<b>Seed:</b> {seed}<br>"
-                        f"<b>Region:</b> {region}<br>"
-                        f"<b>Decile:</b> {d}<br>"
-                        f"<b>Total:</b> {total:,.{decimals}f}<br>"
-                        f"<b>Min:</b> {r['min']:,.{decimals}f}<br>"
-                        f"<b>Max:</b> {r['max']:,.{decimals}f}<br>"
-                        f"<b>Avg:</b> {r['avg']:,.{decimals}f}<br>"
-                        f"<b>P10:</b> {r['p10']:,.{decimals}f}<br>"
-                        f"<b>P20:</b> {r['p20']:,.{decimals}f}<br>"
-                        f"<b>P50:</b> {r['p50']:,.{decimals}f}"
-                    )
-                else:
-                    totals.append(np.nan)
-                    labels.append("")
-                    inside_labels.append("")
-                    hover_labels.append("No data")
-
-            fig.add_trace(go.Bar(
-                x=[str(d) for d in deciles],
-                y=totals,
-                name=seed,
-                legendgroup=seed,
-                showlegend=(region == "All Regions"),
-                visible=(region == "All Regions"),
-                marker_color=colors[i % len(colors)],
-                text=labels,
-                textposition="outside",
-                textfont=dict(
-                    size=13,
-                    color="black",
-                    family="Arial Black"
-                ),
-                cliponaxis=False,
-                customdata=hover_labels,
-                hovertemplate="%{customdata}<extra></extra>"
-            ))
-
-    # Add text annotations for selected decile
-    # Annotations are updated by the dropdowns
-    def make_annotations(region, selected_decile):
-        if selected_decile is None:
-            return []
-
-        stats = region_stats[str(region)]
-        annotations = []
-
-        for seed in seeds:
-            key = (seed, selected_decile)
-
-            if key not in stats.index:
-                continue
-
-            r = stats.loc[key]
-
-            details = (
-                f"<b>Min: {fmt(r['min'])}</b><br>"
-                f"<b>Max: {fmt(r['max'])}</b><br>"
-                f"<b>Avg: {fmt(r['avg'])}</b><br>"
-                f"<b>P10: {fmt(r['p10'])}</b><br>"
-                f"<b>P20: {fmt(r['p20'])}</b><br>"
-                f"<b>P50: {fmt(r['p50'])}</b>"
-            )
-
-            # Place text inside the selected bar
-            annotations.append(dict(
-                x=str(selected_decile),
-                y=r["total"] / 2,
-                text=details,
-                showarrow=False,
-                font=dict(size=10, color="white"),
-                align="center"
-            ))
-
-        return annotations
-
-    # REGION DROPDOWN
-    region_buttons = []
-
-    for j, region in enumerate(region_options):
-        visible = [
-            j * len(seeds) <= k < (j + 1) * len(seeds)
-            for k in range(len(fig.data))
-        ]
-
-        showlegend = [
-            visible[k]
-            for k in range(len(fig.data))
-        ]
-
-        region_buttons.append(dict(
-            label=str(region),
-            method="update",
-            args=[
-                {
-                    "visible": visible,
-                    "showlegend": showlegend
-                },
-                {
-                    "title.text": (
-                        f"{title or value_col + ' by Decile'}"
-                        f" | ECON_REGION: {region}"
-                    ),
-                    "annotations": []
-                }
-            ]
-        ))
-
-    # DECILE DROPDOWN
-    decile_buttons = [
-        dict(
-            label="All Deciles",
-            method="relayout",
-            args=[{
-                "xaxis.range": [-0.5, len(deciles) - 0.5],
-                "yaxis.autorange": True,
-                "annotations": []
-            }]
-        )
-    ]
-
-    for i, d in enumerate(deciles):
-        decile_buttons.append(dict(
-            label=f"Decile {d}",
-            method="relayout",
-            args=[{
-                "xaxis.range": [i - 0.5, i + 0.5],
-                "yaxis.autorange": True,
-                "annotations": make_annotations(
-                    "All Regions", d
+            stats = (
+                subset.groupby(["Seed", "Decile"])[value_col]
+                .agg(
+                    total=agg,
+                    min="min",
+                    max="max",
+                    avg="mean",
+                    p10=lambda x: x.quantile(0.10),
+                    p20=lambda x: x.quantile(0.20),
+                    p50="median"
                 )
-            }]
-        ))
-
-    fig.update_layout(
-        title=dict(
-            text=title or f"{value_col} by Decile Across Random Seeds",
-            x=0.5
-        ),
-        template="plotly_white",
-        barmode="group",
-        height=750,
-        bargap=0.20,
-        bargroupgap=0.04,
-        legend=dict(
-            orientation="h",
-            y=1.10,
-            x=0.5,
-            xanchor="center"
-        ),
-        margin=dict(t=160, b=80, l=90, r=40),
-        uniformtext=dict(minsize=9, mode="hide"),
-        updatemenus=[
-            dict(
-                buttons=decile_buttons,
-                direction="down",
-                x=0.68,
-                y=1.22,
-                xanchor="left",
-                showactive=True
-            ),
-            dict(
-                buttons=region_buttons,
-                direction="down",
-                x=1.0,
-                y=1.22,
-                xanchor="right",
-                showactive=True
+                .reset_index()
             )
-        ]
-    )
 
-    fig.update_xaxes(
-        title="Decile",
-        type="category",
-        categoryorder="array",
-        categoryarray=[str(d) for d in deciles]
-    )
+            # Compare each seed against RS42 within the same decile
+            base = (
+                stats[stats["Seed"] == baseline]
+                [["Decile", "total"]]
+                .rename(columns={"total": "baseline_total"})
+            )
 
-    fig.update_yaxes(
-        title=value_col,
-        tickformat="~s",
-        zeroline=True
-    )
+            stats = stats.merge(base, on="Decile", how="left")
 
-    fig.show()
+            stats["difference"] = (
+                stats["total"] - stats["baseline_total"]
+            )
 
-    return region_stats
+            stats["pct_difference"] = np.where(
+                stats["baseline_total"].notna() &
+                (stats["baseline_total"] != 0),
+                stats["difference"] / stats["baseline_total"] * 100,
+                np.nan
+            )
+
+            stats.loc[
+                stats["Seed"] == baseline,
+                ["difference", "pct_difference"]
+            ] = 0
+
+            fig = go.Figure()
+
+            selected_deciles = (
+                [decile_filter.value]
+                if decile_filter.value is not None
+                else deciles
+            )
+
+            single_decile = decile_filter.value is not None
+
+            for seed in seeds:
+                s = (
+                    stats[stats["Seed"] == seed]
+                    .set_index("Decile")
+                    .reindex(selected_deciles)
+                )
+
+                inside = []
+                hover = []
+                totals = []
+
+                for d, r in s.iterrows():
+                    if pd.isna(r["total"]):
+                        inside.append("")
+                        hover.append("No data")
+                        totals.append("")
+                        continue
+
+                    diff_text = (
+                        "Baseline"
+                        if seed == baseline
+                        else signed(r["difference"])
+                    )
+
+                    pct_text = (
+                        "Baseline"
+                        if seed == baseline
+                        else (
+                            f"{r['pct_difference']:+.2f}%"
+                            if pd.notna(r["pct_difference"])
+                            else "N/A"
+                        )
+                    )
+
+                    details = (
+                        f"<b>Min: {fmt(r['min'])}</b><br>"
+                        f"<b>Max: {fmt(r['max'])}</b><br>"
+                        f"<b>Avg: {fmt(r['avg'])}</b><br>"
+                        f"<b>P10: {fmt(r['p10'])}</b><br>"
+                        f"<b>P20: {fmt(r['p20'])}</b><br>"
+                        f"<b>P50: {fmt(r['p50'])}</b><br>"
+                        f"────────────<br>"
+                        f"<b>Δ: {diff_text}</b><br>"
+                        f"<b>Δ%: {pct_text}</b>"
+                    )
+
+                    inside.append(details)
+                    hover.append(
+                        f"<b>{seed} | Decile {d}</b><br>"
+                        f"Total: {r['total']:,.{decimals}f}<br>"
+                        + details
+                    )
+                    totals.append(f"<b>{fmt(r['total'])}</b>")
+
+                # Permanent statistics inside each bar when one decile
+                # is selected; full details remain on hover otherwise.
+                fig.add_trace(go.Bar(
+                    x=[str(d) for d in selected_deciles],
+                    y=s["total"],
+                    name=seed,
+                    marker_color=colors[seed],
+                    text=inside if single_decile else totals,
+                    textposition="inside" if single_decile else "outside",
+                    insidetextanchor="middle",
+                    textfont=dict(
+                        size=12 if single_decile else 13,
+                        color="white" if single_decile else "black",
+                        family="Arial"
+                    ),
+                    cliponaxis=False,
+                    customdata=np.array(hover, dtype=object),
+                    hovertemplate="%{customdata}<extra></extra>"
+                ))
+
+            fig.update_layout(
+                title=title or f"{value_col} by Decile Across Random Seeds",
+                template="plotly_white",
+                barmode="group",
+                height=720,
+                bargap=0.20,
+                bargroupgap=0.04,
+                legend=dict(orientation="h", y=1.10),
+                margin=dict(t=100, b=70, l=80, r=40),
+                uniformtext=dict(minsize=10, mode="show")
+            )
+
+            fig.update_xaxes(
+                title="Decile",
+                type="category",
+                categoryorder="array",
+                categoryarray=[str(d) for d in deciles]
+            )
+            fig.update_yaxes(
+                title=value_col,
+                tickformat="~s",
+                zeroline=True
+            )
+
+            fig.show()
+
+            # Exact numerical comparison below the chart
+            table = stats[
+                ["Decile", "Seed", "total", "difference",
+                 "pct_difference", "min", "max",
+                 "avg", "p10", "p20", "p50"]
+            ].copy()
+
+            table = table.sort_values(
+                ["Decile", "Seed"],
+                key=lambda s: (
+                    s.map({seed: i for i, seed in enumerate(seeds)})
+                    if s.name == "Seed" else s
+                )
+            )
+
+            display(
+                table.style.format({
+                    "total": f"{{:,.{decimals}f}}",
+                    "difference": f"{{:+,.{decimals}f}}",
+                    "pct_difference": "{:+.2f}%",
+                    "min": f"{{:,.{decimals}f}}",
+                    "max": f"{{:,.{decimals}f}}",
+                    "avg": f"{{:,.{decimals}f}}",
+                    "p10": f"{{:,.{decimals}f}}",
+                    "p20": f"{{:,.{decimals}f}}",
+                    "p50": f"{{:,.{decimals}f}}"
+                }, na_rep="N/A")
+            )
+
+    decile_filter.observe(update_chart, names="value")
+    region_filter.observe(update_chart, names="value")
+
+    display(widgets.HBox([decile_filter, region_filter]), output)
+    update_chart()
