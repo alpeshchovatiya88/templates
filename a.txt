@@ -1,7 +1,1122 @@
-"<b>" + (config.is_ratio ? "Δ (pp): " : "Δ: ") +
-    (config.is_ratio && r.seed !== report.baseline
-        ? deltaText.replace("%", "")
-        : deltaText) +
-    "</b>",
 
-"<b>Δ%: " + pctText + "</b>"
+import json
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+from plotly.offline import get_plotlyjs
+
+
+def export_interactive_seed_report(
+    dfs,
+    filename="Random_Seed_Sensitivity_Report.html",
+    decile_col="rr_model_decile",
+    region_col="ECON_REGION",
+    market_col="POD_MARKET_CODE",
+    tenure_col="PRK_TENURE",
+    metrics=None,
+    baseline="RS42",
+    colors=None,
+    decimals=2,
+    inside_font_size=16,
+    total_font_size=18,
+):
+
+    if baseline not in dfs:
+        raise ValueError(f"Baseline {baseline} not found.")
+
+    if metrics is None:
+        metrics = {
+            "SMI3_LOSS": {
+                "agg": "sum",
+                "is_ratio": False
+            },
+            "SMI3_LR": {
+                "agg": "mean",
+                "is_ratio": True,
+                "ratio_scale": 100
+            }
+        }
+
+    if colors is None:
+        colors = {
+            "RS42": "#17365D",
+            "RS07": "#E66B23",
+            "RS101": "#09988A",
+            "RS151": "#7952B3"
+        }
+
+    seeds = list(dfs)
+
+    required = list(dict.fromkeys([
+        decile_col,
+        region_col,
+        market_col,
+        tenure_col,
+        *metrics.keys()
+    ]))
+
+    # -------------------------------------------------
+    # 1. Prepare all seed datasets
+    # -------------------------------------------------
+
+    frames = []
+
+    for seed, df in dfs.items():
+
+        missing = [c for c in required if c not in df.columns]
+
+        if missing:
+            raise ValueError(
+                f"{seed} missing columns: {missing}"
+            )
+
+        t = df[required].copy()
+
+        t["Seed"] = seed
+
+        # Supports 1, 2, ... and "Decile 1", "Decile 2", ...
+        t["Decile"] = pd.to_numeric(
+            t[decile_col]
+            .astype("string")
+            .str.extract(r"(\d+)", expand=False),
+            errors="coerce"
+        )
+
+        # Convert categorical filters to strings
+        t["Region"] = (
+            t[region_col]
+            .astype("string")
+            .fillna("(Missing)")
+        )
+
+        t["Market"] = (
+            t[market_col]
+            .astype("string")
+            .fillna("(Missing)")
+        )
+
+        t["Tenure"] = (
+            t[tenure_col]
+            .astype("string")
+            .fillna("(Missing)")
+        )
+
+        for metric in metrics:
+
+            t[metric] = (
+                pd.to_numeric(t[metric], errors="coerce")
+                .replace([np.inf, -np.inf], np.nan)
+            )
+
+        frames.append(
+            t[
+                [
+                    "Seed",
+                    "Decile",
+                    "Region",
+                    "Market",
+                    "Tenure",
+                    *metrics.keys()
+                ]
+            ]
+        )
+
+    data = pd.concat(frames, ignore_index=True)
+
+    deciles = sorted(
+        data["Decile"]
+        .dropna()
+        .astype(int)
+        .unique()
+        .tolist()
+    )
+
+    regions = sorted(data["Region"].unique().tolist())
+    markets = sorted(data["Market"].unique().tolist())
+    tenures = sorted(data["Tenure"].unique().tolist())
+
+    # -------------------------------------------------
+    # 2. Precalculate filter combinations
+    # -------------------------------------------------
+
+    # To avoid generating an enormous Cartesian product
+    # of Decile x Region x Market x Tenure, aggregate by
+    # actual observed combinations, then calculate each
+    # selected combination on demand in the browser.
+    #
+    # For correct percentiles, individual metric values
+    # are included in the HTML data payload.
+    #
+    # This produces a fully offline, interactive report.
+
+    records = []
+
+    for metric in metrics:
+
+        subset = data[
+            [
+                "Seed",
+                "Decile",
+                "Region",
+                "Market",
+                "Tenure",
+                metric
+            ]
+        ].copy()
+
+        subset = subset.rename(columns={metric: "Value"})
+
+        # Drop missing metric values only.
+        subset = subset.dropna(subset=["Value"])
+
+        # Compact column-based records for JavaScript.
+        for row in subset.itertuples(index=False, name=None):
+
+            seed, decile, region, market, tenure, value = row
+
+            records.append([
+                seed,
+                int(decile) if pd.notna(decile) else None,
+                region,
+                market,
+                tenure,
+                metric,
+                float(value)
+            ])
+
+    report_data = {
+        "seeds": seeds,
+        "baseline": baseline,
+        "deciles": deciles,
+        "regions": regions,
+        "markets": markets,
+        "tenures": tenures,
+        "metrics": metrics,
+        "colors": colors,
+        "decimals": decimals,
+        "insideFontSize": inside_font_size,
+        "totalFontSize": total_font_size,
+        "records": records
+    }
+
+    report_json = json.dumps(
+        report_data,
+        ensure_ascii=False,
+        allow_nan=False,
+        separators=(",", ":")
+    ).replace("<", "\\u003c")
+
+    # -------------------------------------------------
+    # 3. Standalone HTML
+    # -------------------------------------------------
+
+    html_template = r"""
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+
+<meta charset="UTF-8">
+<meta name="viewport"
+      content="width=device-width, initial-scale=1">
+
+<title>Random Seed Sensitivity Analysis</title>
+
+<style>
+
+* {
+    box-sizing: border-box;
+}
+
+body {
+    margin: 0;
+    background: #f4f6fa;
+    font-family: Arial, sans-serif;
+    color: #172033;
+}
+
+.container {
+    max-width: 1600px;
+    margin: auto;
+    padding: 25px;
+}
+
+h1 {
+    font-size: 27px;
+    margin-bottom: 8px;
+}
+
+.subtitle {
+    color: #687487;
+    margin-bottom: 22px;
+}
+
+.filters {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 16px;
+    align-items: end;
+    background: white;
+    padding: 20px;
+    border-radius: 12px;
+    margin-bottom: 20px;
+}
+
+.filter-group {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+label {
+    font-weight: bold;
+    font-size: 14px;
+}
+
+select {
+    min-width: 175px;
+    max-width: 250px;
+    padding: 11px;
+    font-size: 14px;
+    border: 1px solid #cbd5e1;
+    border-radius: 7px;
+    background: white;
+}
+
+button {
+    padding: 11px 20px;
+    background: #17365D;
+    color: white;
+    border: none;
+    border-radius: 7px;
+    font-weight: bold;
+    cursor: pointer;
+}
+
+.chart-card,
+.table-card {
+    background: white;
+    border-radius: 12px;
+    padding: 16px;
+    margin-bottom: 20px;
+}
+
+#chart {
+    width: 100%;
+    min-height: 760px;
+}
+
+.table-scroll {
+    overflow-x: auto;
+}
+
+table {
+    width: 100%;
+    border-collapse: collapse;
+    white-space: nowrap;
+    font-size: 14px;
+}
+
+th {
+    background: #17365D;
+    color: white;
+    padding: 13px;
+    text-align: right;
+}
+
+td {
+    padding: 12px;
+    text-align: right;
+    border-bottom: 1px solid #e7ebf1;
+}
+
+th:first-child,
+td:first-child {
+    text-align: left;
+}
+
+tbody tr:nth-child(even) {
+    background: #f7f9fc;
+}
+
+.note {
+    font-size: 13px;
+    color: #687487;
+    margin-top: 14px;
+    line-height: 1.6;
+}
+
+</style>
+
+<script>
+__PLOTLY_JS__
+</script>
+
+</head>
+
+<body>
+
+<div class="container">
+
+<h1>Random Seed Sensitivity Analysis</h1>
+
+<div class="subtitle">
+Interactive comparison against RS42
+</div>
+
+<div class="filters">
+
+<div class="filter-group">
+<label>Metric</label>
+<select id="metricFilter"></select>
+</div>
+
+<div class="filter-group">
+<label>Decile</label>
+<select id="decileFilter"></select>
+</div>
+
+<div class="filter-group">
+<label>ECON_REGION</label>
+<select id="regionFilter"></select>
+</div>
+
+<div class="filter-group">
+<label>POD_MARKET_CODE</label>
+<select id="marketFilter"></select>
+</div>
+
+<div class="filter-group">
+<label>PRK_TENURE</label>
+<select id="tenureFilter"></select>
+</div>
+
+<button id="resetButton">
+Reset Filters
+</button>
+
+</div>
+
+<div class="chart-card">
+<div id="chart"></div>
+</div>
+
+<div class="table-card">
+
+<h2>Detailed Statistics</h2>
+
+<div class="table-scroll">
+
+<table>
+
+<thead>
+<tr>
+<th>Seed</th>
+<th>Count</th>
+<th>Aggregate</th>
+<th id="deltaHeader">Δ</th>
+<th id="pctHeader">Δ%</th>
+<th>Min</th>
+<th>Max</th>
+<th>Avg</th>
+<th>P10</th>
+<th>P50</th>
+<th>P90</th>
+</tr>
+</thead>
+
+<tbody id="statsBody"></tbody>
+
+</table>
+
+</div>
+
+<div class="note" id="reportNote"></div>
+
+</div>
+
+</div>
+
+<script id="report-data" type="application/json">
+__REPORT_JSON__
+</script>
+
+<script>
+
+(function () {
+
+"use strict";
+
+const report = JSON.parse(
+    document.getElementById("report-data").textContent
+);
+
+const metricFilter = document.getElementById("metricFilter");
+const decileFilter = document.getElementById("decileFilter");
+const regionFilter = document.getElementById("regionFilter");
+const marketFilter = document.getElementById("marketFilter");
+const tenureFilter = document.getElementById("tenureFilter");
+
+const statsBody = document.getElementById("statsBody");
+
+function addOption(select, value, label) {
+
+    const option = document.createElement("option");
+
+    option.value = value;
+    option.textContent = label;
+
+    select.appendChild(option);
+}
+
+Object.keys(report.metrics).forEach(metric => {
+    addOption(metricFilter, metric, metric);
+});
+
+addOption(decileFilter, "", "All Deciles");
+
+report.deciles.forEach(d => {
+    addOption(decileFilter, String(d), "Decile " + d);
+});
+
+addOption(regionFilter, "", "All Regions");
+
+report.regions.forEach(r => {
+    addOption(regionFilter, r, r);
+});
+
+addOption(marketFilter, "", "All Markets");
+
+report.markets.forEach(m => {
+    addOption(marketFilter, m, m);
+});
+
+addOption(tenureFilter, "", "All Tenures");
+
+report.tenures.forEach(t => {
+    addOption(tenureFilter, t, t);
+});
+
+// -------------------------------------------------
+// Formatting
+// -------------------------------------------------
+
+function formatNumber(v, metric, compact=false) {
+
+    if (v === null || !Number.isFinite(v)) {
+        return "N/A";
+    }
+
+    const config = report.metrics[metric];
+
+    if (config.is_ratio) {
+
+        const scale = config.ratio_scale || 1;
+
+        return (
+            v / scale * 100
+        ).toFixed(report.decimals) + "%";
+    }
+
+    if (compact && Math.abs(v) >= 1000000) {
+        return (v / 1000000).toFixed(2) + "M";
+    }
+
+    if (compact && Math.abs(v) >= 1000) {
+        return (v / 1000).toFixed(2) + "K";
+    }
+
+    return v.toLocaleString(
+        "en-US",
+        {
+            minimumFractionDigits: report.decimals,
+            maximumFractionDigits: report.decimals
+        }
+    );
+}
+
+function signedNumber(v, metric) {
+
+    if (v === null || !Number.isFinite(v)) {
+        return "N/A";
+    }
+
+    return (
+        v > 0 ? "+" : ""
+    ) + formatNumber(v, metric, true);
+}
+
+function formatDelta(v, metric) {
+
+    if (v === null || !Number.isFinite(v)) {
+        return "N/A";
+    }
+
+    const config = report.metrics[metric];
+
+    if (config.is_ratio) {
+
+        const scale = config.ratio_scale || 1;
+        const pp = v / scale * 100;
+
+        return (
+            (pp > 0 ? "+" : "") +
+            pp.toFixed(report.decimals) +
+            " pp"
+        );
+    }
+
+    return signedNumber(v, metric);
+}
+
+function formatDeltaPercent(v) {
+
+    if (v === null || !Number.isFinite(v)) {
+        return "N/A";
+    }
+
+    return (
+        (v > 0 ? "+" : "") +
+        v.toFixed(2) +
+        "%"
+    );
+}
+
+function escapeHtml(value) {
+
+    return String(value)
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;");
+}
+
+// -------------------------------------------------
+// Statistics
+// -------------------------------------------------
+
+function quantile(sortedValues, p) {
+
+    if (!sortedValues.length) {
+        return null;
+    }
+
+    if (sortedValues.length === 1) {
+        return sortedValues[0];
+    }
+
+    const position = (sortedValues.length - 1) * p;
+    const lower = Math.floor(position);
+    const upper = Math.ceil(position);
+    const fraction = position - lower;
+
+    return (
+        sortedValues[lower] * (1 - fraction) +
+        sortedValues[upper] * fraction
+    );
+}
+
+function calculateStats(values, agg) {
+
+    if (!values.length) {
+        return {
+            total: null,
+            min: null,
+            max: null,
+            avg: null,
+            p10: null,
+            p50: null,
+            p90: null,
+            count: 0
+        };
+    }
+
+    const sorted = [...values].sort((a, b) => a - b);
+
+    const sum = values.reduce((a, b) => a + b, 0);
+    const avg = sum / values.length;
+
+    return {
+        total: agg === "sum" ? sum : avg,
+        min: sorted[0],
+        max: sorted[sorted.length - 1],
+        avg: avg,
+        p10: quantile(sorted, 0.10),
+        p50: quantile(sorted, 0.50),
+        p90: quantile(sorted, 0.90),
+        count: values.length
+    };
+}
+
+// -------------------------------------------------
+// Update chart and table
+// -------------------------------------------------
+
+function update() {
+
+    const metric = metricFilter.value;
+
+    const decile = decileFilter.value === ""
+        ? null
+        : Number(decileFilter.value);
+
+    const region = regionFilter.value || null;
+    const market = marketFilter.value || null;
+    const tenure = tenureFilter.value || null;
+
+    const config = report.metrics[metric];
+
+    const aggregateLabel = config.agg.toUpperCase();
+
+    // Apply all five filters
+    const filtered = report.records.filter(r => {
+
+        const [
+            seed,
+            rowDecile,
+            rowRegion,
+            rowMarket,
+            rowTenure,
+            rowMetric,
+            value
+        ] = r;
+
+        return (
+            rowMetric === metric &&
+            (decile === null || rowDecile === decile) &&
+            (region === null || rowRegion === region) &&
+            (market === null || rowMarket === market) &&
+            (tenure === null || rowTenure === tenure)
+        );
+    });
+
+    const valuesBySeed = {};
+
+    report.seeds.forEach(seed => {
+        valuesBySeed[seed] = [];
+    });
+
+    filtered.forEach(r => {
+        valuesBySeed[r[0]].push(r[6]);
+    });
+
+    const statsBySeed = {};
+
+    report.seeds.forEach(seed => {
+        statsBySeed[seed] = calculateStats(
+            valuesBySeed[seed],
+            config.agg
+        );
+    });
+
+    const baselineTotal =
+        statsBySeed[report.baseline].total;
+
+    const rows = report.seeds.map(seed => {
+
+        const s = statsBySeed[seed];
+
+        let difference = null;
+        let pctDifference = null;
+
+        if (
+            s.total !== null &&
+            baselineTotal !== null
+        ) {
+
+            difference = s.total - baselineTotal;
+
+            if (baselineTotal !== 0) {
+                pctDifference =
+                    difference / baselineTotal * 100;
+            }
+        }
+
+        return {
+            seed: seed,
+            ...s,
+            difference: difference,
+            pct_difference: pctDifference
+        };
+    });
+
+    const decileLabel = decile === null
+        ? "All Deciles"
+        : "Decile " + decile;
+
+    const regionLabel = region || "All Regions";
+    const marketLabel = market || "All Markets";
+    const tenureLabel = tenure || "All Tenures";
+
+    document.getElementById("deltaHeader").textContent =
+        config.is_ratio ? "Δ (pp)" : "Δ";
+
+    document.getElementById("pctHeader").style.display =
+        config.is_ratio ? "none" : "";
+
+    const traces = [];
+    const annotations = [];
+
+    rows.forEach((r, i) => {
+
+        if (r.total === null) {
+            return;
+        }
+
+        const deltaText = r.seed === report.baseline
+            ? "Baseline"
+            : formatDelta(r.difference, metric);
+
+        const pctText = r.seed === report.baseline
+            ? "Baseline"
+            : formatDeltaPercent(r.pct_difference);
+
+        const insideLines = [
+            "<b>Min: " + formatNumber(r.min, metric, true) + "</b>",
+            "<b>Max: " + formatNumber(r.max, metric, true) + "</b>",
+            "<b>Avg: " + formatNumber(r.avg, metric, true) + "</b>",
+            "<b>P10: " + formatNumber(r.p10, metric, true) + "</b>",
+            "<b>P50: " + formatNumber(r.p50, metric, true) + "</b>",
+            "<b>P90: " + formatNumber(r.p90, metric, true) + "</b>",
+            "────────────"
+        ];
+
+        if (config.is_ratio) {
+
+            insideLines.push(
+                "<b>Δ (pp): " + deltaText + "</b>"
+            );
+
+        } else {
+
+            insideLines.push(
+                "<b>Δ: " + deltaText + "</b>"
+            );
+
+            insideLines.push(
+                "<b>Δ%: " + pctText + "</b>"
+            );
+        }
+
+        const insideText = insideLines.join("<br>");
+
+        const hoverText = [
+            "<b>" + escapeHtml(r.seed) + "</b>",
+            aggregateLabel + ": " +
+                formatNumber(r.total, metric),
+            "Count: " + r.count,
+            insideText
+        ].join("<br>");
+
+        traces.push({
+            type: "bar",
+            x: [i],
+            y: [r.total],
+            width: 0.72,
+            name: r.seed,
+            marker: {
+                color: report.colors[r.seed] || "#64748B",
+                line: {
+                    color: "white",
+                    width: 1.5
+                }
+            },
+            text: [insideText],
+            textposition: "inside",
+            insidetextanchor: "middle",
+            textfont: {
+                size: report.insideFontSize,
+                color: "white",
+                family: "Arial"
+            },
+            hovertemplate: hoverText + "<extra></extra>",
+            showlegend: false
+        });
+
+        annotations.push({
+            x: i,
+            y: r.total,
+            xref: "x",
+            yref: "y",
+            text:
+                "<b>" + aggregateLabel + ": " +
+                formatNumber(r.total, metric, true) +
+                "</b>",
+            showarrow: false,
+            yshift: r.total >= 0 ? 19 : -19,
+            font: {
+                size: report.totalFontSize,
+                color: "#172033",
+                family: "Arial"
+            }
+        });
+    });
+
+    const values = rows
+        .map(r => r.total)
+        .filter(v => v !== null && Number.isFinite(v));
+
+    const minValue = Math.min(0, ...values);
+    const maxValue = Math.max(0, ...values);
+
+    const span = Math.max(
+        maxValue - minValue,
+        0.000001
+    );
+
+    const titleText =
+        "<b>" + escapeHtml(metric) +
+        " — Random Seed Sensitivity</b>" +
+        "<br><sup>" +
+        [
+            decileLabel,
+            regionLabel,
+            marketLabel,
+            tenureLabel
+        ].map(escapeHtml).join(" | ") +
+        "</sup>";
+
+    const layout = {
+
+        title: {
+            text: titleText,
+            x: 0.5,
+            font: {
+                size: 22,
+                color: "#172033"
+            }
+        },
+
+        template: "plotly_white",
+
+        height: 760,
+
+        margin: {
+            t: 145,
+            b: 90,
+            l: 100,
+            r: 65
+        },
+
+        paper_bgcolor: "white",
+        plot_bgcolor: "white",
+
+        font: {
+            family: "Arial",
+            size: 14,
+            color: "#172033"
+        },
+
+        xaxis: {
+            title: "Random Seed",
+            tickmode: "array",
+            tickvals: report.seeds.map((_, i) => i),
+            ticktext: report.seeds,
+            range: [
+                -0.6,
+                report.seeds.length - 0.4
+            ],
+            showgrid: false,
+            tickfont: {
+                size: 16
+            }
+        },
+
+        yaxis: {
+            title: metric,
+
+            range: [
+                minValue - span * 0.08,
+                maxValue + span * 0.22
+            ],
+
+            tickformat: config.is_ratio
+                ? (
+                    (config.ratio_scale || 1) === 1
+                    ? ".1%"
+                    : ".2f"
+                )
+                : "~s",
+
+            ticksuffix:
+                config.is_ratio &&
+                (config.ratio_scale || 1) === 100
+                ? "%"
+                : "",
+
+            gridcolor: "#E7ECF2",
+            zeroline: true
+        },
+
+        annotations: annotations,
+
+        uniformtext: {
+            minsize: 10,
+            mode: "show"
+        }
+    };
+
+    Plotly.react(
+        "chart",
+        traces,
+        layout,
+        {
+            responsive: true,
+            displaylogo: false,
+            toImageButtonOptions: {
+                format: "png",
+                filename: "seed_sensitivity",
+                scale: 2
+            }
+        }
+    );
+
+    // Update numerical table
+    statsBody.innerHTML = "";
+
+    rows.forEach(r => {
+
+        const tr = document.createElement("tr");
+
+        const deltaText = r.seed === report.baseline
+            ? "Baseline"
+            : formatDelta(r.difference, metric);
+
+        const pctText = r.seed === report.baseline
+            ? "Baseline"
+            : formatDeltaPercent(r.pct_difference);
+
+        const fields = [
+            r.seed,
+            r.count.toLocaleString("en-US"),
+            formatNumber(r.total, metric),
+            deltaText,
+            pctText,
+            formatNumber(r.min, metric),
+            formatNumber(r.max, metric),
+            formatNumber(r.avg, metric),
+            formatNumber(r.p10, metric),
+            formatNumber(r.p50, metric),
+            formatNumber(r.p90, metric)
+        ];
+
+        fields.forEach((value, index) => {
+
+            const td = document.createElement("td");
+
+            td.textContent = value;
+
+            // Hide Δ% for LR only
+            if (index === 4 && config.is_ratio) {
+                td.style.display = "none";
+            }
+
+            tr.appendChild(td);
+        });
+
+        statsBody.appendChild(tr);
+    });
+
+    document.getElementById("reportNote").textContent =
+        config.is_ratio
+        ? "Δ (pp) = selected seed mean loss ratio minus " +
+          report.baseline +
+          " mean loss ratio. No relative Δ% is displayed."
+        : "Δ = selected seed total loss minus " +
+          report.baseline +
+          " total loss. Δ% = Δ divided by the baseline total loss × 100.";
+}
+
+[
+    metricFilter,
+    decileFilter,
+    regionFilter,
+    marketFilter,
+    tenureFilter
+].forEach(select => {
+    select.addEventListener("change", update);
+});
+
+document.getElementById("resetButton")
+    .addEventListener("click", function () {
+
+        metricFilter.selectedIndex = 0;
+        decileFilter.value = "";
+        regionFilter.value = "";
+        marketFilter.value = "";
+        tenureFilter.value = "";
+
+        update();
+    });
+
+update();
+
+})();
+</script>
+
+</body>
+</html>
+"""
+
+    final_html = (
+        html_template
+        .replace("__PLOTLY_JS__", get_plotlyjs())
+        .replace("__REPORT_JSON__", report_json)
+    )
+
+    output_path = Path(filename).resolve()
+
+    output_path.write_text(
+        final_html,
+        encoding="utf-8"
+    )
+
+    print("HTML report created successfully:")
+    print(output_path)
+
+    size_mb = output_path.stat().st_size / (1024 * 1024)
+    print(f"File size: {size_mb:.2f} MB")
+
+    return output_path
+
+==#===
+
+
+dfs = {
+    "RS42": df_scored_42,
+    "RS07": df_scored_07,
+    "RS101": df_scored_101,
+    "RS151": df_scored_151
+}
+
+export_interactive_seed_report(
+    dfs=dfs,
+    filename="Random_Seed_Sensitivity_Report.html",
+    decile_col="rr_model_decile",
+    region_col="ECON_REGION",
+    market_col="POD_MARKET_CODE",
+    tenure_col="PRK_TENURE",
+    metrics={
+        "SMI3_LOSS": {
+            "agg": "sum",
+            "is_ratio": False
+        },
+        "SMI3_LR": {
+            "agg": "mean",
+            "is_ratio": True,
+            "ratio_scale": 100
+        }
+    },
+    baseline="RS42",
+    colors={
+        "RS42": "#17365D",
+        "RS07": "#E66B23",
+        "RS101": "#09988A",
+        "RS151": "#7952B3"
+    },
+    decimals=2,
+    inside_font_size=16,
+    total_font_size=18
+)
+
