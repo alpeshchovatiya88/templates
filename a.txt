@@ -13,17 +13,25 @@ def plot_seed_sensitivity(
     agg="sum",
     baseline="RS42",
     decimals=2,
-    title=None
+    title=None,
+    colors=None,
+    inside_font_size=16,
+    total_font_size=18
 ):
-    if baseline not in dfs:
-        raise ValueError(f"{baseline} must be included in dfs")
-
     seeds = list(dfs)
-    palette = ["#2563EB", "#F97316", "#10B981", "#8B5CF6"]
-    colors = {
-        seed: palette[i % len(palette)]
-        for i, seed in enumerate(seeds)
-    }
+
+    # Customize colors here, or pass a dictionary to the function
+    if colors is None:
+        colors = {
+            "RS42":  "#264E86",   # Navy blue
+            "RS07":  "#D97736",   # Burnt orange
+            "RS101": "#21867A",   # Teal green
+            "RS151": "#7856A6"    # Muted purple
+        }
+
+    fallback_colors = [
+        "#264E86", "#D97736", "#21867A", "#7856A6"
+    ]
 
     def fmt(v):
         if pd.isna(v):
@@ -35,7 +43,9 @@ def plot_seed_sensitivity(
         return f"{v:,.{decimals}f}"
 
     def signed(v):
-        return f"{'+' if v > 0 else ''}{fmt(v)}" if pd.notna(v) else "N/A"
+        if pd.isna(v):
+            return "N/A"
+        return ("+" if v > 0 else "") + fmt(v)
 
     # Prepare data
     frames = []
@@ -45,14 +55,14 @@ def plot_seed_sensitivity(
 
         temp["Seed"] = seed
         temp["Decile"] = pd.to_numeric(
-            temp[decile_col].astype("string").str.extract(
-                r"(\d+)", expand=False
-            ),
+            temp[decile_col].astype("string")
+            .str.extract(r"(\d+)", expand=False),
             errors="coerce"
         )
         temp[value_col] = pd.to_numeric(
             temp[value_col], errors="coerce"
         )
+
         frames.append(temp)
 
     data = pd.concat(frames, ignore_index=True)
@@ -60,7 +70,9 @@ def plot_seed_sensitivity(
     data["Decile"] = data["Decile"].astype(int)
 
     deciles = sorted(data["Decile"].unique())
-    regions = sorted(data[region_col].dropna().unique(), key=str)
+    regions = sorted(
+        data[region_col].dropna().unique(), key=str
+    )
 
     decile_filter = widgets.Dropdown(
         options=[("All Deciles", None)] +
@@ -109,14 +121,15 @@ def plot_seed_sensitivity(
                 .reset_index()
             )
 
-            # Compare each seed against RS42 within the same decile
             base = (
                 stats[stats["Seed"] == baseline]
                 [["Decile", "total"]]
                 .rename(columns={"total": "baseline_total"})
             )
 
-            stats = stats.merge(base, on="Decile", how="left")
+            stats = stats.merge(
+                base, on="Decile", how="left"
+            )
 
             stats["difference"] = (
                 stats["total"] - stats["baseline_total"]
@@ -125,7 +138,8 @@ def plot_seed_sensitivity(
             stats["pct_difference"] = np.where(
                 stats["baseline_total"].notna() &
                 (stats["baseline_total"] != 0),
-                stats["difference"] / stats["baseline_total"] * 100,
+                stats["difference"] /
+                stats["baseline_total"] * 100,
                 np.nan
             )
 
@@ -134,8 +148,6 @@ def plot_seed_sensitivity(
                 ["difference", "pct_difference"]
             ] = 0
 
-            fig = go.Figure()
-
             selected_deciles = (
                 [decile_filter.value]
                 if decile_filter.value is not None
@@ -143,34 +155,33 @@ def plot_seed_sensitivity(
             )
 
             single_decile = decile_filter.value is not None
+            fig = go.Figure()
 
-            for seed in seeds:
+            for i, seed in enumerate(seeds):
                 s = (
                     stats[stats["Seed"] == seed]
                     .set_index("Decile")
                     .reindex(selected_deciles)
                 )
 
-                inside = []
-                hover = []
-                totals = []
+                inside_text = []
+                hover_text = []
+                total_text = []
 
                 for d, r in s.iterrows():
                     if pd.isna(r["total"]):
-                        inside.append("")
-                        hover.append("No data")
-                        totals.append("")
+                        inside_text.append("")
+                        hover_text.append("No data")
+                        total_text.append("")
                         continue
 
-                    diff_text = (
-                        "Baseline"
-                        if seed == baseline
+                    diff = (
+                        "Baseline" if seed == baseline
                         else signed(r["difference"])
                     )
 
-                    pct_text = (
-                        "Baseline"
-                        if seed == baseline
+                    pct = (
+                        "Baseline" if seed == baseline
                         else (
                             f"{r['pct_difference']:+.2f}%"
                             if pd.notna(r["pct_difference"])
@@ -186,78 +197,129 @@ def plot_seed_sensitivity(
                         f"<b>P20: {fmt(r['p20'])}</b><br>"
                         f"<b>P50: {fmt(r['p50'])}</b><br>"
                         f"────────────<br>"
-                        f"<b>Δ: {diff_text}</b><br>"
-                        f"<b>Δ%: {pct_text}</b>"
+                        f"<b>Δ: {diff}</b><br>"
+                        f"<b>Δ%: {pct}</b>"
                     )
 
-                    inside.append(details)
-                    hover.append(
+                    inside_text.append(details)
+
+                    hover_text.append(
                         f"<b>{seed} | Decile {d}</b><br>"
-                        f"Total: {r['total']:,.{decimals}f}<br>"
+                        f"<b>Total SUM: "
+                        f"{r['total']:,.{decimals}f}</b><br>"
                         + details
                     )
-                    totals.append(f"<b>{fmt(r['total'])}</b>")
 
-                # Permanent statistics inside each bar when one decile
-                # is selected; full details remain on hover otherwise.
+                    total_text.append(
+                        f"<b>SUM: {fmt(r['total'])}</b>"
+                    )
+
+                # Main bar with statistics inside
                 fig.add_trace(go.Bar(
                     x=[str(d) for d in selected_deciles],
                     y=s["total"],
                     name=seed,
-                    marker_color=colors[seed],
-                    text=inside if single_decile else totals,
+                    marker=dict(
+                        color=colors.get(
+                            seed,
+                            fallback_colors[i % len(fallback_colors)]
+                        ),
+                        line=dict(color="white", width=1.5)
+                    ),
+                    text=inside_text if single_decile else total_text,
                     textposition="inside" if single_decile else "outside",
                     insidetextanchor="middle",
                     textfont=dict(
-                        size=12 if single_decile else 13,
-                        color="white" if single_decile else "black",
+                        size=inside_font_size if single_decile
+                             else total_font_size,
+                        color="white" if single_decile
+                              else "#172033",
                         family="Arial"
                     ),
-                    cliponaxis=False,
-                    customdata=np.array(hover, dtype=object),
-                    hovertemplate="%{customdata}<extra></extra>"
+                    customdata=hover_text,
+                    hovertemplate="%{customdata}<extra></extra>",
+                    cliponaxis=False
                 ))
 
+                # Separate bold SUM label above each bar
+                # in the individual-decile view
+                if single_decile:
+                    fig.add_trace(go.Scatter(
+                        x=[str(d) for d in selected_deciles],
+                        y=s["total"],
+                        mode="text",
+                        text=total_text,
+                        textposition="top center",
+                        textfont=dict(
+                            size=total_font_size,
+                            color="#172033",
+                            family="Arial Black"
+                        ),
+                        showlegend=False,
+                        hoverinfo="skip"
+                    ))
+
             fig.update_layout(
-                title=title or f"{value_col} by Decile Across Random Seeds",
+                title=dict(
+                    text=title or
+                    f"{value_col} by Decile Across Random Seeds",
+                    x=0.5,
+                    font=dict(size=22, color="#172033")
+                ),
                 template="plotly_white",
                 barmode="group",
-                height=720,
-                bargap=0.20,
-                bargroupgap=0.04,
-                legend=dict(orientation="h", y=1.10),
-                margin=dict(t=100, b=70, l=80, r=40),
-                uniformtext=dict(minsize=10, mode="show")
+                height=800,
+                bargap=0.30,
+                bargroupgap=0.08,
+                plot_bgcolor="white",
+                paper_bgcolor="white",
+                font=dict(
+                    family="Arial",
+                    size=15,
+                    color="#172033"
+                ),
+                legend=dict(
+                    orientation="h",
+                    y=1.10,
+                    x=0.5,
+                    xanchor="center",
+                    font=dict(size=15)
+                ),
+                margin=dict(
+                    t=130, b=80, l=100, r=60
+                ),
+                uniformtext=dict(
+                    minsize=12,
+                    mode="show"
+                )
             )
 
             fig.update_xaxes(
-                title="Decile",
+                title=dict(text="Decile", font=dict(size=17)),
                 type="category",
                 categoryorder="array",
-                categoryarray=[str(d) for d in deciles]
+                categoryarray=[str(d) for d in deciles],
+                tickfont=dict(size=14),
+                showgrid=False
             )
+
             fig.update_yaxes(
-                title=value_col,
+                title=dict(text=value_col, font=dict(size=17)),
                 tickformat="~s",
+                tickfont=dict(size=14),
+                gridcolor="#E7ECF2",
                 zeroline=True
             )
 
             fig.show()
 
-            # Exact numerical comparison below the chart
+            # Numerical comparison table
             table = stats[
-                ["Decile", "Seed", "total", "difference",
-                 "pct_difference", "min", "max",
-                 "avg", "p10", "p20", "p50"]
+                ["Decile", "Seed", "total",
+                 "difference", "pct_difference",
+                 "min", "max", "avg",
+                 "p10", "p20", "p50"]
             ].copy()
-
-            table = table.sort_values(
-                ["Decile", "Seed"],
-                key=lambda s: (
-                    s.map({seed: i for i, seed in enumerate(seeds)})
-                    if s.name == "Seed" else s
-                )
-            )
 
             display(
                 table.style.format({
@@ -276,5 +338,8 @@ def plot_seed_sensitivity(
     decile_filter.observe(update_chart, names="value")
     region_filter.observe(update_chart, names="value")
 
-    display(widgets.HBox([decile_filter, region_filter]), output)
+    display(
+        widgets.HBox([decile_filter, region_filter]),
+        output
+    )
     update_chart()
