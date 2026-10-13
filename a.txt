@@ -10,7 +10,7 @@ from plotly.offline import get_plotlyjs
 def export_interactive_seed_report(
     dfs,
     filename="Random_Seed_Sensitivity_Report.html",
-    decile_col="rr_model_decile",
+    ventile_col="rr_model_decile",
     region_col="ECON_REGION",
     market_col="POD_MARKET_CODE",
     tenure_col="PRK_TENURE",
@@ -24,27 +24,28 @@ def export_interactive_seed_report(
     chart_height=950
 ):
     """
-    Export an offline interactive random seed sensitivity report.
+    Interactive offline random seed sensitivity report.
 
-    Inside each bar:
-      - Min, Max, Avg, P10, P50, P90
-      - Difference versus baseline
-      - Predicted Delq + Claims
-      - Predicted Claims
-      - Predicted Delqs
+    Metric dropdown:
+        SMI3_LOSS
+        SMI3_LR
 
     Filters:
-      - Metric
-      - Decile
-      - ECON_REGION
-      - POD_MARKET_CODE
-      - PRK_TENURE
+        Metric, Ventile, ECON_REGION,
+        POD_MARKET_CODE, PRK_TENURE
 
-    The function does not modify the input DataFrames.
+    Inside every bar:
+        Min, Max, Avg, P10, P50, P90
+        Predicted Delq + Claims
+        Predicted Claims
+        Predicted Delqs
+        Difference versus baseline
+
+    Predicted counts are NOT dropdown metrics.
     """
 
     if baseline not in dfs:
-        raise ValueError(f"Baseline {baseline} not found in dfs")
+        raise ValueError(f"Baseline {baseline} not found")
 
     if not 0 <= claims_share <= 1:
         raise ValueError("claims_share must be between 0 and 1")
@@ -59,18 +60,6 @@ def export_interactive_seed_report(
                 "agg": "mean",
                 "is_ratio": True,
                 "ratio_scale": 100
-            },
-            "Predicted_n_Delq_and_Claims": {
-                "agg": "sum",
-                "is_ratio": False
-            },
-            "Predicted_n_Claims": {
-                "agg": "sum",
-                "is_ratio": False
-            },
-            "Predicted_n_Delqs": {
-                "agg": "sum",
-                "is_ratio": False
             }
         }
 
@@ -82,71 +71,51 @@ def export_interactive_seed_report(
             "RS151": "#7952B3"
         }
 
-    predicted_metric_names = [
-        "Predicted_n_Delq_and_Claims",
-        "Predicted_n_Claims",
-        "Predicted_n_Delqs"
-    ]
-
     for metric, config in metrics.items():
         if config["agg"] not in ("sum", "mean"):
             raise ValueError(
                 f"{metric}: agg must be 'sum' or 'mean'"
             )
 
+    # --------------------------------------------------------
+    # Prepare observations
+    #
+    # One row per observation and metric.
+    # Prediction probability is embedded separately,
+    # so it does not appear in the metric dropdown.
+    # --------------------------------------------------------
+
     records = []
-    decile_values = set()
+    ventile_values = set()
     region_values = set()
     market_values = set()
     tenure_values = set()
 
-    # --------------------------------------------------------
-    # Prepare each seed
-    # --------------------------------------------------------
-
     for seed, source_df in dfs.items():
 
-        required = [
-            decile_col,
+        required = list(dict.fromkeys([
+            ventile_col,
             region_col,
             market_col,
             tenure_col,
-            probability_col
-        ]
-
-        required += [
-            m for m in metrics
-            if m not in predicted_metric_names
-        ]
+            probability_col,
+            *metrics.keys()
+        ]))
 
         missing = [
-            col for col in required
-            if col not in source_df.columns
+            c for c in required
+            if c not in source_df.columns
         ]
 
         if missing:
             raise ValueError(
-                f"{seed} is missing columns: {missing}"
+                f"{seed} missing columns: {missing}"
             )
 
-        df = source_df.copy()
+        df = source_df[required].copy()
 
-        probability = pd.to_numeric(
-            df[probability_col],
-            errors="coerce"
-        )
-
-        # Predicted expected counts per record
-        df["Predicted_n_Delq_and_Claims"] = probability
-        df["Predicted_n_Claims"] = (
-            probability * claims_share
-        )
-        df["Predicted_n_Delqs"] = (
-            probability * (1 - claims_share)
-        )
-
-        deciles = pd.to_numeric(
-            df[decile_col]
+        ventiles = pd.to_numeric(
+            df[ventile_col]
             .astype("string")
             .str.extract(r"(\d+)", expand=False),
             errors="coerce"
@@ -170,62 +139,72 @@ def export_interactive_seed_report(
             .fillna("(Missing)")
         )
 
-        decile_values.update(
-            deciles.dropna().astype(int).tolist()
+        ventile_values.update(
+            ventiles.dropna().astype(int).tolist()
         )
         region_values.update(regions.tolist())
         market_values.update(markets.tolist())
         tenure_values.update(tenures.tolist())
 
-        # One record per observation per metric.
-        # Format:
-        # [seed, decile, region, market, tenure, metric, value]
+        # [seed, ventile, region, market, tenure,
+        #  metric, value, probability]
+
+        probability = (
+            pd.to_numeric(
+                df[probability_col],
+                errors="coerce"
+            )
+            .replace([np.inf, -np.inf], np.nan)
+        )
 
         for metric in metrics:
-
-            if metric not in df.columns:
-                raise ValueError(
-                    f"{seed}: metric {metric} not available"
-                )
 
             values = (
                 pd.to_numeric(df[metric], errors="coerce")
                 .replace([np.inf, -np.inf], np.nan)
             )
 
-            valid = values.notna()
+            # Include a row if metric OR probability exists.
+            # The JS code independently handles missing values.
 
-            for idx in np.flatnonzero(valid.to_numpy()):
+            valid = values.notna() | probability.notna()
 
-                d = deciles.iloc[idx]
+            for i in np.flatnonzero(valid.to_numpy()):
+
+                v = values.iloc[i]
+                p = probability.iloc[i]
+                ventile = ventiles.iloc[i]
 
                 records.append([
                     str(seed),
-                    int(d) if pd.notna(d) else None,
-                    str(regions.iloc[idx]),
-                    str(markets.iloc[idx]),
-                    str(tenures.iloc[idx]),
+                    int(ventile)
+                        if pd.notna(ventile) else None,
+                    str(regions.iloc[i]),
+                    str(markets.iloc[i]),
+                    str(tenures.iloc[i]),
                     metric,
-                    float(values.iloc[idx])
+                    float(v) if pd.notna(v) else None,
+                    float(p) if pd.notna(p) else None
                 ])
 
-    report_data = {
+    report = {
         "seeds": list(dfs.keys()),
         "baseline": baseline,
         "metrics": metrics,
         "colors": colors,
-        "deciles": sorted(decile_values),
+        "ventiles": sorted(ventile_values),
         "regions": sorted(region_values),
         "markets": sorted(market_values),
         "tenures": sorted(tenure_values),
         "records": records,
+        "claimsShare": claims_share,
         "decimals": decimals,
         "fontSize": inside_font_size,
         "chartHeight": chart_height
     }
 
     report_json = json.dumps(
-        report_data,
+        report,
         ensure_ascii=False,
         allow_nan=False,
         separators=(",", ":")
@@ -234,6 +213,7 @@ def export_interactive_seed_report(
     html = r"""
 <!DOCTYPE html>
 <html lang="en">
+
 <head>
 <meta charset="UTF-8">
 <meta name="viewport"
@@ -242,6 +222,7 @@ def export_interactive_seed_report(
 <title>Random Seed Sensitivity Analysis</title>
 
 <style>
+
 * { box-sizing: border-box; }
 
 body {
@@ -354,11 +335,13 @@ tbody tr:nth-child(even) {
     font-size: 13px;
     margin-top: 15px;
 }
+
 </style>
 
 <script>
 __PLOTLY_JS__
 </script>
+
 </head>
 
 <body>
@@ -368,7 +351,7 @@ __PLOTLY_JS__
 <h1>Random Seed Sensitivity Analysis</h1>
 
 <div class="subtitle">
-Comparison of experiments against baseline
+Interactive comparison against baseline
 </div>
 
 <div class="filters">
@@ -379,8 +362,8 @@ Comparison of experiments against baseline
 </div>
 
 <div class="filter">
-<label>Decile</label>
-<select id="decile"></select>
+<label>Ventile</label>
+<select id="ventile"></select>
 </div>
 
 <div class="filter">
@@ -412,6 +395,7 @@ Comparison of experiments against baseline
 
 <div class="table-wrap">
 <table>
+
 <thead>
 <tr>
 <th>Seed</th>
@@ -430,7 +414,9 @@ Comparison of experiments against baseline
 <th>Predicted Delqs</th>
 </tr>
 </thead>
+
 <tbody id="statsBody"></tbody>
+
 </table>
 </div>
 
@@ -444,7 +430,9 @@ __REPORT_JSON__
 </script>
 
 <script>
+
 (function () {
+
 "use strict";
 
 const report = JSON.parse(
@@ -453,87 +441,119 @@ const report = JSON.parse(
 
 const $ = id => document.getElementById(id);
 
-function option(select, value, label) {
-    const o = document.createElement("option");
-    o.value = value;
-    o.textContent = label;
-    select.appendChild(o);
+function addOption(select, value, label) {
+    const option = document.createElement("option");
+    option.value = value;
+    option.textContent = label;
+    select.appendChild(option);
 }
 
-Object.keys(report.metrics).forEach(m => {
-    option($("metric"), m, m);
+// Metric dropdown contains ONLY configured metrics.
+
+Object.keys(report.metrics).forEach(metric => {
+    addOption($("metric"), metric, metric);
 });
 
-option($("decile"), "", "All Deciles");
-report.deciles.forEach(d =>
-    option($("decile"), String(d), "Decile " + d)
+addOption($("ventile"), "", "All Ventiles");
+
+report.ventiles.forEach(v => {
+    addOption(
+        $("ventile"),
+        String(v),
+        "Ventile " + v
+    );
+});
+
+addOption($("region"), "", "All Regions");
+report.regions.forEach(x =>
+    addOption($("region"), x, x)
 );
 
-option($("region"), "", "All Regions");
-report.regions.forEach(x => option($("region"), x, x));
+addOption($("market"), "", "All Markets");
+report.markets.forEach(x =>
+    addOption($("market"), x, x)
+);
 
-option($("market"), "", "All Markets");
-report.markets.forEach(x => option($("market"), x, x));
+addOption($("tenure"), "", "All Tenures");
+report.tenures.forEach(x =>
+    addOption($("tenure"), x, x)
+);
 
-option($("tenure"), "", "All Tenures");
-report.tenures.forEach(x => option($("tenure"), x, x));
+function number(value, digits=report.decimals) {
+    if (value === null || !Number.isFinite(value)) {
+        return "N/A";
+    }
 
-function number(v, digits=report.decimals) {
-    if (v === null || !Number.isFinite(v)) return "N/A";
-    return v.toLocaleString("en-US", {
+    return value.toLocaleString("en-US", {
         minimumFractionDigits: digits,
         maximumFractionDigits: digits
     });
 }
 
-function metricNumber(v, metric) {
-    if (v === null || !Number.isFinite(v)) return "N/A";
+function metricNumber(value, metric) {
+    if (value === null || !Number.isFinite(value)) {
+        return "N/A";
+    }
 
     const cfg = report.metrics[metric];
 
     if (cfg.is_ratio) {
         return number(
-            v / (cfg.ratio_scale || 1) * 100
+            value / (cfg.ratio_scale || 1) * 100
         ) + "%";
     }
 
-    return number(v);
+    return number(value);
 }
 
-function deltaNumber(v, metric) {
-    if (v === null || !Number.isFinite(v)) return "N/A";
+function deltaNumber(value, metric) {
+    if (value === null || !Number.isFinite(value)) {
+        return "N/A";
+    }
 
     const cfg = report.metrics[metric];
-    const sign = v > 0 ? "+" : "";
+    const sign = value > 0 ? "+" : "";
 
     if (cfg.is_ratio) {
         return sign + number(
-            v / (cfg.ratio_scale || 1) * 100
+            value / (cfg.ratio_scale || 1) * 100
         ) + " pp";
     }
 
-    return sign + number(v);
+    return sign + number(value);
 }
 
-function pctNumber(v) {
-    if (v === null || !Number.isFinite(v)) return "N/A";
-    return (v > 0 ? "+" : "") + number(v) + "%";
+function percentNumber(value) {
+    if (value === null || !Number.isFinite(value)) {
+        return "N/A";
+    }
+
+    return (
+        (value > 0 ? "+" : "") +
+        number(value) +
+        "%"
+    );
 }
 
 function quantile(sorted, p) {
     if (!sorted.length) return null;
-    if (sorted.length === 1) return sorted[0];
+
+    if (sorted.length === 1) {
+        return sorted[0];
+    }
 
     const position = (sorted.length - 1) * p;
     const low = Math.floor(position);
     const high = Math.ceil(position);
     const weight = position - low;
 
-    return sorted[low] * (1 - weight) +
-           sorted[high] * weight;
+    return (
+        sorted[low] * (1 - weight) +
+        sorted[high] * weight
+    );
 }
 
-function stats(values, agg) {
+function calculateStats(values, aggregation) {
 
     if (!values.length) {
         return {
@@ -554,7 +574,7 @@ function stats(values, agg) {
 
     return {
         count: values.length,
-        total: agg === "sum" ? sum : avg,
+        total: aggregation === "sum" ? sum : avg,
         min: sorted[0],
         max: sorted[sorted.length - 1],
         avg: avg,
@@ -569,19 +589,20 @@ function update() {
     const metric = $("metric").value;
     const cfg = report.metrics[metric];
 
-    const decile = $("decile").value === ""
+    const ventile = $("ventile").value === ""
         ? null
-        : Number($("decile").value);
+        : Number($("ventile").value);
 
     const region = $("region").value;
     const market = $("market").value;
     const tenure = $("tenure").value;
 
-    // Filter once, retaining all metrics.
-    // This lets every bar display all three predicted counts.
+    // Select only the active metric.
+    // This prevents predicted counts being duplicated.
 
     const filtered = report.records.filter(r =>
-        (decile === null || r[1] === decile) &&
+        r[5] === metric &&
+        (ventile === null || r[1] === ventile) &&
         (region === "" || r[2] === region) &&
         (market === "" || r[3] === market) &&
         (tenure === "" || r[4] === tenure)
@@ -590,43 +611,56 @@ function update() {
     const grouped = {};
 
     report.seeds.forEach(seed => {
-        grouped[seed] = {};
-        Object.keys(report.metrics).forEach(m => {
-            grouped[seed][m] = [];
-        });
+        grouped[seed] = {
+            values: [],
+            probabilitySum: 0,
+            probabilityCount: 0
+        };
     });
 
     filtered.forEach(r => {
-        grouped[r[0]][r[5]].push(r[6]);
+
+        const group = grouped[r[0]];
+
+        if (r[6] !== null) {
+            group.values.push(r[6]);
+        }
+
+        if (r[7] !== null) {
+            group.probabilitySum += r[7];
+            group.probabilityCount += 1;
+        }
     });
 
     const result = {};
 
     report.seeds.forEach(seed => {
 
-        result[seed] = stats(
-            grouped[seed][metric],
+        const group = grouped[seed];
+
+        const s = calculateStats(
+            group.values,
             cfg.agg
         );
 
-        const predictedNames = [
-            "Predicted_n_Delq_and_Claims",
-            "Predicted_n_Claims",
-            "Predicted_n_Delqs"
-        ];
+        const p = group.probabilityCount
+            ? group.probabilitySum
+            : null;
 
-        result[seed].predicted = {};
+        s.predictedTotal = p;
 
-        predictedNames.forEach(name => {
-            const vals = grouped[seed][name];
-            result[seed].predicted[name] =
-                vals.length
-                ? vals.reduce((a, b) => a + b, 0)
-                : null;
-        });
+        s.predictedClaims = p === null
+            ? null
+            : p * report.claimsShare;
+
+        s.predictedDelqs = p === null
+            ? null
+            : p * (1 - report.claimsShare);
+
+        result[seed] = s;
     });
 
-    const baselineValue = result[report.baseline].total;
+    const baselineTotal = result[report.baseline].total;
 
     const rows = report.seeds.map(seed => {
 
@@ -634,16 +668,16 @@ function update() {
 
         const delta = (
             s.total !== null &&
-            baselineValue !== null
+            baselineTotal !== null
         )
-            ? s.total - baselineValue
+            ? s.total - baselineTotal
             : null;
 
         const deltaPct = (
             delta !== null &&
-            baselineValue !== 0
+            baselineTotal !== 0
         )
-            ? delta / baselineValue * 100
+            ? delta / baselineTotal * 100
             : null;
 
         return {
@@ -655,7 +689,7 @@ function update() {
     });
 
     // --------------------------------------------------------
-    // Chart
+    // BAR CHART
     // --------------------------------------------------------
 
     const traces = [];
@@ -665,24 +699,13 @@ function update() {
 
         if (r.total === null) return;
 
-        const p = r.predicted;
-
-        const predictedTotal =
-            p["Predicted_n_Delq_and_Claims"];
-
-        const predictedClaims =
-            p["Predicted_n_Claims"];
-
-        const predictedDelqs =
-            p["Predicted_n_Delqs"];
-
         const deltaText = r.seed === report.baseline
             ? "Baseline"
             : deltaNumber(r.delta, metric);
 
-        const pctText = r.seed === report.baseline
+        const deltaPctText = r.seed === report.baseline
             ? "Baseline"
-            : pctNumber(r.deltaPct);
+            : percentNumber(r.deltaPct);
 
         const lines = [
             "<b>Min: " + metricNumber(r.min, metric) + "</b>",
@@ -693,17 +716,19 @@ function update() {
             "<b>P90: " + metricNumber(r.p90, metric) + "</b>",
             "────────────",
             "<b>Pred Delq + Claims: " +
-                number(predictedTotal) + "</b>",
+                number(r.predictedTotal) + "</b>",
             "<b>Pred Claims: " +
-                number(predictedClaims) + "</b>",
+                number(r.predictedClaims) + "</b>",
             "<b>Pred Delqs: " +
-                number(predictedDelqs) + "</b>",
+                number(r.predictedDelqs) + "</b>",
             "────────────",
             "<b>Δ: " + deltaText + "</b>"
         ];
 
         if (!cfg.is_ratio) {
-            lines.push("<b>Δ%: " + pctText + "</b>");
+            lines.push(
+                "<b>Δ%: " + deltaPctText + "</b>"
+            );
         }
 
         const insideText = lines.join("<br>");
@@ -712,7 +737,7 @@ function update() {
             type: "bar",
             x: [i],
             y: [r.total],
-            width: 0.76,
+            width: 0.78,
             marker: {
                 color: report.colors[r.seed] || "#64748b"
             },
@@ -754,38 +779,24 @@ function update() {
         .map(r => r.total)
         .filter(v => v !== null && Number.isFinite(v));
 
-    const minimum = Math.min(0, ...totals);
-    const maximum = Math.max(0, ...totals);
-    const span = Math.max(maximum - minimum, 1e-9);
-
-    // The custom shapes below create full-height colored
-    // bar panels. This prevents the many statistics from
-    // disappearing when the actual bar is short.
-    //
-    // Actual aggregates remain represented by Plotly bars,
-    // with their values labeled above.
-
-    const shapes = report.seeds.map((seed, i) => ({
-        type: "rect",
-        xref: "x",
-        yref: "paper",
-        x0: i - 0.39,
-        x1: i + 0.39,
-        y0: 0.03,
-        y1: 0.80,
-        fillcolor: report.colors[seed] || "#64748b",
-        opacity: 0.12,
-        line: {width: 0},
-        layer: "below"
-    }));
+    const minValue = Math.min(0, ...totals);
+    const maxValue = Math.max(0, ...totals);
+    const span = Math.max(maxValue - minValue, 1e-9);
 
     const layout = {
         title: {
             text:
                 "<b>" + metric +
-                " — Random Seed Sensitivity</b>",
+                " — Random Seed Sensitivity</b>" +
+                "<br><sup>" +
+                (
+                    ventile === null
+                    ? "All Ventiles"
+                    : "Ventile " + ventile
+                ) +
+                "</sup>",
             x: 0.5,
-            font: {size: 23}
+            font: {size: 22}
         },
 
         height: report.chartHeight,
@@ -793,17 +804,20 @@ function update() {
         template: "plotly_white",
 
         margin: {
-            t: 120,
-            b: 80,
+            t: 125,
+            b: 90,
             l: 100,
-            r: 50
+            r: 60
         },
 
         xaxis: {
             tickmode: "array",
             tickvals: report.seeds.map((_, i) => i),
             ticktext: report.seeds,
-            range: [-0.6, report.seeds.length - 0.4],
+            range: [
+                -0.6,
+                report.seeds.length - 0.4
+            ],
             showgrid: false,
             title: "Experiment"
         },
@@ -811,8 +825,8 @@ function update() {
         yaxis: {
             title: metric,
             range: [
-                minimum - span * 0.08,
-                maximum + span * 0.25
+                minValue - span * 0.08,
+                maxValue + span * 0.25
             ],
             ticksuffix:
                 cfg.is_ratio &&
@@ -821,7 +835,6 @@ function update() {
                 : ""
         },
 
-        shapes,
         annotations,
 
         uniformtext: {
@@ -844,7 +857,7 @@ function update() {
     );
 
     // --------------------------------------------------------
-    // Detailed table
+    // TABLE
     // --------------------------------------------------------
 
     $("deltaHead").textContent =
@@ -859,8 +872,6 @@ function update() {
 
         const tr = document.createElement("tr");
 
-        const p = r.predicted;
-
         const fields = [
             r.seed,
             number(r.count, 0),
@@ -870,16 +881,16 @@ function update() {
                 : deltaNumber(r.delta, metric),
             r.seed === report.baseline
                 ? "Baseline"
-                : pctNumber(r.deltaPct),
+                : percentNumber(r.deltaPct),
             metricNumber(r.min, metric),
             metricNumber(r.max, metric),
             metricNumber(r.avg, metric),
             metricNumber(r.p10, metric),
             metricNumber(r.p50, metric),
             metricNumber(r.p90, metric),
-            number(p["Predicted_n_Delq_and_Claims"]),
-            number(p["Predicted_n_Claims"]),
-            number(p["Predicted_n_Delqs"])
+            number(r.predictedTotal),
+            number(r.predictedClaims),
+            number(r.predictedDelqs)
         ];
 
         fields.forEach((value, index) => {
@@ -898,18 +909,18 @@ function update() {
     });
 
     $("note").textContent = cfg.is_ratio
-        ? "SMI3_LR differences are in percentage points (pp)."
+        ? "SMI3_LR differences are shown in percentage points."
         : "Δ = experiment minus baseline; Δ% = Δ / baseline × 100.";
 }
 
-["metric", "decile", "region", "market", "tenure"]
+["metric", "ventile", "region", "market", "tenure"]
     .forEach(id => {
         $(id).addEventListener("change", update);
     });
 
 $("reset").addEventListener("click", () => {
     $("metric").selectedIndex = 0;
-    $("decile").value = "";
+    $("ventile").value = "";
     $("region").value = "";
     $("market").value = "";
     $("tenure").value = "";
@@ -925,41 +936,18 @@ update();
 </html>
 """
 
-    html = (
+    final_html = (
         html.replace("__PLOTLY_JS__", get_plotlyjs())
             .replace("__REPORT_JSON__", report_json)
     )
 
     output = Path(filename).resolve()
-    output.write_text(html, encoding="utf-8")
+    output.write_text(final_html, encoding="utf-8")
 
-    print(f"Report saved: {output}")
+    print(f"Report created: {output}")
     print(
-        f"HTML size: "
+        f"File size: "
         f"{output.stat().st_size / 1024**2:.2f} MB"
     )
 
     return output
-
-=========
-
-
-dfs = {
-    "RS42": df_scored_42,
-    "RS07": df_scored_07,
-    "RS101": df_scored_101,
-    "RS151": df_scored_151
-}
-
-report_path = export_interactive_seed_report(
-    dfs=dfs,
-    filename="Random_Seed_Sensitivity_Report.html",
-    baseline="RS42",
-    probability_col="prediction_probability",
-    claims_share=0.62,
-    decimals=2,
-    inside_font_size=13,
-    chart_height=950
-)
-
-print(report_path)
