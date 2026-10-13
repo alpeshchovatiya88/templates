@@ -1,1389 +1,256 @@
 
-import json
-from pathlib import Path
-
-import numpy as np
 import pandas as pd
-from plotly.offline import get_plotlyjs
+import plotly.graph_objects as go
 
 
-def export_interactive_seed_report(
+def plot_by_decile(
     dfs,
-    filename="Random_Seed_Sensitivity_Loss_Comparison.html",
-    ventile_col="rr_model_decile",
-    region_col="ECON_REGION",
-    market_col="POD_MARKET_CODE",
-    tenure_col="PRK_TENURE",
-    probability_col="prediction_probability",
-    metrics=None,
-    baseline="RS42",
-    claims_share=0.62,
-    colors=None,
+    decile_col,
+    value_col,
+    agg="sum",
+    title=None,
     decimals=2,
-    inside_font_size=12,
-    chart_height=900,
+    label_font_size=15,
+    height=700
 ):
-    """
-    Standalone offline HTML random seed sensitivity report.
 
-    Features:
-      - Metric dropdown: SMI3_LOSS / SMI3_LR
-      - Multi-select Ventile checkboxes
-      - Select All / Clear All Ventiles
-      - ECON_REGION, POD_MARKET_CODE, PRK_TENURE filters
-      - Predicted Delq + Claims, Claims, Delqs inside every bar
-      - Min, Max, Avg, P10, P50, P90 inside every bar
-      - SMI3_LOSS: absolute delta and relative delta %
-      - SMI3_LR: delta in percentage points only
-      - Detailed table
-      - Offline self-contained HTML
+    # --------------------------------------------------
+    # 1. Aggregate metric by decile for each seed
+    # --------------------------------------------------
 
-    Note:
-      No ventile values selected = All Ventiles.
-
-    The input DataFrames are not modified.
-    """
-
-    if not dfs:
-        raise ValueError("dfs cannot be empty")
-
-    if baseline not in dfs:
-        raise ValueError(
-            f"Baseline '{baseline}' is not in dfs"
-        )
-
-    if not 0 <= claims_share <= 1:
-        raise ValueError(
-            "claims_share must be between 0 and 1"
-        )
-
-    if metrics is None:
-        metrics = {
-            "SMI3_LOSS": {
-                "agg": "sum",
-                "is_ratio": False
-            },
-            "SMI3_LR": {
-                "agg": "mean",
-                "is_ratio": True,
-                "ratio_scale": 100
-            }
-        }
-
-    if colors is None:
-        colors = {
-            "RS42": "#17365D",
-            "RS07": "#E66B23",
-            "RS101": "#09988A",
-            "RS151": "#7952B3"
-        }
-
-    for metric, config in metrics.items():
-        if config.get("agg") not in ("sum", "mean"):
-            raise ValueError(
-                f"{metric}: aggregation must be sum or mean"
-            )
-
-    # --------------------------------------------------------
-    # Prepare data
-    #
-    # Each source observation appears ONCE.
-    # This prevents predicted counts being duplicated
-    # when the selected metric changes.
-    #
-    # Record structure:
-    # [
-    #   seed,
-    #   ventile,
-    #   region,
-    #   market,
-    #   tenure,
-    #   metric_1_value,
-    #   metric_2_value,
-    #   ...,
-    #   prediction_probability
-    # ]
-    # --------------------------------------------------------
-
-    records = []
-
-    all_ventiles = set()
-    all_regions = set()
-    all_markets = set()
-    all_tenures = set()
-
-    metric_names = list(metrics.keys())
-
-    required_cols = list(dict.fromkeys([
-        ventile_col,
-        region_col,
-        market_col,
-        tenure_col,
-        probability_col,
-        *metric_names
-    ]))
-
-    for seed, source_df in dfs.items():
-
-        missing = [
-            col for col in required_cols
-            if col not in source_df.columns
-        ]
-
-        if missing:
-            raise ValueError(
-                f"{seed}: missing columns {missing}"
-            )
-
-        df = source_df[required_cols].copy()
-
-        ventiles = pd.to_numeric(
-            df[ventile_col]
-            .astype("string")
-            .str.extract(r"(\d+)", expand=False),
-            errors="coerce"
-        )
-
-        regions = (
-            df[region_col]
-            .astype("string")
-            .fillna("(Missing)")
-        )
-
-        markets = (
-            df[market_col]
-            .astype("string")
-            .fillna("(Missing)")
-        )
-
-        tenures = (
-            df[tenure_col]
-            .astype("string")
-            .fillna("(Missing)")
-        )
-
-        probability = (
-            pd.to_numeric(
-                df[probability_col],
-                errors="coerce"
-            )
-            .replace([np.inf, -np.inf], np.nan)
-        )
-
-        metric_series = {}
-
-        for metric in metric_names:
-            metric_series[metric] = (
-                pd.to_numeric(
-                    df[metric],
+    summary = pd.DataFrame({
+        name: (
+            df.assign(
+                _decile=pd.to_numeric(
+                    df[decile_col]
+                    .astype(str)
+                    .str.extract(r"(\d+)", expand=False),
                     errors="coerce"
                 )
-                .replace([np.inf, -np.inf], np.nan)
             )
-
-        all_ventiles.update(
-            ventiles.dropna().astype(int).tolist()
+            .groupby("_decile")[value_col]
+            .agg(agg)
         )
-        all_regions.update(regions.tolist())
-        all_markets.update(markets.tolist())
-        all_tenures.update(tenures.tolist())
+        for name, df in dfs.items()
+    }).sort_index()
 
-        # Convert to compact Python lists before iteration.
+    # --------------------------------------------------
+    # 2. Create grouped bar chart
+    # --------------------------------------------------
 
-        v_list = ventiles.tolist()
-        r_list = regions.tolist()
-        m_list = markets.tolist()
-        t_list = tenures.tolist()
-        p_list = probability.tolist()
+    fig = go.Figure()
 
-        metric_lists = [
-            metric_series[metric].tolist()
-            for metric in metric_names
-        ]
+    for name in summary.columns:
 
-        for i in range(len(df)):
+        values = summary[name]
 
-            ventile = v_list[i]
+        fig.add_trace(
+            go.Bar(
+                x=summary.index,
+                y=values,
+                name=name,
 
-            record = [
-                str(seed),
-                int(ventile)
-                    if pd.notna(ventile)
-                    else None,
-                str(r_list[i]),
-                str(m_list[i]),
-                str(t_list[i])
-            ]
+                # Bold formatted values above bars
+                text=[
+                    f"{v:,.{decimals}f}"
+                    if pd.notna(v) else ""
+                    for v in values
+                ],
 
-            for values in metric_lists:
-                value = values[i]
+                textposition="outside",
 
-                record.append(
-                    float(value)
-                    if pd.notna(value)
-                    else None
+                textfont=dict(
+                    family="Arial Black",
+                    size=label_font_size,
+                    color="black"
+                ),
+
+                cliponaxis=False,
+
+                hovertemplate=(
+                    "Decile: %{x}<br>"
+                    f"Seed: {name}<br>"
+                    "Value: %{y:,.2f}"
+                    "<extra></extra>"
                 )
-
-            p = p_list[i]
-
-            record.append(
-                float(p)
-                if pd.notna(p)
-                else None
             )
-
-            records.append(record)
-
-    report_data = {
-        "seeds": list(dfs.keys()),
-        "baseline": baseline,
-        "metrics": metrics,
-        "metricNames": metric_names,
-        "colors": colors,
-        "ventiles": sorted(all_ventiles),
-        "regions": sorted(all_regions),
-        "markets": sorted(all_markets),
-        "tenures": sorted(all_tenures),
-        "records": records,
-        "claimsShare": claims_share,
-        "decimals": decimals,
-        "insideFontSize": inside_font_size,
-        "chartHeight": chart_height
-    }
-
-    report_json = json.dumps(
-        report_data,
-        ensure_ascii=False,
-        allow_nan=False,
-        separators=(",", ":")
-    ).replace("<", "\\u003c")
-
-    # --------------------------------------------------------
-    # HTML / CSS / JAVASCRIPT
-    # --------------------------------------------------------
-
-    html = r"""
-<!DOCTYPE html>
-<html lang="en">
-
-<head>
-<meta charset="UTF-8">
-<meta name="viewport"
-      content="width=device-width, initial-scale=1">
-
-<title>Random Seed Sensitivity Loss Comparison</title>
-
-<style>
-
-* {
-    box-sizing: border-box;
-}
-
-body {
-    margin: 0;
-    background: #f4f6fa;
-    font-family: Arial, sans-serif;
-    color: #172033;
-}
-
-.container {
-    max-width: 1700px;
-    margin: auto;
-    padding: 25px;
-}
-
-h1 {
-    margin: 0 0 12px;
-    font-size: 28px;
-    color: #17365D;
-}
-
-.subtitle {
-    color: #526176;
-    margin-bottom: 7px;
-    font-size: 15px;
-}
-
-.note-subtitle {
-    margin-bottom: 23px;
-    color: #526176;
-    font-size: 14px;
-}
-
-.filters {
-    display: flex;
-    flex-wrap: wrap;
-    align-items: flex-end;
-    gap: 16px;
-    padding: 20px;
-    background: white;
-    border-radius: 12px;
-    margin-bottom: 20px;
-    box-shadow: 0 2px 10px rgba(0,0,0,0.035);
-}
-
-.filter {
-    display: flex;
-    flex-direction: column;
-    gap: 8px;
-    position: relative;
-}
-
-label {
-    font-weight: bold;
-    font-size: 13px;
-}
-
-select {
-    min-width: 165px;
-    max-width: 240px;
-    padding: 11px;
-    background: white;
-    border: 1px solid #cbd5e1;
-    border-radius: 7px;
-    font-size: 14px;
-}
-
-button {
-    cursor: pointer;
-    font-family: inherit;
-}
-
-.reset-btn {
-    padding: 12px 19px;
-    border: 0;
-    border-radius: 7px;
-    background: #17365D;
-    color: white;
-    font-weight: bold;
-}
-
-.card {
-    background: white;
-    border-radius: 12px;
-    padding: 18px;
-    margin-bottom: 20px;
-    box-shadow: 0 2px 10px rgba(0,0,0,0.035);
-}
-
-#chart {
-    width: 100%;
-    min-height: 900px;
-}
-
-.table-wrap {
-    overflow-x: auto;
-}
-
-table {
-    width: 100%;
-    border-collapse: collapse;
-    white-space: nowrap;
-    font-size: 13px;
-}
-
-th {
-    background: #17365D;
-    color: white;
-    text-align: right;
-    padding: 12px;
-}
-
-td {
-    padding: 12px;
-    text-align: right;
-    border-bottom: 1px solid #e2e8f0;
-}
-
-th:first-child,
-td:first-child {
-    text-align: left;
-}
-
-tbody tr:nth-child(even) {
-    background: #f8fafc;
-}
-
-.table-note {
-    color: #64748b;
-    font-size: 13px;
-    margin-top: 15px;
-    line-height: 1.6;
-}
-
-/* --------------------------------------------
-   Multi-select Ventile dropdown
--------------------------------------------- */
-
-.multi-select {
-    position: relative;
-    width: 220px;
-}
-
-.multi-trigger {
-    width: 100%;
-    background: white;
-    border: 1px solid #cbd5e1;
-    border-radius: 7px;
-    padding: 11px;
-    min-height: 42px;
-    text-align: left;
-    font-size: 14px;
-    color: #172033;
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    gap: 8px;
-}
-
-.multi-trigger:hover {
-    border-color: #64748b;
-}
-
-.multi-panel {
-    display: none;
-    position: absolute;
-    top: calc(100% + 5px);
-    left: 0;
-    width: 260px;
-    max-height: 370px;
-    overflow-y: auto;
-    background: white;
-    border: 1px solid #cbd5e1;
-    border-radius: 9px;
-    box-shadow: 0 8px 25px rgba(0,0,0,0.16);
-    z-index: 1000;
-    padding: 10px;
-}
-
-.multi-panel.open {
-    display: block;
-}
-
-.multi-actions {
-    display: flex;
-    gap: 7px;
-    margin-bottom: 10px;
-}
-
-.multi-actions button {
-    flex: 1;
-    border: 1px solid #cbd5e1;
-    background: #f8fafc;
-    border-radius: 5px;
-    padding: 8px 6px;
-    font-size: 12px;
-    font-weight: bold;
-}
-
-.ventile-option {
-    display: flex;
-    align-items: center;
-    gap: 9px;
-    padding: 7px 5px;
-    cursor: pointer;
-    font-size: 13px;
-    font-weight: normal;
-    border-radius: 5px;
-}
-
-.ventile-option:hover {
-    background: #f1f5f9;
-}
-
-.ventile-option input {
-    accent-color: #17365D;
-    width: 15px;
-    height: 15px;
-}
-
-@media (max-width: 700px) {
-
-    .container {
-        padding: 12px;
-    }
-
-    .filters {
-        align-items: stretch;
-    }
-
-    select,
-    .multi-select {
-        width: 100%;
-        max-width: none;
-    }
-
-    .filter {
-        width: 100%;
-    }
-
-    .multi-panel {
-        width: 100%;
-    }
-}
-
-</style>
-
-<script>
-__PLOTLY_JS__
-</script>
-
-</head>
-
-<body>
-
-<div class="container">
-
-<h1>Random Seed Sensitivity Loss Comparison</h1>
-
-<div class="subtitle">
-<b>Data - October 2025 - May 2026</b>
-</div>
-
-<div class="note-subtitle">
-<b>Note -</b> Ventile means 5% increments in percentile.
-</div>
-
-<div class="filters">
-
-<div class="filter">
-<label for="metric">Metric</label>
-<select id="metric"></select>
-</div>
-
-<div class="filter">
-
-<label>Ventile (Multiple Selection)</label>
-
-<div class="multi-select" id="ventileContainer">
-
-<button
-    type="button"
-    class="multi-trigger"
-    id="ventileTrigger"
-    aria-expanded="false"
->
-    <span id="ventileLabel">All Ventiles</span>
-    <span>▼</span>
-</button>
-
-<div class="multi-panel" id="ventilePanel">
-
-<div class="multi-actions">
-<button type="button" id="selectAllVentiles">
-Select All
-</button>
-
-<button type="button" id="clearVentiles">
-Clear All
-</button>
-</div>
-
-<div id="ventileOptions"></div>
-
-</div>
-</div>
-</div>
-
-<div class="filter">
-<label for="region">ECON_REGION</label>
-<select id="region"></select>
-</div>
-
-<div class="filter">
-<label for="market">POD_MARKET_CODE</label>
-<select id="market"></select>
-</div>
-
-<div class="filter">
-<label for="tenure">PRK_TENURE</label>
-<select id="tenure"></select>
-</div>
-
-<button class="reset-btn" id="reset" type="button">
-Reset Filters
-</button>
-
-</div>
-
-<div class="card">
-<div id="chart"></div>
-</div>
-
-<div class="card">
-
-<h2>Detailed Statistics</h2>
-
-<div class="table-wrap">
-
-<table>
-
-<thead>
-<tr>
-<th>Seed</th>
-<th>Count</th>
-<th>Aggregate</th>
-<th id="deltaHead">Δ</th>
-<th id="pctHead">Δ%</th>
-<th>Min</th>
-<th>Max</th>
-<th>Avg</th>
-<th>P10</th>
-<th>P50</th>
-<th>P90</th>
-<th>Predicted Delq + Claims</th>
-<th>Predicted Claims</th>
-<th>Predicted Delqs</th>
-</tr>
-</thead>
-
-<tbody id="statsBody"></tbody>
-
-</table>
-</div>
-
-<div class="table-note" id="tableNote"></div>
-
-</div>
-
-</div>
-
-<script id="reportData" type="application/json">
-__REPORT_JSON__
-</script>
-
-<script>
-
-(function () {
-
-"use strict";
-
-const report = JSON.parse(
-    document.getElementById("reportData").textContent
-);
-
-const $ = id => document.getElementById(id);
-
-const selectedVentiles = new Set();
-
-const metricIndex = {};
-report.metricNames.forEach((metric, i) => {
-    metricIndex[metric] = 5 + i;
-});
-
-const probabilityIndex = 5 + report.metricNames.length;
-
-function addOption(select, value, label) {
-    const option = document.createElement("option");
-    option.value = value;
-    option.textContent = label;
-    select.appendChild(option);
-}
-
-// ------------------------------------------------------------
-// Standard dropdowns
-// ------------------------------------------------------------
-
-report.metricNames.forEach(metric => {
-    addOption($("metric"), metric, metric);
-});
-
-addOption($("region"), "", "All Regions");
-report.regions.forEach(value => {
-    addOption($("region"), value, value);
-});
-
-addOption($("market"), "", "All Markets");
-report.markets.forEach(value => {
-    addOption($("market"), value, value);
-});
-
-addOption($("tenure"), "", "All Tenures");
-report.tenures.forEach(value => {
-    addOption($("tenure"), value, value);
-});
-
-// ------------------------------------------------------------
-// Multi-select Ventile checkboxes
-// ------------------------------------------------------------
-
-function updateVentileLabel() {
-
-    const values = [...selectedVentiles]
-        .sort((a, b) => a - b);
-
-    if (
-        values.length === 0 ||
-        values.length === report.ventiles.length
-    ) {
-        $("ventileLabel").textContent = "All Ventiles";
-    } else if (values.length <= 3) {
-        $("ventileLabel").textContent =
-            "Ventile " + values.join(", ");
-    } else {
-        $("ventileLabel").textContent =
-            values.length + " Ventiles Selected";
-    }
-}
-
-function syncVentileCheckboxes() {
-    document
-        .querySelectorAll(".ventile-checkbox")
-        .forEach(checkbox => {
-            checkbox.checked = selectedVentiles.has(
-                Number(checkbox.value)
-            );
-        });
-}
-
-report.ventiles.forEach(ventile => {
-
-    const label = document.createElement("label");
-    label.className = "ventile-option";
-
-    const checkbox = document.createElement("input");
-    checkbox.type = "checkbox";
-    checkbox.className = "ventile-checkbox";
-    checkbox.value = String(ventile);
-
-    const text = document.createElement("span");
-    text.textContent = "Ventile " + ventile;
-
-    checkbox.addEventListener("change", () => {
-
-        if (checkbox.checked) {
-            selectedVentiles.add(ventile);
-        } else {
-            selectedVentiles.delete(ventile);
-        }
-
-        updateVentileLabel();
-        update();
-    });
-
-    label.appendChild(checkbox);
-    label.appendChild(text);
-
-    $("ventileOptions").appendChild(label);
-});
-
-$("ventileTrigger").addEventListener("click", event => {
-
-    event.stopPropagation();
-
-    const panel = $("ventilePanel");
-    const isOpen = panel.classList.toggle("open");
-
-    $("ventileTrigger").setAttribute(
-        "aria-expanded",
-        String(isOpen)
-    );
-});
-
-document.addEventListener("click", event => {
-
-    if (!$("ventileContainer").contains(event.target)) {
-
-        $("ventilePanel").classList.remove("open");
-
-        $("ventileTrigger").setAttribute(
-            "aria-expanded",
-            "false"
-        );
-    }
-});
-
-$("selectAllVentiles").addEventListener("click", () => {
-
-    selectedVentiles.clear();
-
-    report.ventiles.forEach(v => {
-        selectedVentiles.add(v);
-    });
-
-    syncVentileCheckboxes();
-    updateVentileLabel();
-    update();
-});
-
-$("clearVentiles").addEventListener("click", () => {
-
-    selectedVentiles.clear();
-
-    syncVentileCheckboxes();
-    updateVentileLabel();
-    update();
-});
-
-// ------------------------------------------------------------
-// Formatting helpers
-// ------------------------------------------------------------
-
-function number(value, digits=report.decimals) {
-
-    if (value === null || !Number.isFinite(value)) {
-        return "N/A";
-    }
-
-    return value.toLocaleString("en-US", {
-        minimumFractionDigits: digits,
-        maximumFractionDigits: digits
-    });
-}
-
-function metricNumber(value, metric) {
-
-    if (value === null || !Number.isFinite(value)) {
-        return "N/A";
-    }
-
-    const cfg = report.metrics[metric];
-
-    if (cfg.is_ratio) {
-        return number(
-            value / (cfg.ratio_scale || 1) * 100
-        ) + "%";
-    }
-
-    return number(value);
-}
-
-function deltaNumber(value, metric) {
-
-    if (value === null || !Number.isFinite(value)) {
-        return "N/A";
-    }
-
-    const cfg = report.metrics[metric];
-    const sign = value > 0 ? "+" : "";
-
-    if (cfg.is_ratio) {
-        return sign + number(
-            value / (cfg.ratio_scale || 1) * 100
-        ) + " pp";
-    }
-
-    return sign + number(value);
-}
-
-function percentNumber(value) {
-
-    if (value === null || !Number.isFinite(value)) {
-        return "N/A";
-    }
-
-    return (
-        (value > 0 ? "+" : "") +
-        number(value) +
-        "%"
-    );
-}
-
-function quantile(sorted, p) {
-
-    if (!sorted.length) return null;
-
-    if (sorted.length === 1) return sorted[0];
-
-    const position = (sorted.length - 1) * p;
-
-    const low = Math.floor(position);
-    const high = Math.ceil(position);
-    const weight = position - low;
-
-    return (
-        sorted[low] * (1 - weight) +
-        sorted[high] * weight
-    );
-}
-
-function calculateStats(values, agg) {
-
-    if (!values.length) {
-        return {
-            count: 0,
-            total: null,
-            min: null,
-            max: null,
-            avg: null,
-            p10: null,
-            p50: null,
-            p90: null
-        };
-    }
-
-    const sorted = [...values].sort((a, b) => a - b);
-
-    const sum = values.reduce(
-        (a, b) => a + b,
-        0
-    );
-
-    const avg = sum / values.length;
-
-    return {
-        count: values.length,
-        total: agg === "sum" ? sum : avg,
-        min: sorted[0],
-        max: sorted[sorted.length - 1],
-        avg: avg,
-        p10: quantile(sorted, 0.10),
-        p50: quantile(sorted, 0.50),
-        p90: quantile(sorted, 0.90)
-    };
-}
-
-// ------------------------------------------------------------
-// Update chart and table
-// ------------------------------------------------------------
-
-function update() {
-
-    const metric = $("metric").value;
-    const cfg = report.metrics[metric];
-
-    const region = $("region").value;
-    const market = $("market").value;
-    const tenure = $("tenure").value;
-
-    const allVentilesSelected =
-        selectedVentiles.size === 0 ||
-        selectedVentiles.size === report.ventiles.length;
-
-    const grouped = {};
-
-    report.seeds.forEach(seed => {
-        grouped[seed] = {
-            values: [],
-            probabilitySum: 0,
-            probabilityCount: 0
-        };
-    });
-
-    const selectedMetricIndex = metricIndex[metric];
-
-    // Each source observation is processed once.
-    // Predicted counts are therefore NOT double counted.
-
-    report.records.forEach(r => {
-
-        const seed = r[0];
-        const ventile = r[1];
-        const rowRegion = r[2];
-        const rowMarket = r[3];
-        const rowTenure = r[4];
-
-        if (
-            !allVentilesSelected &&
-            !selectedVentiles.has(ventile)
-        ) return;
-
-        if (region && rowRegion !== region) return;
-        if (market && rowMarket !== market) return;
-        if (tenure && rowTenure !== tenure) return;
-
-        const group = grouped[seed];
-
-        const value = r[selectedMetricIndex];
-        const probability = r[probabilityIndex];
-
-        if (value !== null) {
-            group.values.push(value);
-        }
-
-        if (probability !== null) {
-            group.probabilitySum += probability;
-            group.probabilityCount += 1;
-        }
-    });
-
-    const result = {};
-
-    report.seeds.forEach(seed => {
-
-        const group = grouped[seed];
-
-        const s = calculateStats(
-            group.values,
-            cfg.agg
-        );
-
-        const predictedTotal =
-            group.probabilityCount > 0
-            ? group.probabilitySum
-            : null;
-
-        s.predictedTotal = predictedTotal;
-
-        s.predictedClaims =
-            predictedTotal === null
-            ? null
-            : predictedTotal * report.claimsShare;
-
-        s.predictedDelqs =
-            predictedTotal === null
-            ? null
-            : predictedTotal * (1 - report.claimsShare);
-
-        result[seed] = s;
-    });
-
-    const baselineValue =
-        result[report.baseline].total;
-
-    const rows = report.seeds.map(seed => {
-
-        const s = result[seed];
-
-        const delta = (
-            s.total !== null &&
-            baselineValue !== null
         )
-            ? s.total - baselineValue
-            : null;
 
-        const deltaPct = (
-            delta !== null &&
-            baselineValue !== 0
+    # --------------------------------------------------
+    # 3. Decile dropdown
+    # --------------------------------------------------
+
+    buttons = [
+        dict(
+            label="All Deciles",
+            method="relayout",
+            args=[
+                {"xaxis.range": [0.5, 20.5]}
+            ]
         )
-            ? delta / baselineValue * 100
-            : null;
+    ]
 
-        return {
-            seed,
-            ...s,
-            delta,
-            deltaPct
-        };
-    });
+    for d in summary.index:
 
-    // --------------------------------------------------------
-    // Chart
-    // --------------------------------------------------------
+        buttons.append(
+            dict(
+                label=f"Decile {int(d)}",
+                method="relayout",
+                args=[
+                    {
+                        "xaxis.range": [
+                            float(d) - 0.5,
+                            float(d) + 0.5
+                        ]
+                    }
+                ]
+            )
+        )
 
-    const traces = [];
-    const annotations = [];
+    # --------------------------------------------------
+    # 4. Set axis limits to leave space for labels
+    # --------------------------------------------------
 
-    rows.forEach((r, i) => {
+    max_value = summary.max().max()
+    min_value = summary.min().min()
 
-        if (r.total === null) return;
+    if pd.isna(max_value):
+        max_value = 0
 
-        const deltaText =
-            r.seed === report.baseline
-            ? "Baseline"
-            : deltaNumber(r.delta, metric);
+    if pd.isna(min_value):
+        min_value = 0
 
-        const deltaPctText =
-            r.seed === report.baseline
-            ? "Baseline"
-            : percentNumber(r.deltaPct);
+    max_value = float(max_value)
+    min_value = float(min_value)
 
-        const lines = [
-            "<b>Min: " + metricNumber(r.min, metric) + "</b>",
-            "<b>Max: " + metricNumber(r.max, metric) + "</b>",
-            "<b>Avg: " + metricNumber(r.avg, metric) + "</b>",
-            "<b>P10: " + metricNumber(r.p10, metric) + "</b>",
-            "<b>P50: " + metricNumber(r.p50, metric) + "</b>",
-            "<b>P90: " + metricNumber(r.p90, metric) + "</b>",
-            "────────────",
-            "<b>Pred Delq + Claims: " +
-                number(r.predictedTotal) + "</b>",
-            "<b>Pred Claims: " +
-                number(r.predictedClaims) + "</b>",
-            "<b>Pred Delqs: " +
-                number(r.predictedDelqs) + "</b>",
-            "────────────",
-            "<b>Δ: " + deltaText + "</b>"
-        ];
+    # Extra 25% headroom above tallest positive bar
+    # and below lowest negative bar.
 
-        if (!cfg.is_ratio) {
-            lines.push(
-                "<b>Δ%: " + deltaPctText + "</b>"
-            );
-        }
-
-        const insideText = lines.join("<br>");
-
-        traces.push({
-            type: "bar",
-            x: [i],
-            y: [r.total],
-            width: 0.78,
-
-            marker: {
-                color: report.colors[r.seed] || "#64748b"
-            },
-
-            text: [insideText],
-            textposition: "inside",
-            insidetextanchor: "middle",
-            constraintext: "none",
-            cliponaxis: false,
-
-            textfont: {
-                size: report.insideFontSize,
-                color: "white",
-                family: "Arial"
-            },
-
-            hovertemplate:
-                "<b>" + r.seed + "</b><br>" +
-                "Aggregate: " +
-                metricNumber(r.total, metric) +
-                "<br>" + insideText +
-                "<extra></extra>",
-
-            showlegend: false
-        });
-
-        annotations.push({
-            x: i,
-            y: r.total,
-            text: "<b>" +
-                metricNumber(r.total, metric) +
-                "</b>",
-            showarrow: false,
-            yshift: r.total >= 0 ? 20 : -20,
-            font: {
-                size: 17,
-                color: "#172033"
-            }
-        });
-    });
-
-    const totals = rows
-        .map(r => r.total)
-        .filter(v => v !== null && Number.isFinite(v));
-
-    const minValue = Math.min(0, ...totals);
-    const maxValue = Math.max(0, ...totals);
-    const span = Math.max(maxValue - minValue, 1e-9);
-
-    const selectedList = [...selectedVentiles]
-        .sort((a, b) => a - b);
-
-    const ventileText = allVentilesSelected
-        ? "All Ventiles"
-        : "Ventiles: " + selectedList.join(", ");
-
-    const layout = {
-
-        title: {
-            text:
-                "<b>" + metric +
-                " — Random Seed Sensitivity</b>" +
-                "<br><sup>" + ventileText + "</sup>",
-            x: 0.5,
-            font: {
-                size: 22
-            }
-        },
-
-        height: report.chartHeight,
-
-        template: "plotly_white",
-
-        margin: {
-            t: 125,
-            b: 90,
-            l: 100,
-            r: 60
-        },
-
-        xaxis: {
-            tickmode: "array",
-            tickvals: report.seeds.map((_, i) => i),
-            ticktext: report.seeds,
-            range: [
-                -0.6,
-                report.seeds.length - 0.4
-            ],
-            showgrid: false,
-            title: "Experiment"
-        },
-
-        yaxis: {
-            title: metric,
-            range: [
-                minValue - span * 0.08,
-                maxValue + span * 0.25
-            ],
-            ticksuffix:
-                cfg.is_ratio &&
-                (cfg.ratio_scale || 1) === 100
-                ? "%"
-                : ""
-        },
-
-        annotations,
-
-        uniformtext: {
-            minsize: 9,
-            mode: "show"
-        },
-
-        paper_bgcolor: "white",
-        plot_bgcolor: "white"
-    };
-
-    Plotly.react(
-        "chart",
-        traces,
-        layout,
-        {
-            responsive: true,
-            displaylogo: false,
-            toImageButtonOptions: {
-                format: "png",
-                filename: "random_seed_sensitivity",
-                scale: 2
-            }
-        }
-    );
-
-    // --------------------------------------------------------
-    // Table
-    // --------------------------------------------------------
-
-    $("deltaHead").textContent =
-        cfg.is_ratio ? "Δ (pp)" : "Δ";
-
-    $("pctHead").style.display =
-        cfg.is_ratio ? "none" : "";
-
-    $("statsBody").innerHTML = "";
-
-    rows.forEach(r => {
-
-        const tr = document.createElement("tr");
-
-        const fields = [
-            r.seed,
-            number(r.count, 0),
-            metricNumber(r.total, metric),
-
-            r.seed === report.baseline
-                ? "Baseline"
-                : deltaNumber(r.delta, metric),
-
-            r.seed === report.baseline
-                ? "Baseline"
-                : percentNumber(r.deltaPct),
-
-            metricNumber(r.min, metric),
-            metricNumber(r.max, metric),
-            metricNumber(r.avg, metric),
-            metricNumber(r.p10, metric),
-            metricNumber(r.p50, metric),
-            metricNumber(r.p90, metric),
-
-            number(r.predictedTotal),
-            number(r.predictedClaims),
-            number(r.predictedDelqs)
-        ];
-
-        fields.forEach((value, index) => {
-
-            const td = document.createElement("td");
-            td.textContent = value;
-
-            if (index === 4 && cfg.is_ratio) {
-                td.style.display = "none";
-            }
-
-            tr.appendChild(td);
-        });
-
-        $("statsBody").appendChild(tr);
-    });
-
-    $("tableNote").textContent = cfg.is_ratio
-        ? "SMI3_LR: Δ is shown in percentage points (pp). "
-          + "Predicted counts are based on the sum of "
-          + "prediction probabilities."
-        : "Δ = selected experiment aggregate minus baseline. "
-          + "Δ% = Δ / baseline aggregate × 100. "
-          + "Predicted counts are based on the sum of "
-          + "prediction probabilities.";
-}
-
-// ------------------------------------------------------------
-// Filter listeners
-// ------------------------------------------------------------
-
-["metric", "region", "market", "tenure"]
-    .forEach(id => {
-        $(id).addEventListener("change", update);
-    });
-
-$("reset").addEventListener("click", () => {
-
-    $("metric").selectedIndex = 0;
-    $("region").value = "";
-    $("market").value = "";
-    $("tenure").value = "";
-
-    selectedVentiles.clear();
-
-    syncVentileCheckboxes();
-    updateVentileLabel();
-
-    update();
-});
-
-updateVentileLabel();
-update();
-
-})();
-</script>
-
-</body>
-</html>
-"""
-
-    final_html = (
-        html.replace("__PLOTLY_JS__", get_plotlyjs())
-            .replace("__REPORT_JSON__", report_json)
+    upper = (
+        max_value * 1.25
+        if max_value > 0
+        else max(1, abs(min_value) * 0.10)
     )
 
-    output = Path(filename).resolve()
-
-    output.write_text(
-        final_html,
-        encoding="utf-8"
+    lower = (
+        min_value * 1.25
+        if min_value < 0
+        else 0
     )
 
-    print(f"HTML report created: {output}")
-    print(
-        f"File size: "
-        f"{output.stat().st_size / (1024 ** 2):.2f} MB"
+    # --------------------------------------------------
+    # 5. Chart formatting
+    # --------------------------------------------------
+
+    fig.update_layout(
+
+        title=dict(
+            text=(
+                title
+                or f"{value_col} by Decile Across Random Seeds"
+            ),
+            x=0.5,
+            xanchor="center",
+            font=dict(
+                size=22,
+                family="Arial Black"
+            )
+        ),
+
+        xaxis_title="Decile",
+        yaxis_title=value_col,
+
+        barmode="group",
+
+        height=height,
+
+        margin=dict(
+            t=160,
+            b=90,
+            l=90,
+            r=60
+        ),
+
+        font=dict(
+            family="Arial",
+            size=13
+        ),
+
+        legend=dict(
+            orientation="h",
+            x=0.5,
+            xanchor="center",
+            y=1.02,
+            yanchor="bottom"
+        ),
+
+        uniformtext=dict(
+            minsize=10,
+            mode="show"
+        ),
+
+        updatemenus=[
+            dict(
+                buttons=buttons,
+                direction="down",
+                showactive=True,
+
+                x=1,
+                xanchor="right",
+
+                y=1.24,
+                yanchor="top",
+
+                bgcolor="white",
+                bordercolor="#CBD5E1",
+                borderwidth=1,
+
+                font=dict(
+                    size=13
+                )
+            )
+        ],
+
+        plot_bgcolor="white",
+        paper_bgcolor="white",
+
+        bargap=0.20,
+        bargroupgap=0.05
     )
 
-    return output
+    # --------------------------------------------------
+    # 6. X-axis formatting
+    # --------------------------------------------------
 
-=======
+    fig.update_xaxes(
+        tickmode="array",
+        tickvals=summary.index.tolist(),
+        type="linear",
+        range=[0.5, 20.5],
 
+        showgrid=False,
 
-dfs = {
-    "RS42": df_scored_42,
-    "RS07": df_scored_07,
-    "RS101": df_scored_101,
-    "RS151": df_scored_151
-}
+        tickfont=dict(
+            size=12
+        )
+    )
 
-report_path = export_interactive_seed_report(
-    dfs=dfs,
-    filename="Random_Seed_Sensitivity_Loss_Comparison.html",
-    ventile_col="rr_model_decile",
-    region_col="ECON_REGION",
-    market_col="POD_MARKET_CODE",
-    tenure_col="PRK_TENURE",
-    probability_col="prediction_probability",
-    baseline="RS42",
-    claims_share=0.62,
-    decimals=2,
-    inside_font_size=12,
-    chart_height=900
-)
+    # --------------------------------------------------
+    # 7. Y-axis formatting
+    # --------------------------------------------------
 
-print(report_path)
+    fig.update_yaxes(
+        range=[lower, upper],
+        automargin=True,
+        gridcolor="#E5E7EB",
+        zeroline=True,
+        zerolinecolor="#94A3B8"
+    )
+
+    # --------------------------------------------------
+    # 8. Display chart
+    # --------------------------------------------------
+
+    fig.show()
+
+    return summary
