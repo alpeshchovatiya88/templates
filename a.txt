@@ -7,6 +7,83 @@ import pandas as pd
 from plotly.offline import get_plotlyjs
 
 
+# ============================================================
+# PART 1: PREPARE THE FOUR EXPERIMENTS
+# ============================================================
+
+dfs = {
+    "RS42": df_scored_42,
+    "RS07": df_scored_07,
+    "RS101": df_scored_101,
+    "RS151": df_scored_151
+}
+
+CLAIMS_SHARE = 0.62
+DELQ_SHARE = 1 - CLAIMS_SHARE
+
+# Create per-record predicted counts.
+# Do NOT use .sum() here, because the report sums after filtering.
+
+for seed, df in dfs.items():
+
+    if "prediction_probability" not in df.columns:
+        raise ValueError(
+            f"{seed}: prediction_probability column is missing"
+        )
+
+    probability = pd.to_numeric(
+        df["prediction_probability"],
+        errors="coerce"
+    )
+
+    df["Predicted_n_Delq_and_Claims"] = probability
+
+    df["Predicted_n_Claims"] = (
+        probability * CLAIMS_SHARE
+    )
+
+    df["Predicted_n_Delqs"] = (
+        probability * DELQ_SHARE
+    )
+
+
+# ============================================================
+# PART 2: DEFINE METRICS
+# ============================================================
+
+metrics = {
+    "SMI3_LOSS": {
+        "agg": "sum",
+        "is_ratio": False
+    },
+
+    "SMI3_LR": {
+        "agg": "mean",
+        "is_ratio": True,
+        "ratio_scale": 100
+    },
+
+    "Predicted_n_Delq_and_Claims": {
+        "agg": "sum",
+        "is_ratio": False
+    },
+
+    "Predicted_n_Claims": {
+        "agg": "sum",
+        "is_ratio": False
+    },
+
+    "Predicted_n_Delqs": {
+        "agg": "sum",
+        "is_ratio": False
+    }
+}
+
+
+# ============================================================
+# PART 3: EXPORT FUNCTION
+# ============================================================
+
 def export_interactive_seed_report(
     dfs,
     filename="Random_Seed_Sensitivity_Report.html",
@@ -18,25 +95,15 @@ def export_interactive_seed_report(
     baseline="RS42",
     colors=None,
     decimals=2,
-    inside_font_size=16,
+    inside_font_size=15,
     total_font_size=18,
 ):
 
     if baseline not in dfs:
-        raise ValueError(f"Baseline {baseline} not found.")
+        raise ValueError(f"Baseline {baseline} not found")
 
     if metrics is None:
-        metrics = {
-            "SMI3_LOSS": {
-                "agg": "sum",
-                "is_ratio": False
-            },
-            "SMI3_LR": {
-                "agg": "mean",
-                "is_ratio": True,
-                "ratio_scale": 100
-            }
-        }
+        raise ValueError("Please provide metrics")
 
     if colors is None:
         colors = {
@@ -46,7 +113,7 @@ def export_interactive_seed_report(
             "RS151": "#7952B3"
         }
 
-    seeds = list(dfs)
+    seeds = list(dfs.keys())
 
     required = list(dict.fromkeys([
         decile_col,
@@ -56,15 +123,18 @@ def export_interactive_seed_report(
         *metrics.keys()
     ]))
 
-    # -------------------------------------------------
-    # 1. Prepare all seed datasets
-    # -------------------------------------------------
+    # --------------------------------------------------------
+    # Prepare datasets
+    # --------------------------------------------------------
 
     frames = []
 
     for seed, df in dfs.items():
 
-        missing = [c for c in required if c not in df.columns]
+        missing = [
+            c for c in required
+            if c not in df.columns
+        ]
 
         if missing:
             raise ValueError(
@@ -72,10 +142,8 @@ def export_interactive_seed_report(
             )
 
         t = df[required].copy()
-
         t["Seed"] = seed
 
-        # Supports 1, 2, ... and "Decile 1", "Decile 2", ...
         t["Decile"] = pd.to_numeric(
             t[decile_col]
             .astype("string")
@@ -83,27 +151,18 @@ def export_interactive_seed_report(
             errors="coerce"
         )
 
-        # Convert categorical filters to strings
-        t["Region"] = (
-            t[region_col]
-            .astype("string")
-            .fillna("(Missing)")
-        )
-
-        t["Market"] = (
-            t[market_col]
-            .astype("string")
-            .fillna("(Missing)")
-        )
-
-        t["Tenure"] = (
-            t[tenure_col]
-            .astype("string")
-            .fillna("(Missing)")
-        )
+        for source, target in [
+            (region_col, "Region"),
+            (market_col, "Market"),
+            (tenure_col, "Tenure")
+        ]:
+            t[target] = (
+                t[source]
+                .astype("string")
+                .fillna("(Missing)")
+            )
 
         for metric in metrics:
-
             t[metric] = (
                 pd.to_numeric(t[metric], errors="coerce")
                 .replace([np.inf, -np.inf], np.nan)
@@ -136,19 +195,12 @@ def export_interactive_seed_report(
     markets = sorted(data["Market"].unique().tolist())
     tenures = sorted(data["Tenure"].unique().tolist())
 
-    # -------------------------------------------------
-    # 2. Precalculate filter combinations
-    # -------------------------------------------------
-
-    # To avoid generating an enormous Cartesian product
-    # of Decile x Region x Market x Tenure, aggregate by
-    # actual observed combinations, then calculate each
-    # selected combination on demand in the browser.
+    # --------------------------------------------------------
+    # Compact JSON payload
     #
-    # For correct percentiles, individual metric values
-    # are included in the HTML data payload.
-    #
-    # This produces a fully offline, interactive report.
+    # Each observation is included so percentiles can be
+    # recalculated accurately for any filter combination.
+    # --------------------------------------------------------
 
     records = []
 
@@ -163,17 +215,21 @@ def export_interactive_seed_report(
                 "Tenure",
                 metric
             ]
-        ].copy()
+        ].dropna(subset=[metric])
 
-        subset = subset.rename(columns={metric: "Value"})
+        for row in subset.itertuples(
+            index=False,
+            name=None
+        ):
 
-        # Drop missing metric values only.
-        subset = subset.dropna(subset=["Value"])
-
-        # Compact column-based records for JavaScript.
-        for row in subset.itertuples(index=False, name=None):
-
-            seed, decile, region, market, tenure, value = row
+            (
+                seed,
+                decile,
+                region,
+                market,
+                tenure,
+                value
+            ) = row
 
             records.append([
                 seed,
@@ -207,16 +263,15 @@ def export_interactive_seed_report(
         separators=(",", ":")
     ).replace("<", "\\u003c")
 
-    # -------------------------------------------------
-    # 3. Standalone HTML
-    # -------------------------------------------------
+    # --------------------------------------------------------
+    # HTML TEMPLATE
+    # --------------------------------------------------------
 
     html_template = r"""
 <!DOCTYPE html>
 <html lang="en">
 
 <head>
-
 <meta charset="UTF-8">
 <meta name="viewport"
       content="width=device-width, initial-scale=1">
@@ -225,9 +280,7 @@ def export_interactive_seed_report(
 
 <style>
 
-* {
-    box-sizing: border-box;
-}
+* { box-sizing: border-box; }
 
 body {
     margin: 0;
@@ -457,16 +510,12 @@ const decileFilter = document.getElementById("decileFilter");
 const regionFilter = document.getElementById("regionFilter");
 const marketFilter = document.getElementById("marketFilter");
 const tenureFilter = document.getElementById("tenureFilter");
-
 const statsBody = document.getElementById("statsBody");
 
 function addOption(select, value, label) {
-
     const option = document.createElement("option");
-
     option.value = value;
     option.textContent = label;
-
     select.appendChild(option);
 }
 
@@ -475,32 +524,24 @@ Object.keys(report.metrics).forEach(metric => {
 });
 
 addOption(decileFilter, "", "All Deciles");
-
 report.deciles.forEach(d => {
     addOption(decileFilter, String(d), "Decile " + d);
 });
 
 addOption(regionFilter, "", "All Regions");
-
 report.regions.forEach(r => {
     addOption(regionFilter, r, r);
 });
 
 addOption(marketFilter, "", "All Markets");
-
 report.markets.forEach(m => {
     addOption(marketFilter, m, m);
 });
 
 addOption(tenureFilter, "", "All Tenures");
-
 report.tenures.forEach(t => {
     addOption(tenureFilter, t, t);
 });
-
-// -------------------------------------------------
-// Formatting
-// -------------------------------------------------
 
 function formatNumber(v, metric, compact=false) {
 
@@ -511,12 +552,10 @@ function formatNumber(v, metric, compact=false) {
     const config = report.metrics[metric];
 
     if (config.is_ratio) {
-
         const scale = config.ratio_scale || 1;
-
-        return (
-            v / scale * 100
-        ).toFixed(report.decimals) + "%";
+        return (v / scale * 100).toFixed(
+            report.decimals
+        ) + "%";
     }
 
     if (compact && Math.abs(v) >= 1000000) {
@@ -527,36 +566,26 @@ function formatNumber(v, metric, compact=false) {
         return (v / 1000).toFixed(2) + "K";
     }
 
-    return v.toLocaleString(
-        "en-US",
-        {
-            minimumFractionDigits: report.decimals,
-            maximumFractionDigits: report.decimals
-        }
-    );
+    return v.toLocaleString("en-US", {
+        minimumFractionDigits: report.decimals,
+        maximumFractionDigits: report.decimals
+    });
 }
 
 function signedNumber(v, metric) {
+    if (v === null || !Number.isFinite(v)) return "N/A";
 
-    if (v === null || !Number.isFinite(v)) {
-        return "N/A";
-    }
-
-    return (
-        v > 0 ? "+" : ""
-    ) + formatNumber(v, metric, true);
+    return (v > 0 ? "+" : "") +
+        formatNumber(v, metric, true);
 }
 
 function formatDelta(v, metric) {
 
-    if (v === null || !Number.isFinite(v)) {
-        return "N/A";
-    }
+    if (v === null || !Number.isFinite(v)) return "N/A";
 
     const config = report.metrics[metric];
 
     if (config.is_ratio) {
-
         const scale = config.ratio_scale || 1;
         const pp = v / scale * 100;
 
@@ -571,10 +600,7 @@ function formatDelta(v, metric) {
 }
 
 function formatDeltaPercent(v) {
-
-    if (v === null || !Number.isFinite(v)) {
-        return "N/A";
-    }
+    if (v === null || !Number.isFinite(v)) return "N/A";
 
     return (
         (v > 0 ? "+" : "") +
@@ -584,7 +610,6 @@ function formatDeltaPercent(v) {
 }
 
 function escapeHtml(value) {
-
     return String(value)
         .replace(/&/g, "&amp;")
         .replace(/</g, "&lt;")
@@ -592,15 +617,9 @@ function escapeHtml(value) {
         .replace(/"/g, "&quot;");
 }
 
-// -------------------------------------------------
-// Statistics
-// -------------------------------------------------
-
 function quantile(sortedValues, p) {
 
-    if (!sortedValues.length) {
-        return null;
-    }
+    if (!sortedValues.length) return null;
 
     if (sortedValues.length === 1) {
         return sortedValues[0];
@@ -633,7 +652,6 @@ function calculateStats(values, agg) {
     }
 
     const sorted = [...values].sort((a, b) => a - b);
-
     const sum = values.reduce((a, b) => a + b, 0);
     const avg = sum / values.length;
 
@@ -649,10 +667,6 @@ function calculateStats(values, agg) {
     };
 }
 
-// -------------------------------------------------
-// Update chart and table
-// -------------------------------------------------
-
 function update() {
 
     const metric = metricFilter.value;
@@ -666,10 +680,8 @@ function update() {
     const tenure = tenureFilter.value || null;
 
     const config = report.metrics[metric];
-
     const aggregateLabel = config.agg.toUpperCase();
 
-    // Apply all five filters
     const filtered = report.records.filter(r => {
 
         const [
@@ -760,9 +772,7 @@ function update() {
 
     rows.forEach((r, i) => {
 
-        if (r.total === null) {
-            return;
-        }
+        if (r.total === null) return;
 
         const deltaText = r.seed === report.baseline
             ? "Baseline"
@@ -783,17 +793,13 @@ function update() {
         ];
 
         if (config.is_ratio) {
-
             insideLines.push(
                 "<b>Δ (pp): " + deltaText + "</b>"
             );
-
         } else {
-
             insideLines.push(
                 "<b>Δ: " + deltaText + "</b>"
             );
-
             insideLines.push(
                 "<b>Δ%: " + pctText + "</b>"
             );
@@ -973,6 +979,7 @@ function update() {
     );
 
     // Update numerical table
+
     statsBody.innerHTML = "";
 
     rows.forEach(r => {
@@ -1007,7 +1014,6 @@ function update() {
 
             td.textContent = value;
 
-            // Hide Δ% for LR only
             if (index === 4 && config.is_ratio) {
                 td.style.display = "none";
             }
@@ -1022,10 +1028,10 @@ function update() {
         config.is_ratio
         ? "Δ (pp) = selected seed mean loss ratio minus " +
           report.baseline +
-          " mean loss ratio. No relative Δ% is displayed."
-        : "Δ = selected seed total loss minus " +
+          " mean loss ratio."
+        : "Δ = selected seed aggregate minus " +
           report.baseline +
-          " total loss. Δ% = Δ divided by the baseline total loss × 100.";
+          " aggregate. Δ% = Δ / baseline aggregate × 100.";
 }
 
 [
@@ -1080,15 +1086,10 @@ update();
 
     return output_path
 
-==#===
 
-
-dfs = {
-    "RS42": df_scored_42,
-    "RS07": df_scored_07,
-    "RS101": df_scored_101,
-    "RS151": df_scored_151
-}
+# ============================================================
+# PART 4: GENERATE HTML REPORT
+# ============================================================
 
 export_interactive_seed_report(
     dfs=dfs,
@@ -1097,17 +1098,7 @@ export_interactive_seed_report(
     region_col="ECON_REGION",
     market_col="POD_MARKET_CODE",
     tenure_col="PRK_TENURE",
-    metrics={
-        "SMI3_LOSS": {
-            "agg": "sum",
-            "is_ratio": False
-        },
-        "SMI3_LR": {
-            "agg": "mean",
-            "is_ratio": True,
-            "ratio_scale": 100
-        }
-    },
+    metrics=metrics,
     baseline="RS42",
     colors={
         "RS42": "#17365D",
@@ -1116,7 +1107,26 @@ export_interactive_seed_report(
         "RS151": "#7952B3"
     },
     decimals=2,
-    inside_font_size=16,
+    inside_font_size=15,
     total_font_size=18
 )
 
+
+# ============================================================
+# PART 5: OPTIONAL SUMMARY TABLE
+# ============================================================
+
+summary = pd.DataFrame({
+    seed: df[
+        [
+            "Predicted_n_Delq_and_Claims",
+            "Predicted_n_Claims",
+            "Predicted_n_Delqs"
+        ]
+    ].sum()
+    for seed, df in dfs.items()
+}).T
+
+summary.index.name = "Experiment"
+
+display(summary.round(2))
