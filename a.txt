@@ -1,1394 +1,13 @@
-import json
-from pathlib import Path
-from io import BytesIO
-
 import numpy as np
 import pandas as pd
+import matplotlib.pyplot as plt
 
-from plotly.offline import get_plotlyjs
-import plotly.graph_objects as go
+from pathlib import Path
+from matplotlib.backends.backend_pdf import PdfPages
+from matplotlib.ticker import FuncFormatter
 
-from PIL import Image as PILImage
 
-
-# ============================================================
-# YOUR ORIGINAL HTML FUNCTION
-# NO CHANGES
-# ============================================================
-
-def export_interactive_seed_report(
-    dfs,
-    filename="Random_Seed_Sensitivity_Loss_Comparison.html",
-    ventile_col="rr_model_decile",
-    region_col="ECON_REGION",
-    market_col="POD_MARKET_CODE",
-    tenure_col="PRK_TENURE",
-    probability_col="prediction_probability",
-    metrics=None,
-    baseline="RS42",
-    claims_share=0.62,
-    colors=None,
-    decimals=2,
-    inside_font_size=12,
-    chart_height=900,
-):
-    """
-    Standalone offline HTML random seed sensitivity report.
-
-    Features:
-      - Metric dropdown: SMI3_LOSS / SMI3_LR
-      - Multi-select Ventile checkboxes
-      - Select All / Clear All Ventiles
-      - ECON_REGION, POD_MARKET_CODE, PRK_TENURE filters
-      - Predicted Delq + Claims, Claims, Delqs inside every bar
-      - Min, Max, Avg, P10, P50, P90 inside every bar
-      - SMI3_LOSS: absolute delta and relative delta %
-      - SMI3_LR: delta in percentage points only
-      - Detailed table
-      - Offline self-contained HTML
-
-    Note:
-      No ventile values selected = All Ventiles.
-
-    The input DataFrames are not modified.
-    """
-
-    if not dfs:
-        raise ValueError("dfs cannot be empty")
-
-    if baseline not in dfs:
-        raise ValueError(
-            f"Baseline '{baseline}' is not in dfs"
-        )
-
-    if not 0 <= claims_share <= 1:
-        raise ValueError(
-            "claims_share must be between 0 and 1"
-        )
-
-    if metrics is None:
-        metrics = {
-            "SMI3_LOSS": {
-                "agg": "sum",
-                "is_ratio": False
-            },
-            "SMI3_LR": {
-                "agg": "mean",
-                "is_ratio": True,
-                "ratio_scale": 100
-            }
-        }
-
-    if colors is None:
-        colors = {
-            "RS42": "#17365D",
-            "RS07": "#E66B23",
-            "RS101": "#09988A",
-            "RS151": "#7952B3"
-        }
-
-    for metric, config in metrics.items():
-        if config.get("agg") not in ("sum", "mean"):
-            raise ValueError(
-                f"{metric}: aggregation must be sum or mean"
-            )
-
-    # --------------------------------------------------------
-    # Prepare data
-    #
-    # Each source observation appears ONCE.
-    # This prevents predicted counts being duplicated
-    # when the selected metric changes.
-    #
-    # Record structure:
-    # [
-    #   seed,
-    #   ventile,
-    #   region,
-    #   market,
-    #   tenure,
-    #   metric_1_value,
-    #   metric_2_value,
-    #   ...,
-    #   prediction_probability
-    # ]
-    # --------------------------------------------------------
-
-    records = []
-
-    all_ventiles = set()
-    all_regions = set()
-    all_markets = set()
-    all_tenures = set()
-
-    metric_names = list(metrics.keys())
-
-    required_cols = list(dict.fromkeys([
-        ventile_col,
-        region_col,
-        market_col,
-        tenure_col,
-        probability_col,
-        *metric_names
-    ]))
-
-    for seed, source_df in dfs.items():
-
-        missing = [
-            col for col in required_cols
-            if col not in source_df.columns
-        ]
-
-        if missing:
-            raise ValueError(
-                f"{seed}: missing columns {missing}"
-            )
-
-        df = source_df[required_cols].copy()
-
-        ventiles = pd.to_numeric(
-            df[ventile_col]
-            .astype("string")
-            .str.extract(r"(\d+)", expand=False),
-            errors="coerce"
-        )
-
-        regions = (
-            df[region_col]
-            .astype("string")
-            .fillna("(Missing)")
-        )
-
-        markets = (
-            df[market_col]
-            .astype("string")
-            .fillna("(Missing)")
-        )
-
-        tenures = (
-            df[tenure_col]
-            .astype("string")
-            .fillna("(Missing)")
-        )
-
-        probability = (
-            pd.to_numeric(
-                df[probability_col],
-                errors="coerce"
-            )
-            .replace([np.inf, -np.inf], np.nan)
-        )
-
-        metric_series = {}
-
-        for metric in metric_names:
-            metric_series[metric] = (
-                pd.to_numeric(
-                    df[metric],
-                    errors="coerce"
-                )
-                .replace([np.inf, -np.inf], np.nan)
-            )
-
-        all_ventiles.update(
-            ventiles.dropna().astype(int).tolist()
-        )
-        all_regions.update(regions.tolist())
-        all_markets.update(markets.tolist())
-        all_tenures.update(tenures.tolist())
-
-        # Convert to compact Python lists before iteration.
-
-        v_list = ventiles.tolist()
-        r_list = regions.tolist()
-        m_list = markets.tolist()
-        t_list = tenures.tolist()
-        p_list = probability.tolist()
-
-        metric_lists = [
-            metric_series[metric].tolist()
-            for metric in metric_names
-        ]
-
-        for i in range(len(df)):
-
-            ventile = v_list[i]
-
-            record = [
-                str(seed),
-                int(ventile)
-                    if pd.notna(ventile)
-                    else None,
-                str(r_list[i]),
-                str(m_list[i]),
-                str(t_list[i])
-            ]
-
-            for values in metric_lists:
-                value = values[i]
-
-                record.append(
-                    float(value)
-                    if pd.notna(value)
-                    else None
-                )
-
-            p = p_list[i]
-
-            record.append(
-                float(p)
-                if pd.notna(p)
-                else None
-            )
-
-            records.append(record)
-
-    report_data = {
-        "seeds": list(dfs.keys()),
-        "baseline": baseline,
-        "metrics": metrics,
-        "metricNames": metric_names,
-        "colors": colors,
-        "ventiles": sorted(all_ventiles),
-        "regions": sorted(all_regions),
-        "markets": sorted(all_markets),
-        "tenures": sorted(all_tenures),
-        "records": records,
-        "claimsShare": claims_share,
-        "decimals": decimals,
-        "insideFontSize": inside_font_size,
-        "chartHeight": chart_height
-    }
-
-    report_json = json.dumps(
-        report_data,
-        ensure_ascii=False,
-        allow_nan=False,
-        separators=(",", ":")
-    ).replace("<", "\\u003c")
-
-    # --------------------------------------------------------
-    # HTML / CSS / JAVASCRIPT
-    # --------------------------------------------------------
-
-    html = r"""
-<!DOCTYPE html>
-<html lang="en">
-
-<head>
-<meta charset="UTF-8">
-<meta name="viewport"
-      content="width=device-width, initial-scale=1">
-
-<title>Random Seed Sensitivity Loss Comparison</title>
-
-<style>
-
-* {
-    box-sizing: border-box;
-}
-
-body {
-    margin: 0;
-    background: #f4f6fa;
-    font-family: Arial, sans-serif;
-    color: #172033;
-}
-
-.container {
-    max-width: 1700px;
-    margin: auto;
-    padding: 25px;
-}
-
-h1 {
-    margin: 0 0 12px;
-    font-size: 28px;
-    color: #17365D;
-}
-
-.subtitle {
-    color: #526176;
-    margin-bottom: 7px;
-    font-size: 15px;
-}
-
-.note-subtitle {
-    margin-bottom: 23px;
-    color: #526176;
-    font-size: 14px;
-}
-
-.filters {
-    display: flex;
-    flex-wrap: wrap;
-    align-items: flex-end;
-    gap: 16px;
-    padding: 20px;
-    background: white;
-    border-radius: 12px;
-    margin-bottom: 20px;
-    box-shadow: 0 2px 10px rgba(0,0,0,0.035);
-}
-
-.filter {
-    display: flex;
-    flex-direction: column;
-    gap: 8px;
-    position: relative;
-}
-
-label {
-    font-weight: bold;
-    font-size: 13px;
-}
-
-select {
-    min-width: 165px;
-    max-width: 240px;
-    padding: 11px;
-    background: white;
-    border: 1px solid #cbd5e1;
-    border-radius: 7px;
-    font-size: 14px;
-}
-
-button {
-    cursor: pointer;
-    font-family: inherit;
-}
-
-.reset-btn {
-    padding: 12px 19px;
-    border: 0;
-    border-radius: 7px;
-    background: #17365D;
-    color: white;
-    font-weight: bold;
-}
-
-.card {
-    background: white;
-    border-radius: 12px;
-    padding: 18px;
-    margin-bottom: 20px;
-    box-shadow: 0 2px 10px rgba(0,0,0,0.035);
-}
-
-#chart {
-    width: 100%;
-    min-height: 900px;
-}
-
-.table-wrap {
-    overflow-x: auto;
-}
-
-table {
-    width: 100%;
-    border-collapse: collapse;
-    white-space: nowrap;
-    font-size: 13px;
-}
-
-th {
-    background: #17365D;
-    color: white;
-    text-align: right;
-    padding: 12px;
-}
-
-td {
-    padding: 12px;
-    text-align: right;
-    border-bottom: 1px solid #e2e8f0;
-}
-
-th:first-child,
-td:first-child {
-    text-align: left;
-}
-
-tbody tr:nth-child(even) {
-    background: #f8fafc;
-}
-
-.table-note {
-    color: #64748b;
-    font-size: 13px;
-    margin-top: 15px;
-    line-height: 1.6;
-}
-
-/* --------------------------------------------
-   Multi-select Ventile dropdown
--------------------------------------------- */
-
-.multi-select {
-    position: relative;
-    width: 220px;
-}
-
-.multi-trigger {
-    width: 100%;
-    background: white;
-    border: 1px solid #cbd5e1;
-    border-radius: 7px;
-    padding: 11px;
-    min-height: 42px;
-    text-align: left;
-    font-size: 14px;
-    color: #172033;
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    gap: 8px;
-}
-
-.multi-trigger:hover {
-    border-color: #64748b;
-}
-
-.multi-panel {
-    display: none;
-    position: absolute;
-    top: calc(100% + 5px);
-    left: 0;
-    width: 260px;
-    max-height: 370px;
-    overflow-y: auto;
-    background: white;
-    border: 1px solid #cbd5e1;
-    border-radius: 9px;
-    box-shadow: 0 8px 25px rgba(0,0,0,0.16);
-    z-index: 1000;
-    padding: 10px;
-}
-
-.multi-panel.open {
-    display: block;
-}
-
-.multi-actions {
-    display: flex;
-    gap: 7px;
-    margin-bottom: 10px;
-}
-
-.multi-actions button {
-    flex: 1;
-    border: 1px solid #cbd5e1;
-    background: #f8fafc;
-    border-radius: 5px;
-    padding: 8px 6px;
-    font-size: 12px;
-    font-weight: bold;
-}
-
-.ventile-option {
-    display: flex;
-    align-items: center;
-    gap: 9px;
-    padding: 7px 5px;
-    cursor: pointer;
-    font-size: 13px;
-    font-weight: normal;
-    border-radius: 5px;
-}
-
-.ventile-option:hover {
-    background: #f1f5f9;
-}
-
-.ventile-option input {
-    accent-color: #17365D;
-    width: 15px;
-    height: 15px;
-}
-
-@media (max-width: 700px) {
-
-    .container {
-        padding: 12px;
-    }
-
-    .filters {
-        align-items: stretch;
-    }
-
-    select,
-    .multi-select {
-        width: 100%;
-        max-width: none;
-    }
-
-    .filter {
-        width: 100%;
-    }
-
-    .multi-panel {
-        width: 100%;
-    }
-}
-
-</style>
-
-<script>
-__PLOTLY_JS__
-</script>
-
-</head>
-
-<body>
-
-<div class="container">
-
-<h1>Random Seed Sensitivity Loss Comparison</h1>
-
-<div class="subtitle">
-<b>Data - October 2025 - May 2026</b>
-</div>
-
-<div class="note-subtitle">
-<b>Note -</b> Ventile means 5% increments in percentile.
-</div>
-
-<div class="filters">
-
-<div class="filter">
-<label for="metric">Metric</label>
-<select id="metric"></select>
-</div>
-
-<div class="filter">
-
-<label>Ventile (Multiple Selection)</label>
-
-<div class="multi-select" id="ventileContainer">
-
-<button
-    type="button"
-    class="multi-trigger"
-    id="ventileTrigger"
-    aria-expanded="false"
->
-    <span id="ventileLabel">All Ventiles</span>
-    <span>▼</span>
-</button>
-
-<div class="multi-panel" id="ventilePanel">
-
-<div class="multi-actions">
-<button type="button" id="selectAllVentiles">
-Select All
-</button>
-
-<button type="button" id="clearVentiles">
-Clear All
-</button>
-</div>
-
-<div id="ventileOptions"></div>
-
-</div>
-</div>
-</div>
-
-<div class="filter">
-<label for="region">ECON_REGION</label>
-<select id="region"></select>
-</div>
-
-<div class="filter">
-<label for="market">POD_MARKET_CODE</label>
-<select id="market"></select>
-</div>
-
-<div class="filter">
-<label for="tenure">PRK_TENURE</label>
-<select id="tenure"></select>
-</div>
-
-<button class="reset-btn" id="reset" type="button">
-Reset Filters
-</button>
-
-</div>
-
-<div class="card">
-<div id="chart"></div>
-</div>
-
-<div class="card">
-
-<h2>Detailed Statistics</h2>
-
-<div class="table-wrap">
-
-<table>
-
-<thead>
-<tr>
-<th>Seed</th>
-<th>Count</th>
-<th>Aggregate</th>
-<th id="deltaHead">Δ</th>
-<th id="pctHead">Δ%</th>
-<th>Min</th>
-<th>Max</th>
-<th>Avg</th>
-<th>P10</th>
-<th>P50</th>
-<th>P90</th>
-<th>Predicted Delq + Claims</th>
-<th>Predicted Claims</th>
-<th>Predicted Delqs</th>
-</tr>
-</thead>
-
-<tbody id="statsBody"></tbody>
-
-</table>
-</div>
-
-<div class="table-note" id="tableNote"></div>
-
-</div>
-
-</div>
-
-<script id="reportData" type="application/json">
-__REPORT_JSON__
-</script>
-
-<script>
-
-(function () {
-
-"use strict";
-
-const report = JSON.parse(
-    document.getElementById("reportData").textContent
-);
-
-const $ = id => document.getElementById(id);
-
-const selectedVentiles = new Set();
-
-const metricIndex = {};
-report.metricNames.forEach((metric, i) => {
-    metricIndex[metric] = 5 + i;
-});
-
-const probabilityIndex = 5 + report.metricNames.length;
-
-function addOption(select, value, label) {
-    const option = document.createElement("option");
-    option.value = value;
-    option.textContent = label;
-    select.appendChild(option);
-}
-
-// ------------------------------------------------------------
-// Standard dropdowns
-// ------------------------------------------------------------
-
-report.metricNames.forEach(metric => {
-    addOption($("metric"), metric, metric);
-});
-
-addOption($("region"), "", "All Regions");
-report.regions.forEach(value => {
-    addOption($("region"), value, value);
-});
-
-addOption($("market"), "", "All Markets");
-report.markets.forEach(value => {
-    addOption($("market"), value, value);
-});
-
-addOption($("tenure"), "", "All Tenures");
-report.tenures.forEach(value => {
-    addOption($("tenure"), value, value);
-});
-
-// ------------------------------------------------------------
-// Multi-select Ventile checkboxes
-// ------------------------------------------------------------
-
-function updateVentileLabel() {
-
-    const values = [...selectedVentiles]
-        .sort((a, b) => a - b);
-
-    if (
-        values.length === 0 ||
-        values.length === report.ventiles.length
-    ) {
-        $("ventileLabel").textContent = "All Ventiles";
-    } else if (values.length <= 3) {
-        $("ventileLabel").textContent =
-            "Ventile " + values.join(", ");
-    } else {
-        $("ventileLabel").textContent =
-            values.length + " Ventiles Selected";
-    }
-}
-
-function syncVentileCheckboxes() {
-    document
-        .querySelectorAll(".ventile-checkbox")
-        .forEach(checkbox => {
-            checkbox.checked = selectedVentiles.has(
-                Number(checkbox.value)
-            );
-        });
-}
-
-report.ventiles.forEach(ventile => {
-
-    const label = document.createElement("label");
-    label.className = "ventile-option";
-
-    const checkbox = document.createElement("input");
-    checkbox.type = "checkbox";
-    checkbox.className = "ventile-checkbox";
-    checkbox.value = String(ventile);
-
-    const text = document.createElement("span");
-    text.textContent = "Ventile " + ventile;
-
-    checkbox.addEventListener("change", () => {
-
-        if (checkbox.checked) {
-            selectedVentiles.add(ventile);
-        } else {
-            selectedVentiles.delete(ventile);
-        }
-
-        updateVentileLabel();
-        update();
-    });
-
-    label.appendChild(checkbox);
-    label.appendChild(text);
-
-    $("ventileOptions").appendChild(label);
-});
-
-$("ventileTrigger").addEventListener("click", event => {
-
-    event.stopPropagation();
-
-    const panel = $("ventilePanel");
-    const isOpen = panel.classList.toggle("open");
-
-    $("ventileTrigger").setAttribute(
-        "aria-expanded",
-        String(isOpen)
-    );
-});
-
-document.addEventListener("click", event => {
-
-    if (!$("ventileContainer").contains(event.target)) {
-
-        $("ventilePanel").classList.remove("open");
-
-        $("ventileTrigger").setAttribute(
-            "aria-expanded",
-            "false"
-        );
-    }
-});
-
-$("selectAllVentiles").addEventListener("click", () => {
-
-    selectedVentiles.clear();
-
-    report.ventiles.forEach(v => {
-        selectedVentiles.add(v);
-    });
-
-    syncVentileCheckboxes();
-    updateVentileLabel();
-    update();
-});
-
-$("clearVentiles").addEventListener("click", () => {
-
-    selectedVentiles.clear();
-
-    syncVentileCheckboxes();
-    updateVentileLabel();
-    update();
-});
-
-// ------------------------------------------------------------
-// Formatting helpers
-// ------------------------------------------------------------
-
-function number(value, digits=report.decimals) {
-
-    if (value === null || !Number.isFinite(value)) {
-        return "N/A";
-    }
-
-    return value.toLocaleString("en-US", {
-        minimumFractionDigits: digits,
-        maximumFractionDigits: digits
-    });
-}
-
-function metricNumber(value, metric) {
-
-    if (value === null || !Number.isFinite(value)) {
-        return "N/A";
-    }
-
-    const cfg = report.metrics[metric];
-
-    if (cfg.is_ratio) {
-        return number(
-            value / (cfg.ratio_scale || 1) * 100
-        ) + "%";
-    }
-
-    return number(value);
-}
-
-function deltaNumber(value, metric) {
-
-    if (value === null || !Number.isFinite(value)) {
-        return "N/A";
-    }
-
-    const cfg = report.metrics[metric];
-    const sign = value > 0 ? "+" : "";
-
-    if (cfg.is_ratio) {
-        return sign + number(
-            value / (cfg.ratio_scale || 1) * 100
-        ) + " pp";
-    }
-
-    return sign + number(value);
-}
-
-function percentNumber(value) {
-
-    if (value === null || !Number.isFinite(value)) {
-        return "N/A";
-    }
-
-    return (
-        (value > 0 ? "+" : "") +
-        number(value) +
-        "%"
-    );
-}
-
-function quantile(sorted, p) {
-
-    if (!sorted.length) return null;
-
-    if (sorted.length === 1) return sorted[0];
-
-    const position = (sorted.length - 1) * p;
-
-    const low = Math.floor(position);
-    const high = Math.ceil(position);
-    const weight = position - low;
-
-    return (
-        sorted[low] * (1 - weight) +
-        sorted[high] * weight
-    );
-}
-
-function calculateStats(values, agg) {
-
-    if (!values.length) {
-        return {
-            count: 0,
-            total: null,
-            min: null,
-            max: null,
-            avg: null,
-            p10: null,
-            p50: null,
-            p90: null
-        };
-    }
-
-    const sorted = [...values].sort((a, b) => a - b);
-
-    const sum = values.reduce(
-        (a, b) => a + b,
-        0
-    );
-
-    const avg = sum / values.length;
-
-    return {
-        count: values.length,
-        total: agg === "sum" ? sum : avg,
-        min: sorted[0],
-        max: sorted[sorted.length - 1],
-        avg: avg,
-        p10: quantile(sorted, 0.10),
-        p50: quantile(sorted, 0.50),
-        p90: quantile(sorted, 0.90)
-    };
-}
-
-// ------------------------------------------------------------
-// Update chart and table
-// ------------------------------------------------------------
-
-function update() {
-
-    const metric = $("metric").value;
-    const cfg = report.metrics[metric];
-
-    const region = $("region").value;
-    const market = $("market").value;
-    const tenure = $("tenure").value;
-
-    const allVentilesSelected =
-        selectedVentiles.size === 0 ||
-        selectedVentiles.size === report.ventiles.length;
-
-    const grouped = {};
-
-    report.seeds.forEach(seed => {
-        grouped[seed] = {
-            values: [],
-            probabilitySum: 0,
-            probabilityCount: 0
-        };
-    });
-
-    const selectedMetricIndex = metricIndex[metric];
-
-    // Each source observation is processed once.
-    // Predicted counts are therefore NOT double counted.
-
-    report.records.forEach(r => {
-
-        const seed = r[0];
-        const ventile = r[1];
-        const rowRegion = r[2];
-        const rowMarket = r[3];
-        const rowTenure = r[4];
-
-        if (
-            !allVentilesSelected &&
-            !selectedVentiles.has(ventile)
-        ) return;
-
-        if (region && rowRegion !== region) return;
-        if (market && rowMarket !== market) return;
-        if (tenure && rowTenure !== tenure) return;
-
-        const group = grouped[seed];
-
-        const value = r[selectedMetricIndex];
-        const probability = r[probabilityIndex];
-
-        if (value !== null) {
-            group.values.push(value);
-        }
-
-        if (probability !== null) {
-            group.probabilitySum += probability;
-            group.probabilityCount += 1;
-        }
-    });
-
-    const result = {};
-
-    report.seeds.forEach(seed => {
-
-        const group = grouped[seed];
-
-        const s = calculateStats(
-            group.values,
-            cfg.agg
-        );
-
-        const predictedTotal =
-            group.probabilityCount > 0
-            ? group.probabilitySum
-            : null;
-
-        s.predictedTotal = predictedTotal;
-
-        s.predictedClaims =
-            predictedTotal === null
-            ? null
-            : predictedTotal * report.claimsShare;
-
-        s.predictedDelqs =
-            predictedTotal === null
-            ? null
-            : predictedTotal * (1 - report.claimsShare);
-
-        result[seed] = s;
-    });
-
-    const baselineValue =
-        result[report.baseline].total;
-
-    const rows = report.seeds.map(seed => {
-
-        const s = result[seed];
-
-        const delta = (
-            s.total !== null &&
-            baselineValue !== null
-        )
-            ? s.total - baselineValue
-            : null;
-
-        const deltaPct = (
-            delta !== null &&
-            baselineValue !== 0
-        )
-            ? delta / baselineValue * 100
-            : null;
-
-        return {
-            seed,
-            ...s,
-            delta,
-            deltaPct
-        };
-    });
-
-    // --------------------------------------------------------
-    // Chart
-    // --------------------------------------------------------
-
-    const traces = [];
-    const annotations = [];
-
-    rows.forEach((r, i) => {
-
-        if (r.total === null) return;
-
-        const deltaText =
-            r.seed === report.baseline
-            ? "Baseline"
-            : deltaNumber(r.delta, metric);
-
-        const deltaPctText =
-            r.seed === report.baseline
-            ? "Baseline"
-            : percentNumber(r.deltaPct);
-
-        const lines = [
-            "<b>Min: " + metricNumber(r.min, metric) + "</b>",
-            "<b>Max: " + metricNumber(r.max, metric) + "</b>",
-            "<b>Avg: " + metricNumber(r.avg, metric) + "</b>",
-            "<b>P10: " + metricNumber(r.p10, metric) + "</b>",
-            "<b>P50: " + metricNumber(r.p50, metric) + "</b>",
-            "<b>P90: " + metricNumber(r.p90, metric) + "</b>",
-            "────────────",
-            "<b>Pred Delq + Claims: " +
-                number(r.predictedTotal) + "</b>",
-            "<b>Pred Claims: " +
-                number(r.predictedClaims) + "</b>",
-            "<b>Pred Delqs: " +
-                number(r.predictedDelqs) + "</b>",
-            "────────────",
-            "<b>Δ: " + deltaText + "</b>"
-        ];
-
-        if (!cfg.is_ratio) {
-            lines.push(
-                "<b>Δ%: " + deltaPctText + "</b>"
-            );
-        }
-
-        const insideText = lines.join("<br>");
-
-        traces.push({
-            type: "bar",
-            x: [i],
-            y: [r.total],
-            width: 0.78,
-
-            marker: {
-                color: report.colors[r.seed] || "#64748b"
-            },
-
-            text: [insideText],
-            textposition: "inside",
-            insidetextanchor: "middle",
-            constraintext: "none",
-            cliponaxis: false,
-
-            textfont: {
-                size: report.insideFontSize,
-                color: "white",
-                family: "Arial"
-            },
-
-            hovertemplate:
-                "<b>" + r.seed + "</b><br>" +
-                "Aggregate: " +
-                metricNumber(r.total, metric) +
-                "<br>" + insideText +
-                "<extra></extra>",
-
-            showlegend: false
-        });
-
-        annotations.push({
-            x: i,
-            y: r.total,
-            text: "<b>" +
-                metricNumber(r.total, metric) +
-                "</b>",
-            showarrow: false,
-            yshift: r.total >= 0 ? 20 : -20,
-            font: {
-                size: 17,
-                color: "#172033"
-            }
-        });
-    });
-
-    const totals = rows
-        .map(r => r.total)
-        .filter(v => v !== null && Number.isFinite(v));
-
-    const minValue = Math.min(0, ...totals);
-    const maxValue = Math.max(0, ...totals);
-    const span = Math.max(maxValue - minValue, 1e-9);
-
-    const selectedList = [...selectedVentiles]
-        .sort((a, b) => a - b);
-
-    const ventileText = allVentilesSelected
-        ? "All Ventiles"
-        : "Ventiles: " + selectedList.join(", ");
-
-    const layout = {
-
-        title: {
-            text:
-                "<b>" + metric +
-                " — Random Seed Sensitivity</b>" +
-                "<br><sup>" + ventileText + "</sup>",
-            x: 0.5,
-            font: {
-                size: 22
-            }
-        },
-
-        height: report.chartHeight,
-
-        template: "plotly_white",
-
-        margin: {
-            t: 125,
-            b: 90,
-            l: 100,
-            r: 60
-        },
-
-        xaxis: {
-            tickmode: "array",
-            tickvals: report.seeds.map((_, i) => i),
-            ticktext: report.seeds,
-            range: [
-                -0.6,
-                report.seeds.length - 0.4
-            ],
-            showgrid: false,
-            title: "Experiment"
-        },
-
-        yaxis: {
-            title: metric,
-            range: [
-                minValue - span * 0.08,
-                maxValue + span * 0.25
-            ],
-            ticksuffix:
-                cfg.is_ratio &&
-                (cfg.ratio_scale || 1) === 100
-                ? "%"
-                : ""
-        },
-
-        annotations,
-
-        uniformtext: {
-            minsize: 9,
-            mode: "show"
-        },
-
-        paper_bgcolor: "white",
-        plot_bgcolor: "white"
-    };
-
-    Plotly.react(
-        "chart",
-        traces,
-        layout,
-        {
-            responsive: true,
-            displaylogo: false,
-            toImageButtonOptions: {
-                format: "png",
-                filename: "random_seed_sensitivity",
-                scale: 2
-            }
-        }
-    );
-
-    // --------------------------------------------------------
-    // Table
-    // --------------------------------------------------------
-
-    $("deltaHead").textContent =
-        cfg.is_ratio ? "Δ (pp)" : "Δ";
-
-    $("pctHead").style.display =
-        cfg.is_ratio ? "none" : "";
-
-    $("statsBody").innerHTML = "";
-
-    rows.forEach(r => {
-
-        const tr = document.createElement("tr");
-
-        const fields = [
-            r.seed,
-            number(r.count, 0),
-            metricNumber(r.total, metric),
-
-            r.seed === report.baseline
-                ? "Baseline"
-                : deltaNumber(r.delta, metric),
-
-            r.seed === report.baseline
-                ? "Baseline"
-                : percentNumber(r.deltaPct),
-
-            metricNumber(r.min, metric),
-            metricNumber(r.max, metric),
-            metricNumber(r.avg, metric),
-            metricNumber(r.p10, metric),
-            metricNumber(r.p50, metric),
-            metricNumber(r.p90, metric),
-
-            number(r.predictedTotal),
-            number(r.predictedClaims),
-            number(r.predictedDelqs)
-        ];
-
-        fields.forEach((value, index) => {
-
-            const td = document.createElement("td");
-            td.textContent = value;
-
-            if (index === 4 && cfg.is_ratio) {
-                td.style.display = "none";
-            }
-
-            tr.appendChild(td);
-        });
-
-        $("statsBody").appendChild(tr);
-    });
-
-    $("tableNote").textContent = cfg.is_ratio
-        ? "SMI3_LR: Δ is shown in percentage points (pp). "
-          + "Predicted counts are based on the sum of "
-          + "prediction probabilities."
-        : "Δ = selected experiment aggregate minus baseline. "
-          + "Δ% = Δ / baseline aggregate × 100. "
-          + "Predicted counts are based on the sum of "
-          + "prediction probabilities.";
-}
-
-// ------------------------------------------------------------
-// Filter listeners
-// ------------------------------------------------------------
-
-["metric", "region", "market", "tenure"]
-    .forEach(id => {
-        $(id).addEventListener("change", update);
-    });
-
-$("reset").addEventListener("click", () => {
-
-    $("metric").selectedIndex = 0;
-    $("region").value = "";
-    $("market").value = "";
-    $("tenure").value = "";
-
-    selectedVentiles.clear();
-
-    syncVentileCheckboxes();
-    updateVentileLabel();
-
-    update();
-});
-
-updateVentileLabel();
-update();
-
-})();
-</script>
-
-</body>
-</html>
-"""
-
-    final_html = (
-        html.replace("__PLOTLY_JS__", get_plotlyjs())
-            .replace("__REPORT_JSON__", report_json)
-    )
-
-    output = Path(filename).resolve()
-
-    output.write_text(
-        final_html,
-        encoding="utf-8"
-    )
-
-    print(f"HTML report created: {output}")
-    print(
-        f"File size: "
-        f"{output.stat().st_size / (1024 ** 2):.2f} MB"
-    )
-
-    return output
-
-
-# ============================================================
-# NEW PDF FUNCTION
-#
-# PDF CONTAINS CHARTS ONLY — NO TABLE
-#
-# Pages:
-#   1. Overall / All Ventiles
-#   2. Ventile 1
-#   3. Ventile 2
-#   ...
-#   Every ECON_REGION
-#   Every POD_MARKET_CODE
-#   Every PRK_TENURE
-#
-# The same sequence is created for each metric.
-# ============================================================
-
-def export_seed_pdf_report(
+def export_seed_pdf_matplotlib(
     dfs,
     filename="Random_Seed_Sensitivity_Loss_Comparison.pdf",
     ventile_col="rr_model_decile",
@@ -1401,10 +20,38 @@ def export_seed_pdf_report(
     claims_share=0.62,
     colors=None,
     decimals=2,
-    inside_font_size=17,
-    page_width=1600,
-    page_height=1000,
 ):
+    """
+    Create chart-only multi-page PDF.
+
+    Pages included:
+      - All Ventiles / Overall
+      - Each Ventile
+      - Each ECON_REGION
+      - Each POD_MARKET_CODE
+      - Each PRK_TENURE
+
+    For both:
+      - SMI3_LOSS
+      - SMI3_LR
+
+    Each page contains 4 bars:
+      RS42, RS07, RS101, RS151
+
+    Inside each bar:
+      Min, Max, Avg, P10, P50, P90
+      Pred Delq + Claims
+      Pred Claims
+      Pred Delqs
+      Delta vs RS42
+
+    No table.
+    No Plotly/Kaleido required.
+    """
+
+    # --------------------------------------------------------
+    # Validation / defaults
+    # --------------------------------------------------------
 
     if not dfs:
         raise ValueError("dfs cannot be empty")
@@ -1440,6 +87,7 @@ def export_seed_pdf_report(
             "RS151": "#7952B3"
         }
 
+    seeds = list(dfs.keys())
     metric_names = list(metrics.keys())
 
     required_cols = list(dict.fromkeys([
@@ -1452,7 +100,7 @@ def export_seed_pdf_report(
     ]))
 
     # --------------------------------------------------------
-    # Prepare each seed once
+    # Prepare data once
     # --------------------------------------------------------
 
     prepared = {}
@@ -1465,8 +113,8 @@ def export_seed_pdf_report(
     for seed, source_df in dfs.items():
 
         missing = [
-            col for col in required_cols
-            if col not in source_df.columns
+            c for c in required_cols
+            if c not in source_df.columns
         ]
 
         if missing:
@@ -1544,43 +192,19 @@ def export_seed_pdf_report(
     all_markets = sorted(all_markets)
     all_tenures = sorted(all_tenures)
 
-    seeds = list(dfs.keys())
-
     # --------------------------------------------------------
-    # Same quantile logic as HTML
+    # Helpers
     # --------------------------------------------------------
 
-    def quantile(values, p):
-
-        if len(values) == 0:
-            return np.nan
-
-        if len(values) == 1:
-            return values[0]
-
-        position = (len(values) - 1) * p
-
-        low = int(np.floor(position))
-        high = int(np.ceil(position))
-        weight = position - low
-
-        return (
-            values[low] * (1 - weight)
-            + values[high] * weight
-        )
-
-    # --------------------------------------------------------
-    # Formatting — same idea as HTML
-    # --------------------------------------------------------
-
-    def number(value, digits=decimals):
+    def fmt_number(value):
 
         if value is None or not np.isfinite(value):
             return "N/A"
 
-        return f"{value:,.{digits}f}"
+        return f"{value:,.{decimals}f}"
 
-    def metric_number(value, metric):
+
+    def display_metric(value, metric):
 
         if value is None or not np.isfinite(value):
             return "N/A"
@@ -1589,13 +213,13 @@ def export_seed_pdf_report(
 
         if cfg.get("is_ratio", False):
 
-            ratio_scale = cfg.get(
+            scale = cfg.get(
                 "ratio_scale",
                 1
             )
 
             display_value = (
-                value / ratio_scale * 100
+                value / scale * 100
             )
 
             return (
@@ -1604,7 +228,8 @@ def export_seed_pdf_report(
 
         return f"{value:,.{decimals}f}"
 
-    def delta_number(value, metric):
+
+    def display_delta(value, metric):
 
         if value is None or not np.isfinite(value):
             return "N/A"
@@ -1615,13 +240,13 @@ def export_seed_pdf_report(
 
         if cfg.get("is_ratio", False):
 
-            ratio_scale = cfg.get(
+            scale = cfg.get(
                 "ratio_scale",
                 1
             )
 
             display_value = (
-                value / ratio_scale * 100
+                value / scale * 100
             )
 
             return (
@@ -1633,7 +258,8 @@ def export_seed_pdf_report(
             f"{sign}{value:,.{decimals}f}"
         )
 
-    def percent_number(value):
+
+    def display_delta_pct(value):
 
         if value is None or not np.isfinite(value):
             return "N/A"
@@ -1645,17 +271,10 @@ def export_seed_pdf_report(
         )
 
     # --------------------------------------------------------
-    # Calculate one chart page
-    #
-    # filter_type:
-    #     None
-    #     ventile
-    #     region
-    #     market
-    #     tenure
+    # Calculate stats for one filtered page
     # --------------------------------------------------------
 
-    def calculate_page(
+    def calculate_stats(
         metric,
         filter_type=None,
         filter_value=None
@@ -1663,7 +282,7 @@ def export_seed_pdf_report(
 
         cfg = metrics[metric]
 
-        results = {}
+        result = {}
 
         for seed in seeds:
 
@@ -1694,6 +313,7 @@ def export_seed_pdf_report(
                 ]
 
             else:
+
                 subset = df
 
             values = (
@@ -1702,48 +322,51 @@ def export_seed_pdf_report(
                 .to_numpy(dtype=float)
             )
 
-            values.sort()
-
-            if len(values) == 0:
-
-                total = np.nan
-                minimum = np.nan
-                maximum = np.nan
-                average = np.nan
-                p10 = np.nan
-                p50 = np.nan
-                p90 = np.nan
-
-            else:
+            if len(values) > 0:
 
                 total_sum = float(
                     np.sum(values)
                 )
 
-                average = float(
+                avg = float(
                     np.mean(values)
                 )
 
-                total = (
+                aggregate = (
                     total_sum
                     if cfg["agg"] == "sum"
-                    else average
+                    else avg
                 )
 
-                minimum = float(values[0])
-                maximum = float(values[-1])
+                minimum = float(
+                    np.min(values)
+                )
+
+                maximum = float(
+                    np.max(values)
+                )
 
                 p10 = float(
-                    quantile(values, 0.10)
+                    np.quantile(values, 0.10)
                 )
 
                 p50 = float(
-                    quantile(values, 0.50)
+                    np.quantile(values, 0.50)
                 )
 
                 p90 = float(
-                    quantile(values, 0.90)
+                    np.quantile(values, 0.90)
                 )
+
+            else:
+
+                aggregate = np.nan
+                minimum = np.nan
+                maximum = np.nan
+                avg = np.nan
+                p10 = np.nan
+                p50 = np.nan
+                p90 = np.nan
 
             probability = (
                 subset["_Probability"]
@@ -1772,12 +395,11 @@ def export_seed_pdf_report(
                 predicted_claims = np.nan
                 predicted_delqs = np.nan
 
-            results[str(seed)] = {
-                "count": len(values),
-                "total": total,
+            result[str(seed)] = {
+                "aggregate": aggregate,
                 "min": minimum,
                 "max": maximum,
-                "avg": average,
+                "avg": avg,
                 "p10": p10,
                 "p50": p50,
                 "p90": p90,
@@ -1786,24 +408,22 @@ def export_seed_pdf_report(
                 "predictedDelqs": predicted_delqs
             }
 
-        baseline_value = (
-            results[str(baseline)]["total"]
+        base_value = (
+            result[str(baseline)]["aggregate"]
         )
 
         for seed in seeds:
 
             seed = str(seed)
 
-            total = results[seed]["total"]
+            value = result[seed]["aggregate"]
 
             if (
-                np.isfinite(total)
-                and np.isfinite(baseline_value)
+                np.isfinite(value)
+                and np.isfinite(base_value)
             ):
 
-                delta = (
-                    total - baseline_value
-                )
+                delta = value - base_value
 
             else:
 
@@ -1811,13 +431,13 @@ def export_seed_pdf_report(
 
             if (
                 np.isfinite(delta)
-                and np.isfinite(baseline_value)
-                and baseline_value != 0
+                and np.isfinite(base_value)
+                and base_value != 0
             ):
 
                 delta_pct = (
                     delta
-                    / baseline_value
+                    / base_value
                     * 100
                 )
 
@@ -1825,128 +445,224 @@ def export_seed_pdf_report(
 
                 delta_pct = np.nan
 
-            results[seed]["delta"] = delta
-            results[seed]["deltaPct"] = delta_pct
+            result[seed]["delta"] = delta
+            result[seed]["deltaPct"] = delta_pct
 
-        return results
+        return result
 
     # --------------------------------------------------------
-    # Create one Plotly page
+    # Draw one page
     # --------------------------------------------------------
 
-    def create_figure(
+    def draw_page(
+        pdf,
         metric,
-        page_subtitle,
+        subtitle,
         filter_type=None,
         filter_value=None
     ):
 
         cfg = metrics[metric]
 
-        results = calculate_page(
+        stats = calculate_stats(
             metric=metric,
             filter_type=filter_type,
             filter_value=filter_value
         )
 
-        fig = go.Figure()
+        values = np.array([
+            stats[str(seed)]["aggregate"]
+            for seed in seeds
+        ], dtype=float)
 
-        totals = []
+        x = np.arange(
+            len(seeds)
+        )
 
-        for seed in seeds:
+        fig, ax = plt.subplots(
+            figsize=(16, 9)
+        )
 
-            seed = str(seed)
+        bars = ax.bar(
+            x,
+            values,
+            width=0.75,
+            color=[
+                colors.get(
+                    str(seed),
+                    "#64748B"
+                )
+                for seed in seeds
+            ]
+        )
 
-            r = results[seed]
+        # ----------------------------------------------------
+        # Titles
+        # ----------------------------------------------------
 
-            if np.isfinite(r["total"]):
-                totals.append(r["total"])
+        fig.suptitle(
+            f"{metric} — Random Seed Sensitivity",
+            fontsize=22,
+            fontweight="bold",
+            y=0.96
+        )
 
-        if totals:
+        ax.set_title(
+            subtitle,
+            fontsize=13,
+            pad=18,
+            color="#666666"
+        )
 
-            min_value = min(0, min(totals))
-            max_value = max(0, max(totals))
+        # ----------------------------------------------------
+        # X-axis
+        # ----------------------------------------------------
+
+        ax.set_xticks(x)
+
+        ax.set_xticklabels(
+            [str(seed) for seed in seeds],
+            fontsize=11
+        )
+
+        ax.set_xlabel(
+            "Experiment",
+            fontsize=11,
+            labelpad=14
+        )
+
+        # ----------------------------------------------------
+        # Y-axis
+        # ----------------------------------------------------
+
+        ax.set_ylabel(
+            metric,
+            fontsize=11
+        )
+
+        if cfg.get(
+            "is_ratio",
+            False
+        ):
+
+            scale = cfg.get(
+                "ratio_scale",
+                1
+            )
+
+            ax.yaxis.set_major_formatter(
+                FuncFormatter(
+                    lambda y, pos:
+                    f"{y / scale * 100:.0f}%"
+                )
+            )
+
+        ax.grid(
+            axis="y",
+            alpha=0.20
+        )
+
+        ax.set_axisbelow(True)
+
+        ax.spines["top"].set_visible(False)
+        ax.spines["right"].set_visible(False)
+        ax.spines["left"].set_visible(False)
+
+        # ----------------------------------------------------
+        # Y range / headroom
+        # ----------------------------------------------------
+
+        valid_values = values[
+            np.isfinite(values)
+        ]
+
+        if len(valid_values) > 0:
+
+            minimum = min(
+                0,
+                float(valid_values.min())
+            )
+
+            maximum = max(
+                0,
+                float(valid_values.max())
+            )
 
             span = max(
-                max_value - min_value,
+                maximum - minimum,
                 1e-9
             )
 
-        else:
+            ax.set_ylim(
+                minimum - span * 0.08,
+                maximum + span * 0.25
+            )
 
-            min_value = 0
-            max_value = 1
-            span = 1
+        # ----------------------------------------------------
+        # Labels inside each bar
+        # ----------------------------------------------------
 
-        for i, seed in enumerate(seeds):
+        for i, bar in enumerate(bars):
 
-            seed = str(seed)
+            seed = str(seeds[i])
 
-            r = results[seed]
+            r = stats[seed]
 
-            if not np.isfinite(r["total"]):
+            aggregate = r["aggregate"]
+
+            if not np.isfinite(aggregate):
                 continue
+
+            # Top aggregate label
+            ax.text(
+                bar.get_x()
+                + bar.get_width() / 2,
+                aggregate,
+                display_metric(
+                    aggregate,
+                    metric
+                ),
+                ha="center",
+                va="bottom"
+                    if aggregate >= 0
+                    else "top",
+                fontsize=14,
+                fontweight="bold"
+            )
 
             if seed == str(baseline):
 
                 delta_text = "Baseline"
-                delta_pct_text = "Baseline"
 
             else:
 
-                delta_text = delta_number(
+                delta_text = display_delta(
                     r["delta"],
                     metric
                 )
 
-                delta_pct_text = percent_number(
-                    r["deltaPct"]
-                )
-
             lines = [
-                "<b>Min: "
-                + metric_number(r["min"], metric)
-                + "</b>",
-
-                "<b>Max: "
-                + metric_number(r["max"], metric)
-                + "</b>",
-
-                "<b>Avg: "
-                + metric_number(r["avg"], metric)
-                + "</b>",
-
-                "<b>P10: "
-                + metric_number(r["p10"], metric)
-                + "</b>",
-
-                "<b>P50: "
-                + metric_number(r["p50"], metric)
-                + "</b>",
-
-                "<b>P90: "
-                + metric_number(r["p90"], metric)
-                + "</b>",
-
-                "────────────",
-
-                "<b>Pred Delq + Claims: "
-                + number(r["predictedTotal"])
-                + "</b>",
-
-                "<b>Pred Claims: "
-                + number(r["predictedClaims"])
-                + "</b>",
-
-                "<b>Pred Delqs: "
-                + number(r["predictedDelqs"])
-                + "</b>",
-
-                "────────────",
-
-                "<b>Δ: "
-                + delta_text
-                + "</b>"
+                f"Min: {display_metric(r['min'], metric)}",
+                f"Max: {display_metric(r['max'], metric)}",
+                f"Avg: {display_metric(r['avg'], metric)}",
+                f"P10: {display_metric(r['p10'], metric)}",
+                f"P50: {display_metric(r['p50'], metric)}",
+                f"P90: {display_metric(r['p90'], metric)}",
+                "",
+                "Pred Delq + Claims: "
+                + fmt_number(
+                    r["predictedTotal"]
+                ),
+                "Pred Claims: "
+                + fmt_number(
+                    r["predictedClaims"]
+                ),
+                "Pred Delqs: "
+                + fmt_number(
+                    r["predictedDelqs"]
+                ),
+                "",
+                f"Δ: {delta_text}"
             ]
 
             if not cfg.get(
@@ -1954,470 +670,198 @@ def export_seed_pdf_report(
                 False
             ):
 
+                delta_pct_text = (
+                    "Baseline"
+                    if seed == str(baseline)
+                    else display_delta_pct(
+                        r["deltaPct"]
+                    )
+                )
+
                 lines.append(
-                    "<b>Δ%: "
-                    + delta_pct_text
-                    + "</b>"
+                    f"Δ%: {delta_pct_text}"
                 )
 
-            inside_text = "<br>".join(lines)
-
-            fig.add_trace(
-                go.Bar(
-                    x=[i],
-                    y=[r["total"]],
-                    width=0.78,
-
-                    marker=dict(
-                        color=colors.get(
-                            seed,
-                            "#64748b"
-                        )
-                    ),
-
-                    text=[inside_text],
-
-                    textposition="inside",
-
-                    insidetextanchor="middle",
-
-                    constraintext="none",
-
-                    cliponaxis=False,
-
-                    textfont=dict(
-                        size=inside_font_size,
-                        color="white",
-                        family="Arial"
-                    ),
-
-                    hoverinfo="skip",
-
-                    showlegend=False
-                )
+            inside_text = "\n".join(
+                lines
             )
 
-            fig.add_annotation(
-                x=i,
-                y=r["total"],
+            # Put text around middle of the bar
+            text_y = aggregate * 0.50
 
-                text=(
-                    "<b>"
-                    + metric_number(
-                        r["total"],
-                        metric
-                    )
-                    + "</b>"
-                ),
-
-                showarrow=False,
-
-                yshift=25
-                    if r["total"] >= 0
-                    else -25,
-
-                font=dict(
-                    size=22,
-                    color="#172033",
-                    family="Arial"
-                )
+            ax.text(
+                bar.get_x()
+                + bar.get_width() / 2,
+                text_y,
+                inside_text,
+                ha="center",
+                va="center",
+                fontsize=9.5,
+                fontweight="bold",
+                color="white",
+                linespacing=1.25
             )
 
         # ----------------------------------------------------
-        # Title/subtitle
+        # Footer
         # ----------------------------------------------------
 
-        title_text = (
-            "<b>"
-            + metric
-            + " — Random Seed Sensitivity"
-            + "</b>"
-            + "<br>"
-            + "<sup>"
-            + str(page_subtitle)
-            + "</sup>"
+        fig.text(
+            0.02,
+            0.025,
+            "Data - October 2025 - May 2026",
+            fontsize=9,
+            color="#666666"
         )
 
-        fig.update_layout(
-
-            title=dict(
-                text=title_text,
-                x=0.5,
-                xanchor="center",
-
-                font=dict(
-                    size=28,
-                    family="Arial",
-                    color="#172033"
-                )
-            ),
-
-            width=page_width,
-            height=page_height,
-
-            template="plotly_white",
-
-            margin=dict(
-                t=145,
-                b=105,
-                l=115,
-                r=80
-            ),
-
-            xaxis=dict(
-
-                tickmode="array",
-
-                tickvals=list(
-                    range(len(seeds))
-                ),
-
-                ticktext=[
-                    str(seed)
-                    for seed in seeds
-                ],
-
-                range=[
-                    -0.6,
-                    len(seeds) - 0.4
-                ],
-
-                showgrid=False,
-
-                title=dict(
-                    text="Experiment",
-                    font=dict(size=17)
-                ),
-
-                tickfont=dict(
-                    size=16
-                )
-            ),
-
-            yaxis=dict(
-
-                title=dict(
-                    text=metric,
-                    font=dict(size=17)
-                ),
-
-                range=[
-                    min_value
-                    - span * 0.08,
-
-                    max_value
-                    + span * 0.25
-                ],
-
-                ticksuffix=(
-                    "%"
-                    if (
-                        cfg.get(
-                            "is_ratio",
-                            False
-                        )
-                        and cfg.get(
-                            "ratio_scale",
-                            1
-                        ) == 100
-                    )
-                    else ""
-                ),
-
-                tickfont=dict(
-                    size=15
-                ),
-
-                gridcolor="#e5e7eb"
-            ),
-
-            uniformtext=dict(
-                minsize=10,
-                mode="show"
-            ),
-
-            paper_bgcolor="white",
-            plot_bgcolor="white",
-
-            font=dict(
-                family="Arial"
-            ),
-
-            bargap=0.12
+        fig.text(
+            0.98,
+            0.025,
+            "Note - Ventile means 5% increments in percentile.",
+            fontsize=9,
+            color="#666666",
+            ha="right"
         )
 
-        return fig
+        fig.tight_layout(
+            rect=[0.03, 0.06, 0.98, 0.92]
+        )
+
+        pdf.savefig(
+            fig,
+            bbox_inches="tight"
+        )
+
+        plt.close(fig)
 
     # --------------------------------------------------------
-    # Build page definitions
+    # Create all pages
     # --------------------------------------------------------
 
-    pages = []
+    output = Path(
+        filename
+    ).resolve()
 
-    for metric in metric_names:
-
-        # Overall page
-        pages.append({
-            "metric": metric,
-            "subtitle": "All Ventiles",
-            "filter_type": None,
-            "filter_value": None
-        })
-
-        # Each Ventile
-        for ventile in all_ventiles:
-
-            pages.append({
-                "metric": metric,
-                "subtitle": (
-                    f"Ventile {ventile}"
-                ),
-                "filter_type": "ventile",
-                "filter_value": ventile
-            })
-
-        # Each ECON_REGION
-        for region in all_regions:
-
-            pages.append({
-                "metric": metric,
-                "subtitle": (
-                    f"ECON_REGION: {region}"
-                ),
-                "filter_type": "region",
-                "filter_value": region
-            })
-
-        # Each POD_MARKET_CODE
-        for market in all_markets:
-
-            pages.append({
-                "metric": metric,
-                "subtitle": (
-                    f"POD_MARKET_CODE: {market}"
-                ),
-                "filter_type": "market",
-                "filter_value": market
-            })
-
-        # Each PRK_TENURE
-        for tenure in all_tenures:
-
-            pages.append({
-                "metric": metric,
-                "subtitle": (
-                    f"PRK_TENURE: {tenure}"
-                ),
-                "filter_type": "tenure",
-                "filter_value": tenure
-            })
+    page_count = (
+        len(metric_names)
+        * (
+            1
+            + len(all_ventiles)
+            + len(all_regions)
+            + len(all_markets)
+            + len(all_tenures)
+        )
+    )
 
     print(
-        f"Creating {len(pages)} PDF pages..."
+        f"Creating {page_count} PDF pages..."
     )
 
-    # --------------------------------------------------------
-    # Convert every Plotly chart to an image
-    # --------------------------------------------------------
+    current_page = 0
 
-    pdf_images = []
+    with PdfPages(output) as pdf:
 
-    for page_number, page in enumerate(
-        pages,
-        start=1
-    ):
+        for metric in metric_names:
 
-        print(
-            f"Creating page "
-            f"{page_number}/{len(pages)}: "
-            f"{page['metric']} - "
-            f"{page['subtitle']}"
-        )
+            # Overall
+            current_page += 1
 
-        fig = create_figure(
-            metric=page["metric"],
-            page_subtitle=page["subtitle"],
-            filter_type=page["filter_type"],
-            filter_value=page["filter_value"]
-        )
-
-        try:
-
-            png_bytes = fig.to_image(
-                format="png",
-                width=page_width,
-                height=page_height,
-                scale=1
+            print(
+                f"Page {current_page}/{page_count}: "
+                f"{metric} - All Ventiles"
             )
 
-        except Exception as e:
+            draw_page(
+                pdf,
+                metric,
+                "All Ventiles"
+            )
 
-            raise RuntimeError(
-                "\nPDF image export failed.\n"
-                "Install Kaleido in your notebook:\n\n"
-                "%pip install kaleido\n\n"
-                "Then restart the kernel and rerun.\n"
-            ) from e
+            # Ventiles
+            for ventile in all_ventiles:
 
-        image = PILImage.open(
-            BytesIO(png_bytes)
-        ).convert("RGB")
+                current_page += 1
 
-        pdf_images.append(image)
+                print(
+                    f"Page {current_page}/{page_count}: "
+                    f"{metric} - Ventile {ventile}"
+                )
 
-    # --------------------------------------------------------
-    # Save all chart images into one multipage PDF
-    # --------------------------------------------------------
+                draw_page(
+                    pdf,
+                    metric,
+                    f"Ventile {ventile}",
+                    "ventile",
+                    ventile
+                )
 
-    output = Path(filename).resolve()
+            # Regions
+            for region in all_regions:
 
-    if not pdf_images:
-        raise ValueError(
-            "No PDF pages were generated"
-        )
+                current_page += 1
 
-    first_image = pdf_images[0]
+                print(
+                    f"Page {current_page}/{page_count}: "
+                    f"{metric} - ECON_REGION: {region}"
+                )
 
-    remaining_images = pdf_images[1:]
+                draw_page(
+                    pdf,
+                    metric,
+                    f"ECON_REGION: {region}",
+                    "region",
+                    region
+                )
 
-    first_image.save(
-        output,
-        "PDF",
-        resolution=120.0,
-        save_all=True,
-        append_images=remaining_images
-    )
+            # Markets
+            for market in all_markets:
 
-    # Close image objects
-    for image in pdf_images:
-        image.close()
+                current_page += 1
+
+                print(
+                    f"Page {current_page}/{page_count}: "
+                    f"{metric} - POD_MARKET_CODE: {market}"
+                )
+
+                draw_page(
+                    pdf,
+                    metric,
+                    f"POD_MARKET_CODE: {market}",
+                    "market",
+                    market
+                )
+
+            # Tenure
+            for tenure in all_tenures:
+
+                current_page += 1
+
+                print(
+                    f"Page {current_page}/{page_count}: "
+                    f"{metric} - PRK_TENURE: {tenure}"
+                )
+
+                draw_page(
+                    pdf,
+                    metric,
+                    f"PRK_TENURE: {tenure}",
+                    "tenure",
+                    tenure
+                )
 
     print()
-    print(f"PDF report created: {output}")
+    print(
+        f"PDF report created: {output}"
+    )
 
     print(
         f"File size: "
         f"{output.stat().st_size / (1024 ** 2):.2f} MB"
     )
 
-    print(
-        f"Total pages: {len(pages)}"
-    )
-
     return output
 
-
-# ============================================================
-# OPTIONAL WRAPPER
-#
-# ONE CALL CREATES BOTH HTML AND PDF
-# ============================================================
-
-def export_seed_reports(
-    dfs,
-    html_filename=
-        "Random_Seed_Sensitivity_Loss_Comparison.html",
-    pdf_filename=
-        "Random_Seed_Sensitivity_Loss_Comparison.pdf",
-
-    ventile_col="rr_model_decile",
-    region_col="ECON_REGION",
-    market_col="POD_MARKET_CODE",
-    tenure_col="PRK_TENURE",
-
-    probability_col="prediction_probability",
-
-    metrics=None,
-
-    baseline="RS42",
-
-    claims_share=0.62,
-
-    colors=None,
-
-    decimals=2,
-
-    inside_font_size=12,
-
-    chart_height=900
-):
-
-    # --------------------------------------------------------
-    # HTML — your existing report
-    # --------------------------------------------------------
-
-    html_path = export_interactive_seed_report(
-
-        dfs=dfs,
-
-        filename=html_filename,
-
-        ventile_col=ventile_col,
-
-        region_col=region_col,
-
-        market_col=market_col,
-
-        tenure_col=tenure_col,
-
-        probability_col=probability_col,
-
-        metrics=metrics,
-
-        baseline=baseline,
-
-        claims_share=claims_share,
-
-        colors=colors,
-
-        decimals=decimals,
-
-        inside_font_size=inside_font_size,
-
-        chart_height=chart_height
-    )
-
-    # --------------------------------------------------------
-    # PDF — chart-only report
-    # --------------------------------------------------------
-
-    pdf_path = export_seed_pdf_report(
-
-        dfs=dfs,
-
-        filename=pdf_filename,
-
-        ventile_col=ventile_col,
-
-        region_col=region_col,
-
-        market_col=market_col,
-
-        tenure_col=tenure_col,
-
-        probability_col=probability_col,
-
-        metrics=metrics,
-
-        baseline=baseline,
-
-        claims_share=claims_share,
-
-        colors=colors,
-
-        decimals=decimals,
-
-        # Slightly larger text for PDF
-        inside_font_size=17,
-
-        page_width=1600,
-
-        page_height=1000
-    )
-
-    return html_path, pdf_path
-
-=========
+=====
 
 dfs = {
     "RS42": df_scored_42,
@@ -2426,18 +870,9 @@ dfs = {
     "RS151": df_scored_151
 }
 
-
-html_path, pdf_path = export_seed_reports(
-
+pdf_path = export_seed_pdf_matplotlib(
     dfs=dfs,
-
-    html_filename=
-        "Random_Seed_Sensitivity_Loss_Comparison.html",
-
-    pdf_filename=
-        "Random_Seed_Sensitivity_Loss_Comparison.pdf"
+    filename="Random_Seed_Sensitivity_Loss_Comparison.pdf"
 )
 
-
-print("HTML:", html_path)
-print("PDF :", pdf_path)
+print(pdf_path)
