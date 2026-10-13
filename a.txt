@@ -1,18 +1,328 @@
 
-dfs = {
-    "RS42": df_scored_42,
-    "RS07": df_scored_07,
-    "RS101": df_scored_101,
-    "RS151": df_scored_151
-}
+import pandas as pd
+import numpy as np
+import plotly.graph_objects as go
+import ipywidgets as widgets
+from IPython.display import display
 
-plot_seed_sensitivity(
-    dfs=dfs,
-    decile_col="rr_model_decile",
-    value_col="SMI3_LOSS",
+def plot_seed_sensitivity(
+    dfs,
+    decile_col,
+    value_col,
     region_col="ECON_REGION",
     agg="sum",
     baseline="RS42",
+    is_ratio=False,
+    ratio_scale=1,
+    decimals=2,
+    title=None,
+    colors=None,
     inside_font_size=16,
     total_font_size=18
-)
+):
+    """
+    is_ratio=True: display values as percentages.
+    ratio_scale=1: ratios stored as 0.125 (12.5%).
+    ratio_scale=100: ratios stored as 12.5 (12.5%).
+    """
+
+    if baseline not in dfs:
+        raise ValueError(f"{baseline} not found in dfs")
+
+    seeds = list(dfs)
+
+    if colors is None:
+        colors = {
+            "RS42": "#17365D",
+            "RS07": "#C75B39",
+            "RS101": "#147D74",
+            "RS151": "#7952B3"
+        }
+
+    fallback = ["#17365D", "#C75B39", "#147D74", "#7952B3"]
+
+    def fmt(v):
+        if pd.isna(v):
+            return "N/A"
+
+        if is_ratio:
+            return f"{v / ratio_scale * 100:,.{decimals}f}%"
+
+        if abs(v) >= 1e6:
+            return f"{v / 1e6:,.2f}M"
+
+        if abs(v) >= 1e3:
+            return f"{v / 1e3:,.2f}K"
+
+        return f"{v:,.{decimals}f}"
+
+    def signed(v):
+        if pd.isna(v):
+            return "N/A"
+        return ("+" if v > 0 else "") + fmt(v)
+
+    # Prepare scored data
+    frames = []
+
+    for seed, df in dfs.items():
+        temp = df[[decile_col, value_col, region_col]].copy()
+        temp["Seed"] = seed
+
+        temp["Decile"] = pd.to_numeric(
+            temp[decile_col].astype("string")
+            .str.extract(r"(\d+)", expand=False),
+            errors="coerce"
+        )
+
+        temp[value_col] = pd.to_numeric(
+            temp[value_col], errors="coerce"
+        )
+
+        frames.append(temp)
+
+    data = pd.concat(frames, ignore_index=True)
+    data = data.dropna(subset=["Decile"])
+    data["Decile"] = data["Decile"].astype(int)
+
+    deciles = sorted(data["Decile"].unique())
+    regions = sorted(data[region_col].dropna().unique(), key=str)
+
+    decile_filter = widgets.Dropdown(
+        options=[("All Deciles", None)] +
+                [(f"Decile {d}", d) for d in deciles],
+        value=None,
+        description="Decile:"
+    )
+
+    region_filter = widgets.Dropdown(
+        options=[("All Regions", None)] +
+                [(str(r), r) for r in regions],
+        value=None,
+        description="ECON_REGION:",
+        style={"description_width": "initial"}
+    )
+
+    output = widgets.Output()
+
+    def update_chart(change=None):
+        with output:
+            output.clear_output(wait=True)
+
+            subset = data.copy()
+
+            if region_filter.value is not None:
+                subset = subset[
+                    subset[region_col] == region_filter.value
+                ]
+
+            if decile_filter.value is not None:
+                subset = subset[
+                    subset["Decile"] == decile_filter.value
+                ]
+
+            group_label = (
+                "All Deciles"
+                if decile_filter.value is None
+                else f"Decile {decile_filter.value}"
+            )
+
+            stats = (
+                subset.groupby("Seed")[value_col]
+                .agg(
+                    total=agg,
+                    min="min",
+                    max="max",
+                    avg="mean",
+                    p10=lambda x: x.quantile(0.10),
+                    p20=lambda x: x.quantile(0.20),
+                    p50="median",
+                    count="count"
+                )
+                .reindex(seeds)
+            )
+
+            baseline_value = stats.loc[baseline, "total"]
+
+            stats["difference"] = stats["total"] - baseline_value
+
+            if pd.notna(baseline_value) and baseline_value != 0:
+                stats["pct_difference"] = (
+                    stats["difference"] / baseline_value * 100
+                )
+            else:
+                stats["pct_difference"] = np.nan
+
+            if pd.notna(baseline_value):
+                stats.loc[
+                    baseline, ["difference", "pct_difference"]
+                ] = 0
+
+            fig = go.Figure()
+
+            for i, seed in enumerate(seeds):
+                r = stats.loc[seed]
+
+                if pd.isna(r["total"]):
+                    continue
+
+                diff_text = (
+                    "Baseline"
+                    if seed == baseline
+                    else signed(r["difference"])
+                )
+
+                pct_text = (
+                    "Baseline"
+                    if seed == baseline
+                    else (
+                        f"{r['pct_difference']:+.2f}%"
+                        if pd.notna(r["pct_difference"])
+                        else "N/A"
+                    )
+                )
+
+                inside_text = (
+                    f"<b>Min: {fmt(r['min'])}</b><br>"
+                    f"<b>Max: {fmt(r['max'])}</b><br>"
+                    f"<b>Avg: {fmt(r['avg'])}</b><br>"
+                    f"<b>P10: {fmt(r['p10'])}</b><br>"
+                    f"<b>P20: {fmt(r['p20'])}</b><br>"
+                    f"<b>P50: {fmt(r['p50'])}</b><br>"
+                    f"────────────<br>"
+                    f"<b>Δ: {diff_text}</b><br>"
+                    f"<b>Δ%: {pct_text}</b>"
+                )
+
+                label = "MEAN" if agg == "mean" else agg.upper()
+
+                fig.add_trace(go.Bar(
+                    x=[i],
+                    y=[r["total"]],
+                    width=0.72,
+                    name=seed,
+                    marker=dict(
+                        color=colors.get(
+                            seed, fallback[i % len(fallback)]
+                        ),
+                        line=dict(color="white", width=1.5)
+                    ),
+                    text=[inside_text],
+                    textposition="inside",
+                    insidetextanchor="middle",
+                    textfont=dict(
+                        size=inside_font_size,
+                        color="white",
+                        family="Arial"
+                    ),
+                    customdata=[(
+                        f"<b>{seed} | {group_label}</b><br>"
+                        f"{label}: {fmt(r['total'])}<br>"
+                        f"Count: {int(r['count']):,}<br>"
+                        + inside_text
+                    )],
+                    hovertemplate="%{customdata}<extra></extra>",
+                    showlegend=False
+                ))
+
+                fig.add_annotation(
+                    x=i,
+                    y=float(r["total"]),
+                    text=f"<b>{label}: {fmt(r['total'])}</b>",
+                    showarrow=False,
+                    yshift=18,
+                    font=dict(
+                        size=total_font_size,
+                        color="#172033",
+                        family="Arial Black"
+                    )
+                )
+
+            values = stats["total"].dropna()
+
+            if len(values):
+                ymin = min(0, values.min())
+                ymax = max(0, values.max())
+                pad = max((ymax - ymin) * 0.20, 0.01)
+                y_range = [ymin - pad * 0.15, ymax + pad]
+            else:
+                y_range = [0, 1]
+
+            fig.update_layout(
+                title=dict(
+                    text=(
+                        title or
+                        f"{value_col} — Random Seed Sensitivity"
+                    ) + (
+                        f"<br><sup>{group_label} | "
+                        f"{region_filter.value if region_filter.value is not None else 'All Regions'}</sup>"
+                    ),
+                    x=0.5,
+                    font=dict(size=22)
+                ),
+                template="plotly_white",
+                height=800,
+                plot_bgcolor="white",
+                paper_bgcolor="white",
+                font=dict(family="Arial", size=15),
+                margin=dict(t=150, b=90, l=100, r=60)
+            )
+
+            fig.update_xaxes(
+                title="Random Seed",
+                tickmode="array",
+                tickvals=list(range(len(seeds))),
+                ticktext=seeds,
+                range=[-0.6, len(seeds) - 0.4],
+                tickfont=dict(size=16),
+                showgrid=False
+            )
+
+            fig.update_yaxes(
+                title=value_col,
+                tickformat=(
+                    f".{decimals}%" if is_ratio and ratio_scale == 1
+                    else "~s"
+                ),
+                range=y_range,
+                tickfont=dict(size=14),
+                gridcolor="#E7ECF2",
+                zeroline=True
+            )
+
+            fig.show()
+
+            # Detailed numerical table
+            table = stats.reset_index()
+            table.insert(0, "Selection", group_label)
+
+            # Format values consistently with the chart
+            display_table = table.copy()
+
+            for col in [
+                "total", "min", "max", "avg",
+                "p10", "p20", "p50"
+            ]:
+                display_table[col] = display_table[col].map(fmt)
+
+            display_table["difference"] = (
+                display_table["difference"].map(signed)
+            )
+
+            display_table["pct_difference"] = (
+                display_table["pct_difference"].map(
+                    lambda v: f"{v:+.2f}%"
+                    if pd.notna(v) else "N/A"
+                )
+            )
+
+            display(display_table)
+
+    decile_filter.observe(update_chart, names="value")
+    region_filter.observe(update_chart, names="value")
+
+    display(
+        widgets.HBox([decile_filter, region_filter]),
+        output
+    )
+
+    update_chart()
