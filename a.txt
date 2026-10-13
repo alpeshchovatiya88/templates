@@ -414,4 +414,66 @@ fig.update_yaxes(
 # =====================================================
 
 print("\n" + "=" * 60)
-print(f"
+print(f"DECILE STABILITY: {base_name} VS {compare_name}")
+print("=" * 60)
+
+print("\n1. OVERALL STABILITY METRICS")
+display(metrics)
+
+print("\n2. EXACT NUMBER OF DECILES MOVED")
+display(movement_summary)
+
+print("\n3. MOVEMENT GROUP SUMMARY")
+display(movement_groups)
+
+print("\n4. DECILE-LEVEL ANALYSIS")
+display(decile_summary)
+
+print("\n5. INTERACTIVE DASHBOARD")
+fig.show()
+
+# =====================================================
+# 11. SAVE REPORTS
+# =====================================================
+
+with pd.ExcelWriter(
+    f"{base_name}_vs_{compare_name}_analysis.xlsx"
+) as writer:
+
+    metrics.to_excel(
+        writer,
+        sheet_name="Stability Metrics",
+        index=False
+    )
+
+    movement_summary.to_excel(
+        writer,
+        sheet_name="Movement Summary"
+    )
+
+    movement_groups.to_excel(
+        writer,
+        sheet_name="Movement Groups"
+    )
+
+    decile_summary.to_excel(
+        writer,
+        sheet_name="Decile Summary"
+    )
+
+    swap.to_excel(
+        writer,
+        sheet_name="Swapset Counts"
+    )
+
+    data.to_excel(
+        writer,
+        sheet_name="File Level Details",
+        index=False
+    )
+
+fig.write_html(
+    f"{base_name}_vs_{compare_name}_dashboard.html"
+)
+
+print("\nAnalysis completed successfully.")
