@@ -1,245 +1,1375 @@
+import json
+from io import BytesIO
+from pathlib import Path
+from xml.sax.saxutils import escape
 
+import numpy as np
 import pandas as pd
-import plotly.graph_objects as go
+import matplotlib.pyplot as plt
+
+from plotly.offline import get_plotlyjs
+
+from reportlab.lib import colors
+from reportlab.lib.pagesizes import A3, landscape
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.platypus import (
+    SimpleDocTemplate, Paragraph, Spacer,
+    Table, TableStyle, Image, PageBreak
+)
 
 
-def plot_lr_by_ventile(
+SEED_COLORS = {
+    "RS42": "#17365D",
+    "RS07": "#E66B23",
+    "RS101": "#09988A",
+    "RS151": "#7952B3"
+}
+
+METRICS = {
+    "SMI3_LOSS": "sum",
+    "SMI3_LR": "mean"
+}
+
+
+# ============================================================
+# 1. PREPARE DATA — SHARED BY HTML AND PDF
+# ============================================================
+
+def prepare_seed_data(
     dfs,
     ventile_col="rr_model_decile",
-    lr_col="SMI3_LR",
-    lr_scale=100,
-    title="Random Seed Sensitivity - Loss Ratio by Ventile",
-    decimals=2,
-    label_font_size=13,
-    height=800
+    region_col="ECON_REGION",
+    market_col="POD_MARKET_CODE",
+    tenure_col="PRK_TENURE",
+    probability_col="prediction_probability"
 ):
-    """
-    Plot mean SMI3_LR by ventile for each random seed.
-
-    lr_scale=100: LR stored as 0.1847 -> 18.47%
-    lr_scale=1:   LR stored as 18.47 -> 18.47%
-    """
-
-    # 1. Calculate mean LR by ventile
-    summary = pd.DataFrame({
-        seed: (
-            df.assign(
-                _ventile=pd.to_numeric(
-                    df[ventile_col]
-                    .astype(str)
-                    .str.extract(r"(\d+)", expand=False),
-                    errors="coerce"
-                )
-            )
-            .assign(
-                _lr=pd.to_numeric(
-                    df[lr_col],
-                    errors="coerce"
-                )
-            )
-            .groupby("_ventile")["_lr"]
-            .mean()
-        )
-        for seed, df in dfs.items()
-    }).sort_index()
-
-    if summary.empty:
-        raise ValueError("No valid ventile data found.")
-
-    # Convert to percentage display units
-    summary = summary * lr_scale
-
-    colors = {
-        "RS42": "#17365D",
-        "RS07": "#E66B23",
-        "RS101": "#09988A",
-        "RS151": "#7952B3"
+    segments = {
+        "Ventile": ventile_col,
+        "ECON_REGION": region_col,
+        "POD_MARKET_CODE": market_col,
+        "PRK_TENURE": tenure_col
     }
 
-    fig = go.Figure()
+    required = list(dict.fromkeys(
+        list(segments.values())
+        + list(METRICS)
+        + [probability_col]
+    ))
 
-    # 2. Create grouped bars
-    for seed in summary.columns:
+    prepared = []
 
-        values = summary[seed]
+    for seed, df in dfs.items():
 
-        fig.add_trace(
-            go.Bar(
-                x=summary.index,
-                y=values,
-                name=seed,
-                marker_color=colors.get(seed, "#64748B"),
+        missing = [c for c in required if c not in df.columns]
 
-                # Vertical percentage labels
-                text=[
-                    f"{v:,.{decimals}f}%"
-                    if pd.notna(v) else ""
-                    for v in values
-                ],
+        if missing:
+            raise ValueError(f"{seed}: missing columns {missing}")
 
-                textposition="outside",
-                textangle=-90,
+        t = df[required].copy()
+        t["Seed"] = seed
 
-                textfont=dict(
-                    family="Arial Black",
-                    size=label_font_size,
-                    color="black"
-                ),
-
-                cliponaxis=False,
-
-                hovertemplate=(
-                    "Ventile: %{x}<br>"
-                    f"Seed: {seed}<br>"
-                    "Mean LR: %{y:,.2f}%"
-                    "<extra></extra>"
-                )
+        t["Ventile"] = (
+            pd.to_numeric(
+                t[ventile_col]
+                .astype("string")
+                .str.extract(r"(\d+)", expand=False),
+                errors="coerce"
             )
+            .astype("Int64")
+            .astype("string")
+            .fillna("(Missing)")
         )
 
-    # 3. Dropdown for ventiles
-    ventiles = summary.index.tolist()
+        for label, source in list(segments.items())[1:]:
+            t[label] = (
+                t[source]
+                .astype("string")
+                .fillna("(Missing)")
+            )
 
-    buttons = [
-        dict(
-            label="All Ventiles",
-            method="relayout",
-            args=[{
-                "xaxis.range": [
-                    min(ventiles) - 0.5,
-                    max(ventiles) + 0.5
+        for metric in [*METRICS, probability_col]:
+            t[metric] = (
+                pd.to_numeric(t[metric], errors="coerce")
+                .replace([np.inf, -np.inf], np.nan)
+            )
+
+        prepared.append(
+            t[
+                [
+                    "Seed",
+                    *segments.keys(),
+                    *METRICS,
+                    probability_col
                 ]
-            }]
+            ]
         )
+
+    return pd.concat(prepared, ignore_index=True)
+
+
+# ============================================================
+# 2. SHARED STATISTICS FOR PDF
+# ============================================================
+
+def summarize_seed_data(
+    data,
+    metric,
+    segment=None,
+    baseline="RS42",
+    probability_col="prediction_probability",
+    claims_share=0.62,
+    lr_scale=1
+):
+    keys = ["Seed"] if segment is None else [segment, "Seed"]
+
+    grouped = data.groupby(
+        keys,
+        dropna=False,
+        sort=False
+    )
+
+    result = grouped.agg(
+        N=(metric, "count"),
+        Aggregate=(metric, METRICS[metric]),
+        Min=(metric, "min"),
+        Max=(metric, "max"),
+        Avg=(metric, "mean"),
+        P10=(metric, lambda x: x.quantile(0.10)),
+        P50=(metric, lambda x: x.quantile(0.50)),
+        P90=(metric, lambda x: x.quantile(0.90)),
+        Predicted=(
+            probability_col,
+            lambda x: x.sum(min_count=1)
+        )
+    ).reset_index()
+
+    result["Claims"] = result["Predicted"] * claims_share
+    result["Delqs"] = result["Predicted"] * (1 - claims_share)
+
+    if metric == "SMI3_LR":
+        for col in [
+            "Aggregate", "Min", "Max",
+            "Avg", "P10", "P50", "P90"
+        ]:
+            result[col] *= lr_scale
+
+    if segment is None:
+
+        baseline_rows = result.loc[
+            result["Seed"] == baseline,
+            "Aggregate"
+        ]
+
+        result["Baseline"] = (
+            baseline_rows.iloc[0]
+            if not baseline_rows.empty
+            else np.nan
+        )
+
+    else:
+
+        baseline_values = (
+            result.loc[
+                result["Seed"] == baseline,
+                [segment, "Aggregate"]
+            ]
+            .rename(columns={"Aggregate": "Baseline"})
+        )
+
+        result = result.merge(
+            baseline_values,
+            on=segment,
+            how="left",
+            validate="many_to_one"
+        )
+
+    result["Delta"] = (
+        result["Aggregate"] - result["Baseline"]
+    )
+
+    result["DeltaPct"] = np.where(
+        result["Baseline"].notna()
+        & result["Baseline"].ne(0),
+        result["Delta"] / result["Baseline"] * 100,
+        np.nan
+    )
+
+    if segment == "Ventile":
+
+        result["_sort"] = pd.to_numeric(
+            result["Ventile"],
+            errors="coerce"
+        )
+
+        result = (
+            result.sort_values(
+                ["_sort", "Seed"],
+                na_position="last"
+            )
+            .drop(columns="_sort")
+        )
+
+    elif segment is not None:
+        result = result.sort_values([segment, "Seed"])
+
+    else:
+        result = result.sort_values("Seed")
+
+    return result
+
+
+# ============================================================
+# 3. INTERACTIVE HTML REPORT
+# ============================================================
+
+def export_seed_html(
+    data,
+    seeds,
+    filename="Random_Seed_Sensitivity_Interactive.html",
+    baseline="RS42",
+    probability_col="prediction_probability",
+    claims_share=0.62,
+    lr_scale=1,
+    decimals=2
+):
+
+    columns = [
+        "Seed",
+        "Ventile",
+        "ECON_REGION",
+        "POD_MARKET_CODE",
+        "PRK_TENURE",
+        "SMI3_LOSS",
+        "SMI3_LR",
+        probability_col
     ]
 
-    for v in ventiles:
-        buttons.append(
-            dict(
-                label=f"Ventile {int(v)}",
-                method="relayout",
-                args=[{
-                    "xaxis.range": [
-                        float(v) - 0.5,
-                        float(v) + 0.5
-                    ]
-                }]
+    records = []
+
+    for record in data[columns].itertuples(
+        index=False,
+        name=None
+    ):
+
+        records.append([
+            None if pd.isna(v)
+            else float(v) if i >= 5
+            else str(v)
+            for i, v in enumerate(record)
+        ])
+
+    def categories(column):
+        return sorted(
+            data[column].dropna().astype(str).unique().tolist()
+        )
+
+    ventiles = categories("Ventile")
+
+    ventiles.sort(
+        key=lambda x: (
+            not x.isdigit(),
+            int(x) if x.isdigit() else 999999
+        )
+    )
+
+    payload = {
+        "rows": records,
+        "seeds": list(seeds),
+        "baseline": baseline,
+        "options": [
+            ventiles,
+            categories("ECON_REGION"),
+            categories("POD_MARKET_CODE"),
+            categories("PRK_TENURE")
+        ],
+        "share": claims_share,
+        "lr_scale": lr_scale,
+        "decimals": decimals,
+        "colors": SEED_COLORS
+    }
+
+    report_json = json.dumps(
+        payload,
+        separators=(",", ":"),
+        allow_nan=False
+    ).replace("<", "\\u003c")
+
+    html = r"""
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+
+<title>Random Seed Sensitivity Loss Comparison</title>
+
+<style>
+body {
+    font-family: Arial, sans-serif;
+    background: #f5f7fb;
+    color: #1a2637;
+    margin: 25px;
+}
+
+h1 { color: #17365D; }
+
+.panel {
+    background: white;
+    padding: 18px;
+    margin: 16px 0;
+    border-radius: 9px;
+    overflow: auto;
+}
+
+.filters {
+    display: flex;
+    gap: 12px;
+    flex-wrap: wrap;
+    align-items: end;
+}
+
+.filter {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+
+label {
+    font-weight: bold;
+    font-size: 13px;
+}
+
+select, button {
+    padding: 9px;
+    border: 1px solid #ccd3dc;
+    border-radius: 5px;
+    background: white;
+}
+
+#ventiles {
+    height: 135px;
+    min-width: 140px;
+}
+
+table {
+    border-collapse: collapse;
+    width: 100%;
+    font-size: 12px;
+    white-space: nowrap;
+}
+
+th {
+    background: #17365D;
+    color: white;
+}
+
+th, td {
+    padding: 8px;
+    border-bottom: 1px solid #ddd;
+    text-align: right;
+}
+
+th:first-child, td:first-child {
+    text-align: left;
+}
+
+.hint {
+    color: #536273;
+    font-size: 12px;
+}
+</style>
+
+<script>__PLOTLY_JS__</script>
+</head>
+
+<body>
+
+<h1>Random Seed Sensitivity Loss Comparison</h1>
+
+<p>Data - October 2025 - May 2026</p>
+<p>Note - Ventile means 5% increments in percentile.</p>
+
+<div class="panel filters">
+
+    <div class="filter">
+        <label>Metric</label>
+        <select id="metric">
+            <option>SMI3_LOSS</option>
+            <option>SMI3_LR</option>
+        </select>
+    </div>
+
+    <div class="filter">
+        <label>Ventiles (multi-select)</label>
+        <select id="ventiles" multiple></select>
+
+        <div>
+            <button id="selectAll">Select All</button>
+            <button id="clearAll">Clear All</button>
+        </div>
+
+        <span class="hint">
+            None selected = all.
+            Ctrl/Cmd-click to select multiple.
+        </span>
+    </div>
+
+    <div class="filter">
+        <label>ECON_REGION</label>
+        <select id="region"></select>
+    </div>
+
+    <div class="filter">
+        <label>POD_MARKET_CODE</label>
+        <select id="market"></select>
+    </div>
+
+    <div class="filter">
+        <label>PRK_TENURE</label>
+        <select id="tenure"></select>
+    </div>
+
+    <button id="reset">Reset Filters</button>
+
+</div>
+
+<div class="panel">
+    <div id="chart"></div>
+</div>
+
+<div class="panel">
+    <h2>Detailed Statistics</h2>
+    <table>
+        <thead id="tableHead"></thead>
+        <tbody id="tableBody"></tbody>
+    </table>
+</div>
+
+<script id="reportData" type="application/json">
+__REPORT_JSON__
+</script>
+
+<script>
+(() => {
+    "use strict";
+
+    const D = JSON.parse(
+        document.getElementById("reportData").textContent
+    );
+
+    const $ = id => document.getElementById(id);
+
+    const filterIds = [
+        "ventiles",
+        "region",
+        "market",
+        "tenure"
+    ];
+
+    D.options.forEach((values, index) => {
+
+        const element = $(filterIds[index]);
+
+        if (index > 0) {
+            element.add(new Option("All", ""));
+        }
+
+        values.forEach(value => {
+            element.add(
+                new Option(
+                    index === 0 ? "Ventile " + value : value,
+                    value
+                )
+            );
+        });
+    });
+
+    function fmt(value, digits = D.decimals) {
+
+        if (value === null || !Number.isFinite(value)) {
+            return "N/A";
+        }
+
+        return value.toLocaleString("en-US", {
+            minimumFractionDigits: digits,
+            maximumFractionDigits: digits
+        });
+    }
+
+    function percentile(sorted, p) {
+
+        if (!sorted.length) return null;
+
+        const position = (sorted.length - 1) * p;
+        const lower = Math.floor(position);
+        const upper = Math.ceil(position);
+
+        return sorted[lower] * (1 - (position - lower))
+             + sorted[upper] * (position - lower);
+    }
+
+    function update() {
+
+        const metric = $("metric").value;
+        const isLR = metric === "SMI3_LR";
+        const metricIndex = isLR ? 6 : 5;
+
+        const selectedVentiles = [
+            ...$("ventiles").selectedOptions
+        ].map(option => option.value);
+
+        const selectedFilters = [
+            $("region").value,
+            $("market").value,
+            $("tenure").value
+        ];
+
+        const groups = Object.fromEntries(
+            D.seeds.map(seed => [
+                seed,
+                {
+                    values: [],
+                    predicted: 0,
+                    probabilityCount: 0
+                }
+            ])
+        );
+
+        D.rows.forEach(row => {
+
+            if (
+                selectedVentiles.length &&
+                !selectedVentiles.includes(row[1])
+            ) {
+                return;
+            }
+
+            if (
+                selectedFilters.some(
+                    (filter, i) =>
+                        filter && row[i + 2] !== filter
+                )
+            ) {
+                return;
+            }
+
+            const group = groups[row[0]];
+
+            if (row[metricIndex] !== null) {
+                group.values.push(row[metricIndex]);
+            }
+
+            if (row[7] !== null) {
+                group.predicted += row[7];
+                group.probabilityCount++;
+            }
+        });
+
+        const stats = {};
+
+        D.seeds.forEach(seed => {
+
+            const group = groups[seed];
+
+            const values = group.values.sort(
+                (a, b) => a - b
+            );
+
+            const n = values.length;
+
+            const sum = values.reduce(
+                (total, value) => total + value,
+                0
+            );
+
+            const scale = isLR ? D.lr_scale : 1;
+
+            const predicted = group.probabilityCount
+                ? group.predicted
+                : null;
+
+            stats[seed] = {
+                n: n,
+
+                aggregate: n
+                    ? (isLR ? sum / n : sum) * scale
+                    : null,
+
+                min: n ? values[0] * scale : null,
+                max: n ? values[n - 1] * scale : null,
+                avg: n ? (sum / n) * scale : null,
+
+                p10: n
+                    ? percentile(values, 0.10) * scale
+                    : null,
+
+                p50: n
+                    ? percentile(values, 0.50) * scale
+                    : null,
+
+                p90: n
+                    ? percentile(values, 0.90) * scale
+                    : null,
+
+                predicted: predicted,
+
+                claims: predicted === null
+                    ? null
+                    : predicted * D.share,
+
+                delqs: predicted === null
+                    ? null
+                    : predicted * (1 - D.share)
+            };
+        });
+
+        const baselineValue = stats[D.baseline].aggregate;
+
+        const headings = [
+            "Seed",
+            "N",
+            isLR ? "MEAN (%)" : "SUM",
+            isLR ? "Delta (pp)" : "Delta",
+            ...(!isLR ? ["Delta (%)"] : []),
+            "Min",
+            "Max",
+            "Avg",
+            "P10",
+            "P50",
+            "P90",
+            "Pred Delq + Claims",
+            "Pred Claims",
+            "Pred Delqs"
+        ];
+
+        $("tableHead").innerHTML =
+            "<tr>" +
+            headings.map(h => "<th>" + h + "</th>").join("") +
+            "</tr>";
+
+        $("tableBody").innerHTML = "";
+
+        const traces = [];
+
+        D.seeds.forEach(seed => {
+
+            const s = stats[seed];
+
+            const delta =
+                s.aggregate === null || baselineValue === null
+                    ? null
+                    : s.aggregate - baselineValue;
+
+            const deltaPct =
+                delta === null || !baselineValue
+                    ? null
+                    : 100 * delta / baselineValue;
+
+            const metricFmt = value =>
+                fmt(value) +
+                (isLR && value !== null ? "%" : "");
+
+            const difference =
+                seed === D.baseline
+                    ? "Baseline"
+                    : delta === null
+                        ? "N/A"
+                        : (delta > 0 ? "+" : "")
+                          + fmt(delta)
+                          + (isLR ? " pp" : "");
+
+            const fields = [
+                seed,
+                fmt(s.n, 0),
+                metricFmt(s.aggregate),
+                difference,
+
+                ...(!isLR ? [
+                    seed === D.baseline
+                        ? "Baseline"
+                        : deltaPct === null
+                            ? "N/A"
+                            : (deltaPct > 0 ? "+" : "")
+                              + fmt(deltaPct) + "%"
+                ] : []),
+
+                metricFmt(s.min),
+                metricFmt(s.max),
+                metricFmt(s.avg),
+                metricFmt(s.p10),
+                metricFmt(s.p50),
+                metricFmt(s.p90),
+
+                fmt(s.predicted),
+                fmt(s.claims),
+                fmt(s.delqs)
+            ];
+
+            const tableRow = document.createElement("tr");
+
+            fields.forEach(value => {
+                const cell = document.createElement("td");
+                cell.textContent = value;
+                tableRow.appendChild(cell);
+            });
+
+            $("tableBody").appendChild(tableRow);
+
+            const insideText = [
+                "Min: " + metricFmt(s.min),
+                "Max: " + metricFmt(s.max),
+                "Avg: " + metricFmt(s.avg),
+                "P10: " + metricFmt(s.p10),
+                "P50: " + metricFmt(s.p50),
+                "P90: " + metricFmt(s.p90),
+                "Pred Delq + Claims: " + fmt(s.predicted),
+                "Pred Claims: " + fmt(s.claims),
+                "Pred Delqs: " + fmt(s.delqs),
+                "Delta: " + difference
+            ];
+
+            if (!isLR) {
+                insideText.push(
+                    "Delta %: " +
+                    (deltaPct === null
+                        ? "N/A"
+                        : fmt(deltaPct) + "%")
+                );
+            }
+
+            traces.push({
+                type: "bar",
+                x: [seed],
+                y: [s.aggregate],
+                name: seed,
+
+                marker: {
+                    color: D.colors[seed] || "#64748B"
+                },
+
+                text: [insideText.join("<br>")],
+                textposition: "inside",
+                insidetextanchor: "middle",
+
+                textfont: {
+                    size: 11,
+                    color: "white"
+                },
+
+                hovertemplate:
+                    seed +
+                    "<br>Aggregate: %{y:,.2f}" +
+                    "<extra></extra>"
+            });
+        });
+
+        Plotly.react(
+            "chart",
+            traces,
+            {
+                title:
+                    metric + " — " +
+                    (
+                        selectedVentiles.length
+                            ? "Ventiles " + selectedVentiles.join(", ")
+                            : "All Ventiles"
+                    ),
+
+                height: 860,
+                barmode: "group",
+                showlegend: false,
+
+                margin: {
+                    t: 85,
+                    b: 65,
+                    l: 85,
+                    r: 30
+                },
+
+                xaxis: {
+                    title: "Random Seed"
+                },
+
+                yaxis: {
+                    title: metric,
+                    ticksuffix: isLR ? "%" : ""
+                },
+
+                uniformtext: {
+                    minsize: 9,
+                    mode: "show"
+                }
+            },
+            {
+                responsive: true,
+                displaylogo: false
+            }
+        );
+    }
+
+    ["metric", ...filterIds].forEach(id => {
+        $(id).addEventListener("change", update);
+    });
+
+    $("selectAll").onclick = () => {
+        [...$("ventiles").options].forEach(
+            option => option.selected = true
+        );
+        update();
+    };
+
+    $("clearAll").onclick = () => {
+        [...$("ventiles").options].forEach(
+            option => option.selected = false
+        );
+        update();
+    };
+
+    $("reset").onclick = () => {
+
+        ["region", "market", "tenure"].forEach(
+            id => $(id).value = ""
+        );
+
+        $("metric").value = "SMI3_LOSS";
+
+        [...$("ventiles").options].forEach(
+            option => option.selected = false
+        );
+
+        update();
+    };
+
+    update();
+
+})();
+</script>
+
+</body>
+</html>
+"""
+
+    final_html = (
+        html.replace("__PLOTLY_JS__", get_plotlyjs())
+            .replace("__REPORT_JSON__", report_json)
+    )
+
+    output = Path(filename).resolve()
+
+    output.write_text(
+        final_html,
+        encoding="utf-8"
+    )
+
+    print("HTML created:", output)
+
+    return output
+
+
+# ============================================================
+# 4. DETAILED PDF REPORT
+# ============================================================
+
+def export_seed_pdf(
+    data,
+    seeds,
+    filename="Random_Seed_Sensitivity_Detailed.pdf",
+    baseline="RS42",
+    probability_col="prediction_probability",
+    claims_share=0.62,
+    lr_scale=1,
+    decimals=2
+):
+
+    page_size = landscape(A3)
+
+    doc = SimpleDocTemplate(
+        str(Path(filename).resolve()),
+        pagesize=page_size,
+        leftMargin=30,
+        rightMargin=30,
+        topMargin=38,
+        bottomMargin=38
+    )
+
+    styles = getSampleStyleSheet()
+
+    styles.add(
+        ParagraphStyle(
+            name="SeedReportTitle",
+            parent=styles["Title"],
+            fontSize=22,
+            leading=27,
+            textColor=colors.HexColor("#17365D"),
+            spaceAfter=14
+        )
+    )
+
+    styles.add(
+        ParagraphStyle(
+            name="SeedSectionTitle",
+            parent=styles["Heading2"],
+            fontSize=15,
+            spaceBefore=16,
+            spaceAfter=10,
+            textColor=colors.HexColor("#17365D")
+        )
+    )
+
+    styles.add(
+        ParagraphStyle(
+            name="SeedTableCell",
+            fontName="Helvetica",
+            fontSize=6.5,
+            leading=8
+        )
+    )
+
+    story = []
+
+    # --------------------------------------------------------
+    # PDF chart
+    # --------------------------------------------------------
+
+    def add_chart(frame, segment, metric):
+
+        group_col = segment if segment else "Portfolio"
+
+        view = frame.copy()
+
+        if segment is None:
+            view[group_col] = "All Records"
+
+        pivot = view.pivot(
+            index=group_col,
+            columns="Seed",
+            values="Aggregate"
+        )
+
+        if pivot.empty:
+            return
+
+        if segment == "Ventile":
+            pivot = pivot.reindex(
+                sorted(
+                    pivot.index,
+                    key=lambda x: (
+                        not str(x).isdigit(),
+                        int(x) if str(x).isdigit() else 999999
+                    )
+                )
+            )
+
+        fig, ax = plt.subplots(figsize=(15, 4.3))
+
+        x = np.arange(len(pivot))
+        width = 0.8 / len(seeds)
+
+        for i, seed in enumerate(seeds):
+
+            if seed not in pivot.columns:
+                continue
+
+            ax.bar(
+                x - 0.4 + (i + 0.5) * width,
+                pivot[seed],
+                width,
+                label=seed,
+                color=SEED_COLORS.get(seed, "#64748B")
+            )
+
+        ax.set_xticks(x)
+
+        ax.set_xticklabels(
+            pivot.index.astype(str),
+            rotation=90 if len(pivot) > 12 else 0,
+            fontsize=7
+        )
+
+        ax.set_ylabel(
+            "Total Loss"
+            if metric == "SMI3_LOSS"
+            else "Average LR (%)"
+        )
+
+        ax.legend(ncol=4, fontsize=8)
+        ax.grid(axis="y", alpha=0.2)
+
+        fig.tight_layout()
+
+        buffer = BytesIO()
+
+        fig.savefig(
+            buffer,
+            format="png",
+            dpi=130,
+            bbox_inches="tight"
+        )
+
+        plt.close(fig)
+        buffer.seek(0)
+
+        story.append(
+            Image(
+                buffer,
+                width=950,
+                height=272
             )
         )
 
-    # 4. Extra space for vertical labels
-    max_lr = summary.max().max()
-    min_lr = summary.min().min()
+    # --------------------------------------------------------
+    # PDF table
+    # --------------------------------------------------------
 
-    if pd.isna(max_lr):
-        max_lr = 0
+    def add_table(frame, segment, metric):
 
-    if pd.isna(min_lr):
-        min_lr = 0
+        first_cols = [segment] if segment else []
 
-    max_lr = float(max_lr)
-    min_lr = float(min_lr)
+        columns = first_cols + [
+            "Seed",
+            "N",
+            "Aggregate",
+            "Delta"
+        ]
 
-    span = max(
-        max_lr - min_lr,
-        abs(max_lr),
-        abs(min_lr),
-        1
-    )
+        if metric == "SMI3_LOSS":
+            columns.append("DeltaPct")
 
-    upper = max(0, max_lr) + span * 0.35
-    lower = min(0, min_lr) - span * 0.10
+        columns += [
+            "Min",
+            "Max",
+            "Avg",
+            "P10",
+            "P50",
+            "P90",
+            "Predicted",
+            "Claims",
+            "Delqs"
+        ]
 
-    # 5. Layout
-    fig.update_layout(
-        title=dict(
-            text=title,
-            x=0.5,
-            xanchor="center",
-            font=dict(
-                size=22,
-                family="Arial Black"
+        headings = {
+            "Aggregate": (
+                "SUM"
+                if metric == "SMI3_LOSS"
+                else "MEAN (%)"
+            ),
+            "Delta": (
+                "Delta"
+                if metric == "SMI3_LOSS"
+                else "Delta (pp)"
+            ),
+            "DeltaPct": "Delta (%)",
+            "Predicted": "Pred Total",
+            "Claims": "Pred Claims",
+            "Delqs": "Pred Delqs"
+        }
+
+        def fmt(value, col):
+
+            if col == segment or col == "Seed":
+                return str(value)
+
+            if pd.isna(value):
+                return "-"
+
+            if col == "N":
+                return f"{int(value):,}"
+
+            return f"{value:,.{decimals}f}"
+
+        values = [[
+            Paragraph(
+                escape(headings.get(col, col)),
+                styles["SeedTableCell"]
             )
-        ),
+            for col in columns
+        ]]
 
-        xaxis_title="Ventile",
-        yaxis_title="Average SMI3_LR (%)",
+        for _, row in frame.iterrows():
 
-        barmode="group",
-        height=height,
+            values.append([
+                Paragraph(
+                    escape(fmt(row[col], col)),
+                    styles["SeedTableCell"]
+                )
+                for col in columns
+            ])
 
-        margin=dict(
-            t=180,
-            b=90,
-            l=90,
-            r=60
-        ),
+        available_width = page_size[0] - 60
 
-        font=dict(
-            family="Arial",
-            size=13
-        ),
+        weights = [
+            2.0 if col == segment
+            else 1.1 if col == "Seed"
+            else 1.0
+            for col in columns
+        ]
 
-        legend=dict(
-            orientation="h",
-            x=0.5,
-            xanchor="center",
-            y=1.02,
-            yanchor="bottom"
-        ),
+        widths = [
+            available_width * weight / sum(weights)
+            for weight in weights
+        ]
 
-        uniformtext=dict(
-            minsize=10,
-            mode="show"
-        ),
+        table = Table(
+            values,
+            colWidths=widths,
+            repeatRows=1,
+            hAlign="LEFT"
+        )
 
-        updatemenus=[
-            dict(
-                buttons=buttons,
-                direction="down",
-                showactive=True,
-                x=1,
-                xanchor="right",
-                y=1.24,
-                yanchor="top",
-                bgcolor="white",
-                bordercolor="#CBD5E1",
-                borderwidth=1
+        table.setStyle(
+            TableStyle([
+                (
+                    "BACKGROUND",
+                    (0, 0), (-1, 0),
+                    colors.HexColor("#17365D")
+                ),
+                (
+                    "TEXTCOLOR",
+                    (0, 0), (-1, 0),
+                    colors.white
+                ),
+                (
+                    "ROWBACKGROUNDS",
+                    (0, 1), (-1, -1),
+                    [
+                        colors.white,
+                        colors.HexColor("#F2F5F9")
+                    ]
+                ),
+                (
+                    "VALIGN",
+                    (0, 0), (-1, -1),
+                    "MIDDLE"
+                ),
+                (
+                    "TOPPADDING",
+                    (0, 0), (-1, -1),
+                    5
+                ),
+                (
+                    "BOTTOMPADDING",
+                    (0, 0), (-1, -1),
+                    5
+                )
+            ])
+        )
+
+        story.append(table)
+
+    # --------------------------------------------------------
+    # PDF cover and methodology
+    # --------------------------------------------------------
+
+    story.append(
+        Paragraph(
+            "Random Seed Sensitivity Loss Comparison",
+            styles["SeedReportTitle"]
+        )
+    )
+
+    story.append(
+        Paragraph(
+            "Data - October 2025 - May 2026",
+            styles["Normal"]
+        )
+    )
+
+    story.append(
+        Paragraph(
+            "Note - Ventile means 5% increments in percentile.",
+            styles["Normal"]
+        )
+    )
+
+    story.append(Spacer(1, 15))
+
+    story.append(
+        Paragraph(
+            f"Baseline: {escape(baseline)}. "
+            "SMI3_LOSS uses SUM; SMI3_LR uses arithmetic MEAN. "
+            "Loss ratio differences are in percentage points. "
+            "Predicted total = sum of prediction_probability. "
+            f"Predicted claims = {claims_share:.0%} of total. "
+            f"Predicted delinquencies = {1 - claims_share:.0%} "
+            "of total. These are expected counts, not observed events.",
+            styles["Normal"]
+        )
+    )
+
+    # --------------------------------------------------------
+    # All sections and all categories
+    # --------------------------------------------------------
+
+    sections = [
+        (None, "Overall Portfolio"),
+        ("Ventile", "All Ventiles"),
+        ("ECON_REGION", "All Economic Regions"),
+        ("POD_MARKET_CODE", "All POD Markets"),
+        ("PRK_TENURE", "All Tenure Categories")
+    ]
+
+    for segment, title in sections:
+
+        story.append(PageBreak())
+
+        story.append(
+            Paragraph(
+                title,
+                styles["SeedReportTitle"]
             )
-        ],
+        )
 
-        plot_bgcolor="white",
-        paper_bgcolor="white",
+        for metric in METRICS:
 
-        bargap=0.20,
-        bargroupgap=0.05
+            frame = summarize_seed_data(
+                data=data,
+                metric=metric,
+                segment=segment,
+                baseline=baseline,
+                probability_col=probability_col,
+                claims_share=claims_share,
+                lr_scale=lr_scale
+            )
+
+            story.append(
+                Paragraph(
+                    metric,
+                    styles["SeedSectionTitle"]
+                )
+            )
+
+            # Split charts into groups of 25 categories.
+            # The table still includes every category.
+
+            if (
+                segment is not None
+                and frame[segment].nunique() > 25
+            ):
+
+                categories = (
+                    frame[segment]
+                    .drop_duplicates()
+                    .tolist()
+                )
+
+                for start in range(0, len(categories), 25):
+
+                    selected = categories[start:start + 25]
+
+                    subset = frame[
+                        frame[segment].isin(selected)
+                    ]
+
+                    add_chart(
+                        subset,
+                        segment,
+                        metric
+                    )
+
+            else:
+
+                add_chart(
+                    frame,
+                    segment,
+                    metric
+                )
+
+            add_table(
+                frame,
+                segment,
+                metric
+            )
+
+    # --------------------------------------------------------
+    # Page numbering and save
+    # --------------------------------------------------------
+
+    def footer(canvas, document):
+
+        canvas.saveState()
+
+        canvas.setFont("Helvetica", 8)
+
+        canvas.drawRightString(
+            page_size[0] - 30,
+            20,
+            f"Page {document.page}"
+        )
+
+        canvas.restoreState()
+
+    doc.build(
+        story,
+        onFirstPage=footer,
+        onLaterPages=footer
     )
 
-    fig.update_xaxes(
-        tickmode="array",
-        tickvals=ventiles,
-        type="linear",
-        range=[
-            min(ventiles) - 0.5,
-            max(ventiles) + 0.5
-        ],
-        showgrid=False
+    output = Path(filename).resolve()
+
+    print("PDF created:", output)
+
+    return output
+
+
+# ============================================================
+# 5. SINGLE FUNCTION TO GENERATE BOTH REPORTS
+# ============================================================
+
+def export_seed_reports(
+    dfs,
+    html_filename="Random_Seed_Sensitivity_Interactive.html",
+    pdf_filename="Random_Seed_Sensitivity_Detailed.pdf",
+    baseline="RS42",
+    ventile_col="rr_model_decile",
+    region_col="ECON_REGION",
+    market_col="POD_MARKET_CODE",
+    tenure_col="PRK_TENURE",
+    probability_col="prediction_probability",
+    claims_share=0.62,
+    lr_scale=1,
+    decimals=2
+):
+
+    if baseline not in dfs:
+        raise ValueError(f"Baseline {baseline} not found")
+
+    if not 0 <= claims_share <= 1:
+        raise ValueError("claims_share must be between 0 and 1")
+
+    data = prepare_seed_data(
+        dfs=dfs,
+        ventile_col=ventile_col,
+        region_col=region_col,
+        market_col=market_col,
+        tenure_col=tenure_col,
+        probability_col=probability_col
     )
 
-    fig.update_yaxes(
-        range=[lower, upper],
-        ticksuffix="%",
-        gridcolor="#E5E7EB",
-        zeroline=True,
-        zerolinecolor="#94A3B8"
+    shared = dict(
+        data=data,
+        seeds=list(dfs),
+        baseline=baseline,
+        probability_col=probability_col,
+        claims_share=claims_share,
+        lr_scale=lr_scale,
+        decimals=decimals
     )
 
-    fig.show()
+    html_path = export_seed_html(
+        filename=html_filename,
+        **shared
+    )
 
-    return summary
+    pdf_path = export_seed_pdf(
+        filename=pdf_filename,
+        **shared
+    )
 
-======
+    print("\nBoth reports generated successfully.")
 
+    return html_path, pdf_path
+
+=========
 
 dfs = {
     "RS42": df_scored_42,
@@ -248,15 +1378,20 @@ dfs = {
     "RS151": df_scored_151
 }
 
-lr_summary = plot_lr_by_ventile(
+html_path, pdf_path = export_seed_reports(
     dfs=dfs,
+    html_filename="Random_Seed_Sensitivity_Interactive.html",
+    pdf_filename="Random_Seed_Sensitivity_Detailed.pdf",
+    baseline="RS42",
     ventile_col="rr_model_decile",
-    lr_col="SMI3_LR",
-    lr_scale=1,  # Change to 100 if stored as 0.1847
-    title="Random Seed Sensitivity - Loss Ratio by Ventile",
-    decimals=2,
-    label_font_size=13,
-    height=800
+    region_col="ECON_REGION",
+    market_col="POD_MARKET_CODE",
+    tenure_col="PRK_TENURE",
+    probability_col="prediction_probability",
+    claims_share=0.62,
+    lr_scale=1,
+    decimals=2
 )
 
-display(lr_summary)
+print("HTML:", html_path)
+print("PDF:", pdf_path)
