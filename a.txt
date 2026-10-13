@@ -1,37 +1,32 @@
-import pandas as pd
-
-# Change column names as needed
-base = "decile_rs42"
-compare = "decile_rs07"
-
-temp = df[[base, compare]].copy()
-
-for col in [base, compare]:
-    temp[col] = pd.to_numeric(
-        temp[col].astype(str).str.extract(r"(\d+)", expand=False),
-        errors="coerce"
-    )
-
-temp = temp.dropna()
-
-# Calculate movement
-temp["movement"] = temp[compare] - temp[base]
-temp["deciles_moved"] = temp["movement"].abs().astype(int)
-
-# Summary
-summary = pd.DataFrame({
-    "Lower": temp[temp["movement"] < 0]
-        .groupby("deciles_moved").size(),
-    "Higher": temp[temp["movement"] > 0]
-        .groupby("deciles_moved").size(),
-    "No Movement": temp[temp["movement"] == 0]
-        .groupby("deciles_moved").size()
-}).fillna(0).astype(int)
-
-summary = summary.reindex(range(20), fill_value=0)
-summary["Total Files"] = summary.sum(axis=1)
-summary["Percentage"] = (
-    summary["Total Files"] / len(temp) * 100
-).round(2)
-
-display(summary)
+Hi everyone. I’ll briefly walk through our data preprocessing validation results and provide an update on the ongoing technical model validation.”
+Slide 1 — Data Preprocessing: Scope & Status
+“We completed our independent review of data quality, cleansing, transformations, integration, and population construction.
+We performed code reviews and quantitative checks. No material concerns were identified, so data preprocessing is approved.”
+Slide 2 — Data Lineage & Assessment
+“We reviewed the data flow from source systems to model-ready datasets, including both training and inference.
+We also checked population counts, processing logic, and consistency between training and inference.
+Overall, the data lineage is traceable, and our assessment is approved.”
+Slide 3 — Exploratory Data Analysis
+“We performed EDA to understand the data and identify potential risks.
+This included feature distributions, correlations, bad-rate trends, credit-score analysis, potential proxy bias, population stability, and claims analysis.
+We found the EDA coverage reasonable and approved the approach.”
+Slide 4 — Key Preprocessing Observations
+“This slide summarizes our main findings.
+We confirmed that record-level controls, missing-value treatments, clipping, population construction, and business rules were implemented consistently.
+All areas were approved, with no material concerns identified.”
+Slide 5 — Model Development Assessment
+“Moving to technical validation, we reviewed the key model development decisions.
+These included the selection of the Funded population, PD and LGD model structure, feature selection, and potential proxy bias.
+The overall approach appears reasonable, but further technical testing is still ongoing.”
+Slide 6 — Technical Validation Status
+“This slide shows our technical validation progress.
+We have completed the challenger model and sensitivity analyses.
+Other areas, including model stability, out-of-time testing, feature assessment, and code review, are still in progress.
+Our final technical validation conclusion is pending.”
+Slide 7 — Supporting Evidence
+“Finally, this slide provides links to our supporting documentation, EDA reports, MLflow results, and Jira references.
+These help us track our validation work and supporting evidence.”
+Closing
+“To summarize, data preprocessing validation is complete and approved.
+Technical model validation is ongoing, with some experiments completed and the remaining testing in progress.
+We will provide our final assessment once all technical validation activities are completed. Thank you.”
