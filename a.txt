@@ -1,17 +1,15 @@
 import pandas as pd
-import numpy as np
 import plotly.graph_objects as go
-from plotly.subplots import make_subplots
 
 
-def create_swapset_dashboard(
+def create_swapset_html(
     df,
-    filename="swapset_dashboard.html"
+    filename="swapset_by_region.html"
 ):
 
-    # ==========================================
+    # =====================================
     # 1. PREPARE DATA
-    # ==========================================
+    # =====================================
 
     df = df.copy()
 
@@ -43,22 +41,21 @@ def create_swapset_dashboard(
         ]
     )
 
-    # Keep only valid deciles
     df = df[
         df["decile_xgb_num"].between(1, 20)
         & df["decile_cat_num"].between(1, 20)
     ]
-
-    deciles = list(range(1, 21))
 
     regions = sorted(
         df["ECON_REGION"].dropna().unique(),
         key=str
     )
 
-    # ==========================================
+    deciles = list(range(1, 21))
+
+    # =====================================
     # 2. CREATE SWAPSET
-    # ==========================================
+    # =====================================
 
     def make_swapset(data):
 
@@ -73,160 +70,129 @@ def create_swapset_dashboard(
             fill_value=0
         )
 
+        swap["All"] = swap.sum(axis=1)
+
+        swap.loc["All"] = swap.sum(axis=0)
+
         return swap
 
-    # ==========================================
-    # 3. FORMAT TABLE WITH COUNT + %
-    # ==========================================
+    # =====================================
+    # 3. FORMAT COUNT, PERCENTAGE, COLORS
+    # =====================================
 
     def format_swapset(swap):
 
-        row_totals = swap.sum(axis=1)
-        col_totals = swap.sum(axis=0)
-        grand_total = int(swap.values.sum())
+        formatted = swap.copy().astype(str)
 
-        display = []
-        colors = []
+        cell_colors = []
 
-        # First column: XGB deciles
-        display.append(
-            [str(i) for i in deciles] + ["All"]
-        )
+        grand_total = swap.loc["All", "All"]
 
-        colors.append(
-            ["#E6EAF0"] * 21
-        )
+        for col in swap.columns:
 
-        for col in deciles:
+            column_colors = []
 
-            col_values = []
-            col_colors = []
-
-            for row in deciles:
+            for row in swap.index:
 
                 count = int(swap.loc[row, col])
-                total = int(row_totals.loc[row])
 
-                pct = (
-                    count / total * 100
-                    if total > 0 else 0
+                if row == "All":
+
+                    pct = (
+                        count / grand_total * 100
+                        if grand_total > 0 else 0
+                    )
+
+                else:
+
+                    row_total = swap.loc[row, "All"]
+
+                    pct = (
+                        count / row_total * 100
+                        if row_total > 0 else 0
+                    )
+
+                formatted.loc[row, col] = (
+                    f"{count:,}<br>({pct:.2f}%)"
                 )
 
-                col_values.append(
-                    f"{count:,} ({pct:.2f}%)"
-                )
+                # Movement colors
+                if row == "All" or col == "All":
 
-                if count == 0:
+                    color = "#E6EAF0"
+
+                elif count == 0:
+
                     color = "#FFFFFF"
 
                 elif row == col:
+
                     color = "#D5F0DB"
 
-                elif abs(row - col) <= 2:
+                elif abs(int(row) - int(col)) <= 2:
+
                     color = "#FFE4B5"
 
                 else:
+
                     color = "#F8C4C4"
 
-                col_colors.append(color)
+                column_colors.append(color)
 
-            # Column total
-            count = int(col_totals.loc[col])
+            cell_colors.append(column_colors)
 
-            pct = (
-                count / grand_total * 100
-                if grand_total > 0 else 0
-            )
+        index_colors = [
+            "#E6EAF0"
+        ] * len(swap.index)
 
-            col_values.append(
-                f"{count:,} ({pct:.2f}%)"
-            )
+        cell_colors = [index_colors] + cell_colors
 
-            col_colors.append("#E6EAF0")
+        return formatted, cell_colors
 
-            display.append(col_values)
-            colors.append(col_colors)
+    # =====================================
+    # 4. CREATE PLOTLY FIGURE
+    # =====================================
 
-        # Total column
-        total_values = [
-            f"{int(row_totals.loc[row]):,} (100.00%)"
-            if row_totals.loc[row] > 0
-            else "0 (0.00%)"
-            for row in deciles
-        ]
+    fig = go.Figure()
 
-        total_values.append(
-            f"{grand_total:,} (100.00%)"
-            if grand_total > 0
-            else "0 (0.00%)"
-        )
-
-        display.append(total_values)
-
-        colors.append(
-            ["#E6EAF0"] * 21
-        )
-
-        return display, colors
-
-    # ==========================================
-    # 4. BUILD FIGURE WITH TABLE + HEATMAP
-    # ==========================================
-
-    fig = make_subplots(
-        rows=2,
-        cols=1,
-        specs=[
-            [{"type": "table"}],
-            [{"type": "heatmap"}]
-        ],
-        row_heights=[0.55, 0.45],
-        vertical_spacing=0.08,
-        subplot_titles=[
-            "Swapset Table: Count (Row %)",
-            "XGBoost vs CatBoost Decile Movement Heatmap"
-        ]
-    )
-
-    datasets = [("ALL", df)] + [
-        (
-            str(region),
-            df[df["ECON_REGION"] == region]
-        )
-        for region in regions
-    ]
-
-    # ==========================================
-    # 5. ADD TABLE AND HEATMAP PER REGION
-    # ==========================================
-
-    for idx, (region_name, data) in enumerate(datasets):
+    def add_swapset_table(data, visible=False):
 
         swap = make_swapset(data)
 
-        table_values, cell_colors = format_swapset(
+        swap_display, cell_colors = format_swapset(
             swap
         )
 
-        is_visible = (idx == 0)
+        table_values = [
+            [str(x) for x in swap_display.index]
+        ] + [
+            swap_display[col].tolist()
+            for col in swap_display.columns
+        ]
 
-        # TABLE
+        # XGB and CAT distinguished
+        # inside the first header cell
+        headers = (
+            [
+                "<b>XGB ↓</b><br>"
+                "<span style='color:#D3D3D3'>"
+                "<b>CAT →</b></span>"
+            ]
+            + [str(col) for col in swap_display.columns]
+        )
+
         fig.add_trace(
             go.Table(
 
                 header=dict(
-                    values=(
-                        ["XGB / CAT"]
-                        + [str(i) for i in deciles]
-                        + ["All"]
-                    ),
+                    values=headers,
                     fill_color="#4472C4",
                     font=dict(
                         color="white",
                         size=12
                     ),
                     align="center",
-                    height=35
+                    height=55
                 ),
 
                 cells=dict(
@@ -234,123 +200,110 @@ def create_swapset_dashboard(
                     fill_color=cell_colors,
                     font=dict(
                         color="#202020",
-                        size=10
+                        size=11
                     ),
                     align="center",
-                    height=28
+                    height=42
                 ),
 
-                columnwidth=[75] + [115] * 21,
+                columnwidth=[120] + [115] * 21,
 
-                visible=is_visible,
-
-                name=region_name
-            ),
-            row=1,
-            col=1
+                visible=visible
+            )
         )
 
-        # HEATMAP
-        fig.add_trace(
-            go.Heatmap(
+    # =====================================
+    # 5. ALL REGIONS
+    # =====================================
 
-                z=swap.values,
+    add_swapset_table(
+        df,
+        visible=True
+    )
 
-                x=deciles,
-                y=deciles,
+    # =====================================
+    # 6. EACH ECON REGION
+    # =====================================
 
-                colorscale="Blues",
+    for region in regions:
 
-                text=swap.values,
+        temp = df[
+            df["ECON_REGION"] == region
+        ]
 
-                texttemplate="%{text:,}",
-
-                textfont=dict(size=9),
-
-                hovertemplate=(
-                    "XGBoost Decile: %{y}<br>"
-                    "CatBoost Decile: %{x}<br>"
-                    "Count: %{z:,}"
-                    "<extra></extra>"
-                ),
-
-                colorbar=dict(
-                    title="Count",
-                    len=0.35,
-                    y=0.20
-                ),
-
-                showscale=is_visible,
-
-                visible=is_visible,
-
-                name=region_name
-            ),
-            row=2,
-            col=1
+        add_swapset_table(
+            temp,
+            visible=False
         )
 
-    # ==========================================
-    # 6. CREATE DROPDOWN
-    # ==========================================
+    # =====================================
+    # 7. DROPDOWN
+    # =====================================
 
     buttons = []
 
-    n_regions = len(datasets)
+    buttons.append(
+        dict(
+            label="ALL",
+            method="update",
+            args=[
+                {
+                    "visible":
+                    [True] + [False] * len(regions)
+                },
+                {
+                    "title.text":
+                    "XGB vs CAT - ALL"
+                }
+            ]
+        )
+    )
 
-    for i, (region_name, _) in enumerate(datasets):
+    for i, region in enumerate(regions):
 
-        visibility = [False] * (2 * n_regions)
+        visible = [False] * (
+            len(regions) + 1
+        )
 
-        visibility[2 * i] = True
-        visibility[2 * i + 1] = True
-
-        scale_visibility = [False] * (2 * n_regions)
-        scale_visibility[2 * i + 1] = True
+        visible[i + 1] = True
 
         buttons.append(
             dict(
-                label=region_name,
+                label=str(region),
                 method="update",
                 args=[
                     {
-                        "visible": visibility,
-                        "showscale": scale_visibility
+                        "visible": visible
                     },
                     {
-                        "title.text": (
-                            "XGBoost vs CatBoost "
-                            f"Swapset Dashboard - {region_name}"
-                        )
+                        "title.text":
+                        f"XGB vs CAT - {region}"
                     }
                 ]
             )
         )
 
-    # ==========================================
-    # 7. LAYOUT
-    # ==========================================
+    # =====================================
+    # 8. LAYOUT
+    # =====================================
 
     fig.update_layout(
 
         title=dict(
-            text=(
-                "XGBoost vs CatBoost "
-                "Swapset Dashboard - ALL"
-            ),
+            text="XGB vs CAT - ALL",
             x=0.5,
             xanchor="center",
-            y=0.98
+            y=0.96,
+            yanchor="top"
         ),
 
-        height=1600,
-        width=1600,
+        height=1100,
 
         margin=dict(
-            l=80,
-            r=80,
-            t=180,
-            b=80
+            l=20,
+            r=20,
+            t=150,
+            b=40
         ),
 
         updatemenus=[
@@ -368,14 +321,16 @@ def create_swapset_dashboard(
         annotations=[
             dict(
                 text=(
+                    "XGB ↓ Rows | "
+                    "CAT → Columns | "
                     "Green: Same Decile | "
-                    "Orange: 1-2 Decile Movement | "
-                    "Red: 3+ Decile Movement | "
+                    "Orange: 1-2 Movement | "
+                    "Red: 3+ Movement | "
                     "White: Zero | "
                     "Percentage: XGB Row Total"
                 ),
                 x=0.5,
-                y=1.025,
+                y=1.02,
                 xref="paper",
                 yref="paper",
                 showarrow=False,
@@ -384,46 +339,29 @@ def create_swapset_dashboard(
         ]
     )
 
-    # ==========================================
-    # 8. HEATMAP AXES
-    # ==========================================
-
-    fig.update_xaxes(
-        title_text="CatBoost Decile",
-        tickmode="array",
-        tickvals=deciles,
-        row=2,
-        col=1
-    )
-
-    fig.update_yaxes(
-        title_text="XGBoost Decile",
-        tickmode="array",
-        tickvals=deciles,
-        autorange="reversed",
-        row=2,
-        col=1
-    )
-
-    # ==========================================
-    # 9. SAVE AND DISPLAY
-    # ==========================================
+    # =====================================
+    # 9. SAVE HTML
+    # =====================================
 
     fig.write_html(
         filename,
         include_plotlyjs=True
     )
 
+    # =====================================
+    # 10. DISPLAY
+    # =====================================
+
     fig.show()
 
     return fig
 
 
-# ==============================================
+# =========================================
 # RUN
-# ==============================================
+# =========================================
 
-fig = create_swapset_dashboard(
+fig = create_swapset_html(
     df,
-    filename="swapset_dashboard.html"
+    filename="swapset_by_region.html"
 )
