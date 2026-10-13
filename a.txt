@@ -1,32 +1,73 @@
-Hi everyone. I’ll briefly walk through our data preprocessing validation results and provide an update on the ongoing technical model validation.”
-Slide 1 — Data Preprocessing: Scope & Status
-“We completed our independent review of data quality, cleansing, transformations, integration, and population construction.
-We performed code reviews and quantitative checks. No material concerns were identified, so data preprocessing is approved.”
-Slide 2 — Data Lineage & Assessment
-“We reviewed the data flow from source systems to model-ready datasets, including both training and inference.
-We also checked population counts, processing logic, and consistency between training and inference.
-Overall, the data lineage is traceable, and our assessment is approved.”
-Slide 3 — Exploratory Data Analysis
-“We performed EDA to understand the data and identify potential risks.
-This included feature distributions, correlations, bad-rate trends, credit-score analysis, potential proxy bias, population stability, and claims analysis.
-We found the EDA coverage reasonable and approved the approach.”
-Slide 4 — Key Preprocessing Observations
-“This slide summarizes our main findings.
-We confirmed that record-level controls, missing-value treatments, clipping, population construction, and business rules were implemented consistently.
-All areas were approved, with no material concerns identified.”
-Slide 5 — Model Development Assessment
-“Moving to technical validation, we reviewed the key model development decisions.
-These included the selection of the Funded population, PD and LGD model structure, feature selection, and potential proxy bias.
-The overall approach appears reasonable, but further technical testing is still ongoing.”
-Slide 6 — Technical Validation Status
-“This slide shows our technical validation progress.
-We have completed the challenger model and sensitivity analyses.
-Other areas, including model stability, out-of-time testing, feature assessment, and code review, are still in progress.
-Our final technical validation conclusion is pending.”
-Slide 7 — Supporting Evidence
-“Finally, this slide provides links to our supporting documentation, EDA reports, MLflow results, and Jira references.
-These help us track our validation work and supporting evidence.”
-Closing
-“To summarize, data preprocessing validation is complete and approved.
-Technical model validation is ongoing, with some experiments completed and the remaining testing in progress.
-We will provide our final assessment once all technical validation activities are completed. Thank you.”
+import pandas as pd
+import plotly.graph_objects as go
+
+def plot_by_decile(dfs, decile_col, value_col, agg="sum", title=None):
+
+    summary = pd.DataFrame({
+        name: df.assign(
+            _decile=pd.to_numeric(
+                df[decile_col].astype(str).str.extract(r"(\d+)", expand=False),
+                errors="coerce"
+            )
+        ).groupby("_decile")[value_col].agg(agg)
+        for name, df in dfs.items()
+    }).sort_index()
+
+    fig = go.Figure()
+
+    for name in summary.columns:
+        fig.add_trace(go.Bar(
+            x=summary.index,
+            y=summary[name],
+            name=name,
+            text=summary[name].round(2),
+            textposition="outside",
+            hovertemplate=(
+                "Decile: %{x}<br>"
+                f"Seed: {name}<br>"
+                "Value: %{y:,.2f}<extra></extra>"
+            )
+        ))
+
+    buttons = [
+        dict(
+            label="All Deciles",
+            method="relayout",
+            args=[{"xaxis.range": [0.5, 20.5]}]
+        )
+    ]
+
+    for d in summary.index:
+        buttons.append(dict(
+            label=f"Decile {int(d)}",
+            method="relayout",
+            args=[{"xaxis.range": [d - 0.5, d + 0.5]}]
+        ))
+
+    fig.update_layout(
+        title=title or f"{value_col} by Decile Across Random Seeds",
+        xaxis_title="Decile",
+        yaxis_title=value_col,
+        barmode="group",
+        height=600,
+        margin=dict(t=110),
+        updatemenus=[dict(
+            buttons=buttons,
+            direction="down",
+            x=1,
+            xanchor="right",
+            y=1.18,
+            yanchor="top"
+        )]
+    )
+
+    fig.update_xaxes(
+        tickmode="array",
+        tickvals=summary.index,
+        type="linear"
+    )
+
+    fig.update_yaxes(rangemode="tozero")
+    fig.show()
+
+    return summary
