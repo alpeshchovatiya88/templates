@@ -1,367 +1,58 @@
 import pandas as pd
-import plotly.graph_objects as go
+import numpy as np
 
-
-def create_swapset_html(
+def analyze_decile_movement(
     df,
-    filename="swapset_by_region.html"
+    base_col,
+    compare_col
 ):
 
-    # =====================================
-    # 1. PREPARE DATA
-    # =====================================
+    temp = df[[base_col, compare_col]].copy()
 
-    df = df.copy()
-
-    for source, target in [
-        ("rr_model_decile_xgb", "decile_xgb_num"),
-        ("rr_model_decile_cat", "decile_cat_num")
-    ]:
-
-        if target not in df.columns:
-
-            df[target] = (
-                df[source]
-                .astype("string")
-                .str.extract(r"(\d+)", expand=False)
-                .astype("Int64")
-            )
-
-        else:
-
-            df[target] = pd.to_numeric(
-                df[target],
-                errors="coerce"
-            ).astype("Int64")
-
-    df = df.dropna(
-        subset=[
-            "decile_xgb_num",
-            "decile_cat_num"
-        ]
+    temp[base_col] = pd.to_numeric(
+        temp[base_col], errors="coerce"
     )
 
-    df = df[
-        df["decile_xgb_num"].between(1, 20)
-        & df["decile_cat_num"].between(1, 20)
-    ]
-
-    regions = sorted(
-        df["ECON_REGION"].dropna().unique(),
-        key=str
+    temp[compare_col] = pd.to_numeric(
+        temp[compare_col], errors="coerce"
     )
 
-    deciles = list(range(1, 21))
+    temp = temp.dropna()
 
-    # =====================================
-    # 2. CREATE SWAPSET
-    # =====================================
+    # Positive = higher numbered decile
+    # Negative = lower numbered decile
+    temp["movement"] = (
+        temp[compare_col] - temp[base_col]
+    ).astype(int)
 
-    def make_swapset(data):
-
-        swap = pd.crosstab(
-            data["decile_xgb_num"],
-            data["decile_cat_num"]
-        )
-
-        swap = swap.reindex(
-            index=deciles,
-            columns=deciles,
-            fill_value=0
-        )
-
-        swap["All"] = swap.sum(axis=1)
-
-        swap.loc["All"] = swap.sum(axis=0)
-
-        return swap
-
-    # =====================================
-    # 3. FORMAT COUNT, PERCENTAGE, COLORS
-    # =====================================
-
-    def format_swapset(swap):
-
-        formatted = swap.copy().astype(str)
-
-        cell_colors = []
-
-        grand_total = swap.loc["All", "All"]
-
-        for col in swap.columns:
-
-            column_colors = []
-
-            for row in swap.index:
-
-                count = int(swap.loc[row, col])
-
-                if row == "All":
-
-                    pct = (
-                        count / grand_total * 100
-                        if grand_total > 0 else 0
-                    )
-
-                else:
-
-                    row_total = swap.loc[row, "All"]
-
-                    pct = (
-                        count / row_total * 100
-                        if row_total > 0 else 0
-                    )
-
-                formatted.loc[row, col] = (
-                    f"{count:,}<br>({pct:.2f}%)"
-                )
-
-                # Movement colors
-                if row == "All" or col == "All":
-
-                    color = "#E6EAF0"
-
-                elif count == 0:
-
-                    color = "#FFFFFF"
-
-                elif row == col:
-
-                    color = "#D5F0DB"
-
-                elif abs(int(row) - int(col)) <= 2:
-
-                    color = "#FFE4B5"
-
-                else:
-
-                    color = "#F8C4C4"
-
-                column_colors.append(color)
-
-            cell_colors.append(column_colors)
-
-        index_colors = [
-            "#E6EAF0"
-        ] * len(swap.index)
-
-        cell_colors = [index_colors] + cell_colors
-
-        return formatted, cell_colors
-
-    # =====================================
-    # 4. CREATE PLOTLY FIGURE
-    # =====================================
-
-    fig = go.Figure()
-
-    def add_swapset_table(data, visible=False):
-
-        swap = make_swapset(data)
-
-        swap_display, cell_colors = format_swapset(
-            swap
-        )
-
-        table_values = [
-            [str(x) for x in swap_display.index]
-        ] + [
-            swap_display[col].tolist()
-            for col in swap_display.columns
-        ]
-
-        # XGB and CAT distinguished
-        # inside the first header cell
-        headers = (
-            [
-                "<b>XGB ↓</b><br>"
-                "<span style='color:#D3D3D3'>"
-                "<b>CAT →</b></span>"
-            ]
-            + [str(col) for col in swap_display.columns]
-        )
-
-        fig.add_trace(
-            go.Table(
-
-                header=dict(
-                    values=headers,
-                    fill_color="#4472C4",
-                    font=dict(
-                        color="white",
-                        size=12
-                    ),
-                    align="center",
-                    height=55
-                ),
-
-                cells=dict(
-                    values=table_values,
-                    fill_color=cell_colors,
-                    font=dict(
-                        color="#202020",
-                        size=11
-                    ),
-                    align="center",
-                    height=42
-                ),
-
-                columnwidth=[120] + [115] * 21,
-
-                visible=visible
-            )
-        )
-
-    # =====================================
-    # 5. ALL REGIONS
-    # =====================================
-
-    add_swapset_table(
-        df,
-        visible=True
+    temp["abs_movement"] = (
+        temp["movement"].abs()
     )
 
-    # =====================================
-    # 6. EACH ECON REGION
-    # =====================================
-
-    for region in regions:
-
-        temp = df[
-            df["ECON_REGION"] == region
-        ]
-
-        add_swapset_table(
-            temp,
-            visible=False
-        )
-
-    # =====================================
-    # 7. DROPDOWN
-    # =====================================
-
-    buttons = []
-
-    buttons.append(
-        dict(
-            label="ALL",
-            method="update",
-            args=[
-                {
-                    "visible":
-                    [True] + [False] * len(regions)
-                },
-                {
-                    "title.text":
-                    "XGB vs CAT - ALL"
-                }
-            ]
-        )
-    )
-
-    for i, region in enumerate(regions):
-
-        visible = [False] * (
-            len(regions) + 1
-        )
-
-        visible[i + 1] = True
-
-        buttons.append(
-            dict(
-                label=str(region),
-                method="update",
-                args=[
-                    {
-                        "visible": visible
-                    },
-                    {
-                        "title.text":
-                        f"XGB vs CAT - {region}"
-                    }
-                ]
-            )
-        )
-
-    # =====================================
-    # 8. LAYOUT
-    # =====================================
-
-    fig.update_layout(
-
-        title=dict(
-            text="XGB vs CAT - ALL",
-            x=0.5,
-            xanchor="center",
-            y=0.96,
-            yanchor="top"
-        ),
-
-        height=1100,
-
-        margin=dict(
-            l=20,
-            r=20,
-            t=150,
-            b=40
-        ),
-
-        updatemenus=[
-            dict(
-                buttons=buttons,
-                direction="down",
-                showactive=True,
-                x=0.01,
-                xanchor="left",
-                y=1.08,
-                yanchor="top"
-            )
+    temp["direction"] = np.select(
+        [
+            temp["movement"] > 0,
+            temp["movement"] < 0
         ],
-
-        annotations=[
-            dict(
-                text=(
-                    "XGB ↓ Rows | "
-                    "CAT → Columns | "
-                    "Green: Same Decile | "
-                    "Orange: 1-2 Movement | "
-                    "Red: 3+ Movement | "
-                    "White: Zero | "
-                    "Percentage: XGB Row Total"
-                ),
-                x=0.5,
-                y=1.02,
-                xref="paper",
-                yref="paper",
-                showarrow=False,
-                font=dict(size=12)
-            )
-        ]
+        [
+            "Higher Decile",
+            "Lower Decile"
+        ],
+        default="No Movement"
     )
 
-    # =====================================
-    # 9. SAVE HTML
-    # =====================================
-
-    fig.write_html(
-        filename,
-        include_plotlyjs=True
+    # Number of files by movement
+    summary = (
+        temp.groupby(
+            ["direction", "abs_movement"]
+        )
+        .size()
+        .reset_index(name="file_count")
     )
 
-    # =====================================
-    # 10. DISPLAY
-    # =====================================
+    summary["percentage"] = (
+        summary["file_count"]
+        / len(temp) * 100
+    ).round(2)
 
-    fig.show()
-
-    return fig
-
-
-# =========================================
-# RUN
-# =========================================
-
-fig = create_swapset_html(
-    df,
-    filename="swapset_by_region.html"
-)
+    return temp, summary
