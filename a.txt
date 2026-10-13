@@ -11,11 +11,11 @@ def plot_by_decile(
     title=None,
     decimals=2,
     label_font_size=15,
-    height=700
+    height=750
 ):
 
     # --------------------------------------------------
-    # 1. Aggregate metric by decile for each seed
+    # 1. Aggregate metric by ventile for each seed
     # --------------------------------------------------
 
     summary = pd.DataFrame({
@@ -34,11 +34,23 @@ def plot_by_decile(
         for name, df in dfs.items()
     }).sort_index()
 
+    if summary.empty:
+        raise ValueError(
+            "No valid ventile data found."
+        )
+
     # --------------------------------------------------
     # 2. Create grouped bar chart
     # --------------------------------------------------
 
     fig = go.Figure()
+
+    colors = {
+        "RS42": "#17365D",
+        "RS07": "#E66B23",
+        "RS101": "#09988A",
+        "RS151": "#7952B3"
+    }
 
     for name in summary.columns:
 
@@ -50,25 +62,35 @@ def plot_by_decile(
                 y=values,
                 name=name,
 
-                # Bold formatted values above bars
+                marker_color=colors.get(
+                    name, "#64748B"
+                ),
+
+                # Format labels with commas
                 text=[
                     f"{v:,.{decimals}f}"
                     if pd.notna(v) else ""
                     for v in values
                 ],
 
+                # Show values above bars
                 textposition="outside",
 
+                # Rotate labels vertically
+                textangle=-90,
+
+                # Bold black text
                 textfont=dict(
                     family="Arial Black",
                     size=label_font_size,
                     color="black"
                 ),
 
+                # Prevent labels from being clipped
                 cliponaxis=False,
 
                 hovertemplate=(
-                    "Decile: %{x}<br>"
+                    "Ventile: %{x}<br>"
                     f"Seed: {name}<br>"
                     "Value: %{y:,.2f}"
                     "<extra></extra>"
@@ -77,24 +99,31 @@ def plot_by_decile(
         )
 
     # --------------------------------------------------
-    # 3. Decile dropdown
+    # 3. Ventile dropdown
     # --------------------------------------------------
+
+    ventiles = summary.index.tolist()
 
     buttons = [
         dict(
-            label="All Deciles",
+            label="All Ventiles",
             method="relayout",
             args=[
-                {"xaxis.range": [0.5, 20.5]}
+                {
+                    "xaxis.range": [
+                        min(ventiles) - 0.5,
+                        max(ventiles) + 0.5
+                    ]
+                }
             ]
         )
     ]
 
-    for d in summary.index:
+    for d in ventiles:
 
         buttons.append(
             dict(
-                label=f"Decile {int(d)}",
+                label=f"Ventile {int(d)}",
                 method="relayout",
                 args=[
                     {
@@ -108,7 +137,7 @@ def plot_by_decile(
         )
 
     # --------------------------------------------------
-    # 4. Set axis limits to leave space for labels
+    # 4. Add extra headroom for vertical labels
     # --------------------------------------------------
 
     max_value = summary.max().max()
@@ -123,23 +152,18 @@ def plot_by_decile(
     max_value = float(max_value)
     min_value = float(min_value)
 
-    # Extra 25% headroom above tallest positive bar
-    # and below lowest negative bar.
-
-    upper = (
-        max_value * 1.25
-        if max_value > 0
-        else max(1, abs(min_value) * 0.10)
+    span = max(
+        max_value - min_value,
+        abs(max_value),
+        abs(min_value),
+        1
     )
 
-    lower = (
-        min_value * 1.25
-        if min_value < 0
-        else 0
-    )
+    upper = max(0, max_value) + span * 0.35
+    lower = min(0, min_value) - span * 0.10
 
     # --------------------------------------------------
-    # 5. Chart formatting
+    # 5. Chart layout
     # --------------------------------------------------
 
     fig.update_layout(
@@ -147,7 +171,7 @@ def plot_by_decile(
         title=dict(
             text=(
                 title
-                or f"{value_col} by Decile Across Random Seeds"
+                or f"{value_col} by Ventile Across Random Seeds"
             ),
             x=0.5,
             xanchor="center",
@@ -157,7 +181,7 @@ def plot_by_decile(
             )
         ),
 
-        xaxis_title="Decile",
+        xaxis_title="Ventile",
         yaxis_title=value_col,
 
         barmode="group",
@@ -165,7 +189,7 @@ def plot_by_decile(
         height=height,
 
         margin=dict(
-            t=160,
+            t=180,
             b=90,
             l=90,
             r=60
@@ -219,14 +243,18 @@ def plot_by_decile(
     )
 
     # --------------------------------------------------
-    # 6. X-axis formatting
+    # 6. X-axis
     # --------------------------------------------------
 
     fig.update_xaxes(
         tickmode="array",
-        tickvals=summary.index.tolist(),
+        tickvals=ventiles,
         type="linear",
-        range=[0.5, 20.5],
+
+        range=[
+            min(ventiles) - 0.5,
+            max(ventiles) + 0.5
+        ],
 
         showgrid=False,
 
@@ -236,7 +264,7 @@ def plot_by_decile(
     )
 
     # --------------------------------------------------
-    # 7. Y-axis formatting
+    # 7. Y-axis
     # --------------------------------------------------
 
     fig.update_yaxes(
