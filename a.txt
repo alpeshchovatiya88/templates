@@ -3,47 +3,51 @@ import pandas as pd
 import plotly.graph_objects as go
 
 
-def plot_by_decile(
+def plot_lr_by_ventile(
     dfs,
-    decile_col,
-    value_col,
-    agg="sum",
-    title=None,
+    ventile_col="rr_model_decile",
+    lr_col="SMI3_LR",
+    lr_scale=100,
+    title="Random Seed Sensitivity - Loss Ratio by Ventile",
     decimals=2,
-    label_font_size=15,
-    height=750
+    label_font_size=13,
+    height=800
 ):
+    """
+    Plot mean SMI3_LR by ventile for each random seed.
 
-    # --------------------------------------------------
-    # 1. Aggregate metric by ventile for each seed
-    # --------------------------------------------------
+    lr_scale=100: LR stored as 0.1847 -> 18.47%
+    lr_scale=1:   LR stored as 18.47 -> 18.47%
+    """
 
+    # 1. Calculate mean LR by ventile
     summary = pd.DataFrame({
-        name: (
+        seed: (
             df.assign(
-                _decile=pd.to_numeric(
-                    df[decile_col]
+                _ventile=pd.to_numeric(
+                    df[ventile_col]
                     .astype(str)
                     .str.extract(r"(\d+)", expand=False),
                     errors="coerce"
                 )
             )
-            .groupby("_decile")[value_col]
-            .agg(agg)
+            .assign(
+                _lr=pd.to_numeric(
+                    df[lr_col],
+                    errors="coerce"
+                )
+            )
+            .groupby("_ventile")["_lr"]
+            .mean()
         )
-        for name, df in dfs.items()
+        for seed, df in dfs.items()
     }).sort_index()
 
     if summary.empty:
-        raise ValueError(
-            "No valid ventile data found."
-        )
+        raise ValueError("No valid ventile data found.")
 
-    # --------------------------------------------------
-    # 2. Create grouped bar chart
-    # --------------------------------------------------
-
-    fig = go.Figure()
+    # Convert to percentage display units
+    summary = summary * lr_scale
 
     colors = {
         "RS42": "#17365D",
@@ -52,127 +56,104 @@ def plot_by_decile(
         "RS151": "#7952B3"
     }
 
-    for name in summary.columns:
+    fig = go.Figure()
 
-        values = summary[name]
+    # 2. Create grouped bars
+    for seed in summary.columns:
+
+        values = summary[seed]
 
         fig.add_trace(
             go.Bar(
                 x=summary.index,
                 y=values,
-                name=name,
+                name=seed,
+                marker_color=colors.get(seed, "#64748B"),
 
-                marker_color=colors.get(
-                    name, "#64748B"
-                ),
-
-                # Format labels with commas
+                # Vertical percentage labels
                 text=[
-                    f"{v:,.{decimals}f}"
+                    f"{v:,.{decimals}f}%"
                     if pd.notna(v) else ""
                     for v in values
                 ],
 
-                # Show values above bars
                 textposition="outside",
-
-                # Rotate labels vertically
                 textangle=-90,
 
-                # Bold black text
                 textfont=dict(
                     family="Arial Black",
                     size=label_font_size,
                     color="black"
                 ),
 
-                # Prevent labels from being clipped
                 cliponaxis=False,
 
                 hovertemplate=(
                     "Ventile: %{x}<br>"
-                    f"Seed: {name}<br>"
-                    "Value: %{y:,.2f}"
+                    f"Seed: {seed}<br>"
+                    "Mean LR: %{y:,.2f}%"
                     "<extra></extra>"
                 )
             )
         )
 
-    # --------------------------------------------------
-    # 3. Ventile dropdown
-    # --------------------------------------------------
-
+    # 3. Dropdown for ventiles
     ventiles = summary.index.tolist()
 
     buttons = [
         dict(
             label="All Ventiles",
             method="relayout",
-            args=[
-                {
-                    "xaxis.range": [
-                        min(ventiles) - 0.5,
-                        max(ventiles) + 0.5
-                    ]
-                }
-            ]
+            args=[{
+                "xaxis.range": [
+                    min(ventiles) - 0.5,
+                    max(ventiles) + 0.5
+                ]
+            }]
         )
     ]
 
-    for d in ventiles:
-
+    for v in ventiles:
         buttons.append(
             dict(
-                label=f"Ventile {int(d)}",
+                label=f"Ventile {int(v)}",
                 method="relayout",
-                args=[
-                    {
-                        "xaxis.range": [
-                            float(d) - 0.5,
-                            float(d) + 0.5
-                        ]
-                    }
-                ]
+                args=[{
+                    "xaxis.range": [
+                        float(v) - 0.5,
+                        float(v) + 0.5
+                    ]
+                }]
             )
         )
 
-    # --------------------------------------------------
-    # 4. Add extra headroom for vertical labels
-    # --------------------------------------------------
+    # 4. Extra space for vertical labels
+    max_lr = summary.max().max()
+    min_lr = summary.min().min()
 
-    max_value = summary.max().max()
-    min_value = summary.min().min()
+    if pd.isna(max_lr):
+        max_lr = 0
 
-    if pd.isna(max_value):
-        max_value = 0
+    if pd.isna(min_lr):
+        min_lr = 0
 
-    if pd.isna(min_value):
-        min_value = 0
-
-    max_value = float(max_value)
-    min_value = float(min_value)
+    max_lr = float(max_lr)
+    min_lr = float(min_lr)
 
     span = max(
-        max_value - min_value,
-        abs(max_value),
-        abs(min_value),
+        max_lr - min_lr,
+        abs(max_lr),
+        abs(min_lr),
         1
     )
 
-    upper = max(0, max_value) + span * 0.35
-    lower = min(0, min_value) - span * 0.10
+    upper = max(0, max_lr) + span * 0.35
+    lower = min(0, min_lr) - span * 0.10
 
-    # --------------------------------------------------
-    # 5. Chart layout
-    # --------------------------------------------------
-
+    # 5. Layout
     fig.update_layout(
-
         title=dict(
-            text=(
-                title
-                or f"{value_col} by Ventile Across Random Seeds"
-            ),
+            text=title,
             x=0.5,
             xanchor="center",
             font=dict(
@@ -182,10 +163,9 @@ def plot_by_decile(
         ),
 
         xaxis_title="Ventile",
-        yaxis_title=value_col,
+        yaxis_title="Average SMI3_LR (%)",
 
         barmode="group",
-
         height=height,
 
         margin=dict(
@@ -218,20 +198,13 @@ def plot_by_decile(
                 buttons=buttons,
                 direction="down",
                 showactive=True,
-
                 x=1,
                 xanchor="right",
-
                 y=1.24,
                 yanchor="top",
-
                 bgcolor="white",
                 bordercolor="#CBD5E1",
-                borderwidth=1,
-
-                font=dict(
-                    size=13
-                )
+                borderwidth=1
             )
         ],
 
@@ -242,43 +215,48 @@ def plot_by_decile(
         bargroupgap=0.05
     )
 
-    # --------------------------------------------------
-    # 6. X-axis
-    # --------------------------------------------------
-
     fig.update_xaxes(
         tickmode="array",
         tickvals=ventiles,
         type="linear",
-
         range=[
             min(ventiles) - 0.5,
             max(ventiles) + 0.5
         ],
-
-        showgrid=False,
-
-        tickfont=dict(
-            size=12
-        )
+        showgrid=False
     )
-
-    # --------------------------------------------------
-    # 7. Y-axis
-    # --------------------------------------------------
 
     fig.update_yaxes(
         range=[lower, upper],
-        automargin=True,
+        ticksuffix="%",
         gridcolor="#E5E7EB",
         zeroline=True,
         zerolinecolor="#94A3B8"
     )
 
-    # --------------------------------------------------
-    # 8. Display chart
-    # --------------------------------------------------
-
     fig.show()
 
     return summary
+
+======
+
+
+dfs = {
+    "RS42": df_scored_42,
+    "RS07": df_scored_07,
+    "RS101": df_scored_101,
+    "RS151": df_scored_151
+}
+
+lr_summary = plot_lr_by_ventile(
+    dfs=dfs,
+    ventile_col="rr_model_decile",
+    lr_col="SMI3_LR",
+    lr_scale=1,  # Change to 100 if stored as 0.1847
+    title="Random Seed Sensitivity - Loss Ratio by Ventile",
+    decimals=2,
+    label_font_size=13,
+    height=800
+)
+
+display(lr_summary)
