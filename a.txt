@@ -1,29 +1,1253 @@
-factor = 34.05
 
-df_val["PD_ADJUSTED"] = (
-    df_val["PD_ORIGINAL"]
-    / (
-        df_val["PD_ORIGINAL"]
-        + factor * (1 - df_val["PD_ORIGINAL"])
-    )
+# ============================================================
+# 4. DEFINE TARGET, FEATURES AND SETTINGS
+# ============================================================
+
+import numpy as np
+import pandas as pd
+import joblib
+import matplotlib.pyplot as plt
+
+from IPython.display import display
+
+from sklearn.isotonic import IsotonicRegression
+from sklearn.calibration import calibration_curve
+
+from sklearn.metrics import (
+    roc_auc_score,
+    roc_curve,
+    confusion_matrix,
+    precision_score,
+    recall_score,
+    brier_score_loss,
+    log_loss
 )
 
-=======
+
+# ------------------------------------------------------------
+# SETTINGS
+# ------------------------------------------------------------
+
+target_col = "BAD_FLAG"
+
+# Training original OOF probability
+train_pd_col = "oof_pred_proba"
+
+# Test and Validation production probability
+production_pd_col = "prediction_probability"
+
+lgd_col = "lgd"
+premium_col = "premium"
+
+# Confirmed loss calculations
+loss_multiplier = 0.62
+scale = 100
+
+# Approximate odds adjustment previously verified
+# against production scores on Test and Validation.
+odds_factor = 34.05
+
+# Classification threshold
+threshold = 0.50
+
+# Number of risk groups
+n_deciles = 20
+
+# Ranking basis:
+# "LR" -> use SMI3 loss ratio
+# "PD" -> use probability
+#
+# Assumed LR-based because you want SMI3 swapsets.
+# Verify against your existing rr_model_decile.
+
+decile_ranking_basis = "LR"
+
+# D1 = highest risk, D20 = lowest risk
+highest_risk_is_D1 = True
+
+
+# ------------------------------------------------------------
+# GET ORIGINAL MODEL FEATURES
+# ------------------------------------------------------------
+
+feature_cols = list(xgb_model.feature_names_in_)
+
+print("Number of features:", len(feature_cols))
+
+
+# ------------------------------------------------------------
+# VALIDATE DATASETS
+# ------------------------------------------------------------
+
+for name, df in [
+    ("Train", df_train),
+    ("Test", df_test),
+    ("Validation", df_val)
+]:
+
+    required = [
+        target_col,
+        lgd_col,
+        premium_col
+    ]
+
+    if name == "Train":
+        required.append(train_pd_col)
+    else:
+        required += feature_cols
+
+    missing_cols = [
+        c for c in required
+        if c not in df.columns
+    ]
+
+    if missing_cols:
+        raise ValueError(
+            f"{name} missing columns: {missing_cols}"
+        )
+
+    invalid_target = (
+        df[target_col].notna()
+        & ~df[target_col].isin([0, 1])
+    )
+
+    if invalid_target.any():
+        raise ValueError(
+            f"{name} contains nonbinary target values."
+        )
+
+    print(f"\n{name}")
+    print("Total rows:", len(df))
+    print("Missing targets:", df[target_col].isna().sum())
+    print("Target distribution:")
+    print(
+        df[target_col].value_counts(dropna=False)
+    )
+
+
+# ============================================================
+# 5. PREPARE OBSERVED-TARGET DATA
+# ============================================================
+
+df_train_eval = df_train[
+    df_train[target_col].isin([0, 1])
+].copy()
+
+df_test_cal = df_test[
+    df_test[target_col].isin([0, 1])
+].copy()
+
+df_val_eval = df_val[
+    df_val[target_col].isin([0, 1])
+].copy()
+
+y_train = df_train_eval[target_col].astype(int)
+y_test = df_test_cal[target_col].astype(int)
+y_val = df_val_eval[target_col].astype(int)
+
+print("\nObserved-target sample sizes:")
+print("Train:", len(y_train))
+print("Test:", len(y_test))
+print("Validation:", len(y_val))
+
+
+# ============================================================
+# 6. GENERATE ORIGINAL PROBABILITIES
+#    APPLY ODDS FACTOR ONLY TO TEST AND VALIDATION
+# ============================================================
+
+def adjust_probability(probabilities, factor=34.05):
+
+    probabilities = pd.to_numeric(
+        probabilities,
+        errors="coerce"
+    )
+
+    return (
+        probabilities
+        / (
+            probabilities
+            + factor * (1 - probabilities)
+        )
+    )
+
+
+# ------------------------------------------------------------
+# TRAIN: USE EXISTING OOF PROBABILITY
+# NO ODDS ADJUSTMENT
+# ------------------------------------------------------------
+
+df_train["PD_BASELINE"] = pd.to_numeric(
+    df_train[train_pd_col],
+    errors="coerce"
+)
+
+# Retain a common column for original probability.
+# On Train, this is the existing OOF score.
+
+df_train["PD_ORIGINAL"] = (
+    df_train["PD_BASELINE"]
+)
+
+
+# ------------------------------------------------------------
+# TEST AND VALIDATION:
+# RAW MODEL PROBABILITY + ODDS ADJUSTMENT
+# ------------------------------------------------------------
+
+for df in [df_test, df_val]:
+
+    # Raw XGBoost model probability
+    df["PD_ORIGINAL"] = (
+        xgb_model.predict_proba(
+            df[feature_cols]
+        )[:, 1]
+    )
+
+    # Adjust raw model probability using
+    # the verified odds correction.
+    df["PD_ADJUSTED"] = adjust_probability(
+        df["PD_ORIGINAL"],
+        factor=odds_factor
+    )
+
+    # Use adjusted PD as the original
+    # production-scale baseline.
+    df["PD_BASELINE"] = (
+        df["PD_ADJUSTED"]
+    )
+
+
+# Train has no odds-adjusted PD
+df_train["PD_ADJUSTED"] = np.nan
+
+
+# ------------------------------------------------------------
+# VALIDATE PROBABILITY RANGES
+# ------------------------------------------------------------
+
+for name, df in [
+    ("TRAIN", df_train),
+    ("TEST", df_test),
+    ("VALIDATION", df_val)
+]:
+
+    pd_numeric = pd.to_numeric(
+        df["PD_BASELINE"],
+        errors="coerce"
+    )
+
+    invalid = (
+        pd_numeric.notna()
+        & ~pd_numeric.between(0, 1)
+    )
+
+    if invalid.any():
+        raise ValueError(
+            f"{name}: PD_BASELINE contains "
+            "probabilities outside [0, 1]."
+        )
+
+    df["PD_BASELINE"] = pd_numeric
+
+
+# ------------------------------------------------------------
+# VERIFY TEST AND VALIDATION ODDS ADJUSTMENT
+# ------------------------------------------------------------
+
+print("\n" + "=" * 70)
+print("TEST / VALIDATION ODDS ADJUSTMENT VERIFICATION")
+print("=" * 70)
+
+for name, df in [
+    ("TEST", df_test),
+    ("VALIDATION", df_val)
+]:
+
+    print(f"\n{name}")
+
+    print(
+        "Raw XGBoost Mean PD:",
+        f"{df['PD_ORIGINAL'].mean():.4%}"
+    )
+
+    print(
+        "Adjusted Mean PD:",
+        f"{df['PD_ADJUSTED'].mean():.4%}"
+    )
+
+    if production_pd_col in df.columns:
+
+        existing = pd.to_numeric(
+            df[production_pd_col],
+            errors="coerce"
+        )
+
+        valid = (
+            existing.notna()
+            & df["PD_ADJUSTED"].notna()
+        )
+
+        mae = (
+            existing[valid]
+            - df.loc[valid, "PD_ADJUSTED"]
+        ).abs().mean()
+
+        print(
+            "Existing vs adjusted MAE:",
+            mae
+        )
+
+        print(
+            "Existing Mean PD:",
+            f"{existing.mean():.4%}"
+        )
+
+        # Check that the approximation is close
+        # to the original production probabilities.
+        if valid.any() and mae > 1e-4:
+            print(
+                "WARNING: Adjusted probabilities "
+                "do not closely match existing "
+                "production probabilities. "
+                "Investigate before continuing."
+            )
+
+
+# ============================================================
+# 7. FIT ISOTONIC CALIBRATION ON TEST
+# ============================================================
+
+# Fit isotonic using adjusted Test probabilities.
+# XGBoost remains unchanged.
+
+test_mask = (
+    df_test[target_col].isin([0, 1])
+    & df_test["PD_BASELINE"].notna()
+)
+
+X_test_calibration = df_test.loc[
+    test_mask,
+    "PD_BASELINE"
+].to_numpy()
+
+y_test_calibration = df_test.loc[
+    test_mask,
+    target_col
+].astype(int).to_numpy()
+
+if np.unique(y_test_calibration).size != 2:
+    raise ValueError(
+        "Test calibration data must contain both classes."
+    )
+
+isotonic_model = IsotonicRegression(
+    y_min=0,
+    y_max=1,
+    out_of_bounds="clip"
+)
+
+isotonic_model.fit(
+    X_test_calibration,
+    y_test_calibration
+)
+
+print("\nIsotonic calibration completed.")
+
+
+# ============================================================
+# 8. GENERATE PD_CALIBRATED
+# ============================================================
+
+# The odds adjustment is already incorporated
+# in Test and Validation PD_BASELINE.
+#
+# Do NOT adjust PD_CALIBRATED a second time.
+
+for df in [df_train, df_test, df_val]:
+
+    df["PD_CALIBRATED"] = np.nan
+
+    valid = df["PD_BASELINE"].notna()
+
+    if valid.any():
+
+        df.loc[valid, "PD_CALIBRATED"] = (
+            isotonic_model.predict(
+                df.loc[
+                    valid,
+                    "PD_BASELINE"
+                ].to_numpy()
+            )
+        )
+
+
+# ------------------------------------------------------------
+# ORIGINAL VS CALIBRATED MEAN PD
+# ------------------------------------------------------------
+
+print("\n" + "=" * 70)
+print("ORIGINAL VS CALIBRATED MEAN PD")
+print("=" * 70)
+
+for name, df in [
+    ("TRAIN", df_train),
+    ("TEST", df_test),
+    ("VALIDATION", df_val)
+]:
+
+    observed = df[target_col].isin([0, 1])
+
+    original_mean = df.loc[
+        observed,
+        "PD_BASELINE"
+    ].mean()
+
+    calibrated_mean = df.loc[
+        observed,
+        "PD_CALIBRATED"
+    ].mean()
+
+    print(
+        f"{name}: "
+        f"Original = {original_mean:.4%}, "
+        f"Calibrated = {calibrated_mean:.4%}"
+    )
+
+
+# ============================================================
+# 8A. CALCULATE CALIBRATED SMI3 LOSS
+#     AND CALIBRATED LOSS RATIO
+# ============================================================
+
+# Original formulas:
+#
+# SMI3_LOSS = lgd * probability * 0.62
+#
+# SMI3_LR = (
+#     lgd * probability * 0.62
+#     / premium
+# ) * 100
+#
+# Use PD_CALIBRATED for new columns.
+#
+# Also reconstruct original loss/LR for
+# comparison without overwriting existing columns.
+
+
+for df in [df_train, df_test, df_val]:
+
+    lgd = pd.to_numeric(
+        df[lgd_col],
+        errors="coerce"
+    )
+
+    premium = pd.to_numeric(
+        df[premium_col],
+        errors="coerce"
+    )
+
+    # Avoid division by zero.
+    safe_premium = premium.replace(
+        0,
+        np.nan
+    )
+
+    original_pd = pd.to_numeric(
+        df["PD_BASELINE"],
+        errors="coerce"
+    )
+
+    calibrated_pd = pd.to_numeric(
+        df["PD_CALIBRATED"],
+        errors="coerce"
+    )
+
+    # -------------------------------------------------
+    # ORIGINAL LOSS - FOR VERIFICATION ONLY
+    # -------------------------------------------------
+
+    df["SMI3_LOSS_original_check"] = (
+        lgd
+        * original_pd
+        * loss_multiplier
+    )
+
+    # -------------------------------------------------
+    # ORIGINAL LOSS RATIO - FOR VERIFICATION ONLY
+    # -------------------------------------------------
+
+    df["SMI3_LR_original_check"] = (
+        df["SMI3_LOSS_original_check"]
+        / safe_premium
+    ) * scale
+
+    # -------------------------------------------------
+    # CALIBRATED LOSS
+    # -------------------------------------------------
+
+    df["SMI3_LOSS_calibrated"] = (
+        lgd
+        * calibrated_pd
+        * loss_multiplier
+    )
+
+    # -------------------------------------------------
+    # CALIBRATED LOSS RATIO
+    # -------------------------------------------------
+
+    df["SMI3_LR_calibrated"] = (
+        df["SMI3_LOSS_calibrated"]
+        / safe_premium
+    ) * scale
+
+
+# ------------------------------------------------------------
+# VALIDATION LOSS COMPARISON
+# ------------------------------------------------------------
+
+print("\nVALIDATION LOSS COMPARISON")
+
+comparison_cols = [
+    "PD_BASELINE",
+    "PD_CALIBRATED",
+    "SMI3_LOSS_original_check",
+    "SMI3_LOSS_calibrated",
+    "SMI3_LR_original_check",
+    "SMI3_LR_calibrated"
+]
+
+if "SMI3_LOSS" in df_val.columns:
+    comparison_cols.insert(
+        2,
+        "SMI3_LOSS"
+    )
+
+if "SMI3_LR" in df_val.columns:
+    comparison_cols.insert(
+        comparison_cols.index("SMI3_LR_original_check"),
+        "SMI3_LR"
+    )
 
 display(
-    df_val[
-        [
-            "prediction_probability",
-            "PD_ORIGINAL",
-            "PD_ADJUSTED"
-        ]
-    ].head(20)
+    df_val[comparison_cols].head(20)
+)
+
+
+# ------------------------------------------------------------
+# VERIFY EXISTING ORIGINAL LOSS AND LR
+# ------------------------------------------------------------
+
+for name, df in [
+    ("TRAIN", df_train),
+    ("TEST", df_test),
+    ("VALIDATION", df_val)
+]:
+
+    for existing_col, recreated_col in [
+        (
+            "SMI3_LOSS",
+            "SMI3_LOSS_original_check"
+        ),
+        (
+            "SMI3_LR",
+            "SMI3_LR_original_check"
+        )
+    ]:
+
+        if existing_col not in df.columns:
+            continue
+
+        existing = pd.to_numeric(
+            df[existing_col],
+            errors="coerce"
+        )
+
+        recreated = pd.to_numeric(
+            df[recreated_col],
+            errors="coerce"
+        )
+
+        valid = (
+            existing.notna()
+            & recreated.notna()
+        )
+
+        if valid.any():
+
+            mae = (
+                existing[valid]
+                - recreated[valid]
+            ).abs().mean()
+
+            print(
+                f"{name} {existing_col} MAE: "
+                f"{mae:.8f}"
+            )
+
+
+# ============================================================
+# 8B. CREATE ORIGINAL AND CALIBRATED D1-D20
+# ============================================================
+
+# Recreated original decile:
+# decile_original
+#
+# Calibrated decile:
+# rr_model_decile_calibrated
+#
+# Existing production decile:
+# rr_model_decile
+#
+# Ranking convention assumed here:
+# D1 = highest risk
+# D20 = lowest risk
+#
+# Groups are approximately equal-sized within
+# each dataset.
+#
+# Compare decile_original with rr_model_decile
+# before relying on swapset movements.
+
+
+def create_20_deciles(
+    scores,
+    highest_risk_first=True
+):
+
+    scores = pd.to_numeric(
+        scores,
+        errors="coerce"
+    )
+
+    result = pd.Series(
+        pd.NA,
+        index=scores.index,
+        dtype="string"
+    )
+
+    valid = scores.notna()
+
+    n_valid = int(valid.sum())
+
+    if n_valid == 0:
+        return result
+
+    # Descending score: highest risk first.
+    # method="first" resolves ties by row order.
+
+    ranks = scores.loc[valid].rank(
+        method="first",
+        ascending=not highest_risk_first
+    )
+
+    n_groups = min(20, n_valid)
+
+    group_numbers = (
+        pd.qcut(
+            ranks,
+            q=n_groups,
+            labels=False
+        ) + 1
+    )
+
+    result.loc[valid] = (
+        "D"
+        + group_numbers.astype(int).astype(str)
+    )
+
+    return result
+
+
+# ------------------------------------------------------------
+# CHOOSE DECILE RANKING SCORE
+# ------------------------------------------------------------
+
+if decile_ranking_basis == "LR":
+
+    original_decile_score = (
+        "SMI3_LR_original_check"
+    )
+
+    calibrated_decile_score = (
+        "SMI3_LR_calibrated"
+    )
+
+elif decile_ranking_basis == "PD":
+
+    original_decile_score = "PD_BASELINE"
+
+    calibrated_decile_score = "PD_CALIBRATED"
+
+else:
+
+    raise ValueError(
+        "decile_ranking_basis must be 'LR' or 'PD'."
+    )
+
+
+# ------------------------------------------------------------
+# GENERATE D1-D20 FOR ALL DATASETS
+# ------------------------------------------------------------
+
+for df in [df_train, df_test, df_val]:
+
+    # Original recreated D1-D20
+    df["decile_original"] = (
+        create_20_deciles(
+            df[original_decile_score],
+            highest_risk_first=highest_risk_is_D1
+        )
+    )
+
+    # Calibrated D1-D20
+    df["rr_model_decile_calibrated"] = (
+        create_20_deciles(
+            df[calibrated_decile_score],
+            highest_risk_first=highest_risk_is_D1
+        )
+    )
+
+
+# ------------------------------------------------------------
+# NORMALIZE EXISTING D1-D20 VALUES
+# ------------------------------------------------------------
+
+def normalize_deciles(series):
+
+    values = (
+        series.astype("string")
+        .str.strip()
+        .str.upper()
+        .str.replace(
+            r"^D",
+            "",
+            regex=True
+        )
+    )
+
+    numbers = pd.to_numeric(
+        values,
+        errors="coerce"
+    ).astype("Int64")
+
+    return numbers
+
+
+# ------------------------------------------------------------
+# COMPARE decile_original VS rr_model_decile
+# ------------------------------------------------------------
+
+print("\n" + "=" * 70)
+print("DECILE ORIGINAL VERIFICATION")
+print("=" * 70)
+
+for name, df in [
+    ("TRAIN", df_train),
+    ("TEST", df_test),
+    ("VALIDATION", df_val)
+]:
+
+    if "rr_model_decile" not in df.columns:
+
+        print(
+            f"\n{name}: existing rr_model_decile "
+            "not found."
+        )
+
+        continue
+
+    existing = normalize_deciles(
+        df["rr_model_decile"]
+    )
+
+    recreated = normalize_deciles(
+        df["decile_original"]
+    )
+
+    valid = existing.notna() & recreated.notna()
+
+    print(f"\n{name}")
+
+    print(
+        "Rows compared:",
+        int(valid.sum())
+    )
+
+    if valid.any():
+
+        matches = (
+            existing[valid]
+            == recreated[valid]
+        )
+
+        print(
+            "Match percentage:",
+            f"{matches.mean():.2%}"
+        )
+
+        if matches.mean() < 0.9999:
+
+            print(
+                "WARNING: Recreated original deciles "
+                "do not match the existing deciles. "
+                "Check ranking basis, eligibility "
+                "filters, tie handling and cutoff rules."
+            )
+
+
+# ------------------------------------------------------------
+# VALIDATION DECILE COMPARISON
+# ------------------------------------------------------------
+
+print("\nVALIDATION D1-D20 COMPARISON")
+
+decile_cols = [
+    "PD_BASELINE",
+    "PD_CALIBRATED",
+    "SMI3_LR_original_check",
+    "SMI3_LR_calibrated",
+    "decile_original",
+    "rr_model_decile_calibrated"
+]
+
+if "rr_model_decile" in df_val.columns:
+    decile_cols.insert(
+        4,
+        "rr_model_decile"
+    )
+
+display(
+    df_val[decile_cols].head(20)
+)
+
+
+# ------------------------------------------------------------
+# VALIDATION DECILE MOVEMENT
+# ------------------------------------------------------------
+
+original_for_swapset = (
+    "rr_model_decile"
+    if "rr_model_decile" in df_val.columns
+    else "decile_original"
+)
+
+orig_numbers = normalize_deciles(
+    df_val[original_for_swapset]
+)
+
+cal_numbers = normalize_deciles(
+    df_val["rr_model_decile_calibrated"]
+)
+
+valid_pairs = (
+    orig_numbers.notna()
+    & cal_numbers.notna()
+)
+
+changed = (
+    orig_numbers[valid_pairs]
+    != cal_numbers[valid_pairs]
+)
+
+print("\nVALIDATION DECILE MOVEMENT")
+
+print(
+    "Rows compared:",
+    int(valid_pairs.sum())
 )
 
 print(
-    "Mean absolute difference:",
-    (
-        df_val["PD_ADJUSTED"]
-        - df_val["prediction_probability"]
-    ).abs().mean()
+    "Changed deciles:",
+    int(changed.sum())
 )
+
+if valid_pairs.any():
+
+    print(
+        "Percentage changed:",
+        f"{changed.mean():.2%}"
+    )
+
+
+# ------------------------------------------------------------
+# VALIDATION SWAPSET CROSS-TAB
+# ------------------------------------------------------------
+
+decile_order = [
+    f"D{i}" for i in range(1, 21)
+]
+
+original_labels = (
+    "D" + orig_numbers.astype("string")
+)
+
+calibrated_labels = (
+    "D" + cal_numbers.astype("string")
+)
+
+swapset_table = pd.crosstab(
+    original_labels,
+    calibrated_labels,
+    rownames=["Original Decile"],
+    colnames=["Calibrated Decile"]
+)
+
+swapset_table = swapset_table.reindex(
+    index=decile_order,
+    columns=decile_order,
+    fill_value=0
+)
+
+print("\nVALIDATION D1-D20 SWAPSET")
+
+display(swapset_table)
+
+
+# ============================================================
+# 9. EVALUATE PERFORMANCE
+# ============================================================
+
+def evaluate(df, name, probability_col):
+
+    data = df[
+        df[target_col].isin([0, 1])
+        & df[probability_col].notna()
+    ].copy()
+
+    if data.empty:
+        print(
+            f"{name}: No valid observed outcomes."
+        )
+        return None
+
+    y = data[target_col].astype(int).to_numpy()
+
+    probabilities = (
+        data[probability_col]
+        .to_numpy(dtype=float)
+    )
+
+    n_observed = len(data)
+    n_bad_events = int(y.sum())
+
+    # Binary predictions
+    y_pred = (
+        probabilities >= threshold
+    ).astype(int)
+
+    # Confusion matrix
+    tn, fp, fn, tp = confusion_matrix(
+        y,
+        y_pred,
+        labels=[0, 1]
+    ).ravel()
+
+    # Precision
+    precision = precision_score(
+        y,
+        y_pred,
+        zero_division=0
+    )
+
+    # Recall
+    recall = recall_score(
+        y,
+        y_pred,
+        zero_division=0
+    )
+
+    # False Positive Rate
+    fpr = (
+        fp / (fp + tn)
+        if fp + tn > 0
+        else np.nan
+    )
+
+    # AUC and KS
+    if np.unique(y).size == 2:
+
+        auc = roc_auc_score(
+            y,
+            probabilities
+        )
+
+        fpr_curve, tpr_curve, _ = roc_curve(
+            y,
+            probabilities
+        )
+
+        ks = np.max(
+            tpr_curve - fpr_curve
+        )
+
+    else:
+
+        auc = np.nan
+        ks = np.nan
+
+    return {
+        "Dataset": name,
+        "N_Observed": n_observed,
+        "N_Bad_Events": n_bad_events,
+        "Actual_Bad_Rate": y.mean(),
+        "Mean_PD": probabilities.mean(),
+        "AUC": auc,
+        "KS": ks,
+        "Precision": precision,
+        "Recall": recall,
+        "FPR": fpr,
+        "Brier_Score": brier_score_loss(
+            y,
+            probabilities
+        ),
+        "Log_Loss": log_loss(
+            y,
+            probabilities,
+            labels=[0, 1]
+        )
+    }
+
+
+# ============================================================
+# TABLE 1: ORIGINAL XGBOOST PERFORMANCE
+# ============================================================
+
+# Train: original OOF probability
+# Test: odds-adjusted original probability
+# Validation: odds-adjusted original probability
+
+original_results_list = [
+    evaluate(
+        df_train,
+        "TRAIN_2009_2015",
+        "PD_BASELINE"
+    ),
+    evaluate(
+        df_test,
+        "TEST_2021_2023",
+        "PD_BASELINE"
+    ),
+    evaluate(
+        df_val,
+        "VAL_202510_202605",
+        "PD_BASELINE"
+    )
+]
+
+original_results = pd.DataFrame([
+    r for r in original_results_list
+    if r is not None
+])
+
+
+# ============================================================
+# TABLE 2: ISOTONIC CALIBRATED XGBOOST
+# ============================================================
+
+calibrated_results_list = [
+    evaluate(
+        df_train,
+        "TRAIN_2009_2015",
+        "PD_CALIBRATED"
+    ),
+    evaluate(
+        df_test,
+        "TEST_2021_2023",
+        "PD_CALIBRATED"
+    ),
+    evaluate(
+        df_val,
+        "VAL_202510_202605",
+        "PD_CALIBRATED"
+    )
+]
+
+calibrated_results = pd.DataFrame([
+    r for r in calibrated_results_list
+    if r is not None
+])
+
+
+# ------------------------------------------------------------
+# DISPLAY PERFORMANCE TABLES
+# ------------------------------------------------------------
+
+metric_format = {
+    "N_Observed": "{:,.0f}",
+    "N_Bad_Events": "{:,.0f}",
+    "Actual_Bad_Rate": "{:.2%}",
+    "Mean_PD": "{:.2%}",
+    "AUC": "{:.4f}",
+    "KS": "{:.4f}",
+    "Precision": "{:.2%}",
+    "Recall": "{:.2%}",
+    "FPR": "{:.2%}",
+    "Brier_Score": "{:.4f}",
+    "Log_Loss": "{:.4f}"
+}
+
+
+print("\n" + "=" * 75)
+print("TABLE 1: ORIGINAL XGBOOST PERFORMANCE")
+print("=" * 75)
+
+display(
+    original_results.style.format(
+        metric_format,
+        na_rep="-"
+    )
+)
+
+
+print("\n" + "=" * 75)
+print("TABLE 2: ISOTONIC CALIBRATED XGBOOST PERFORMANCE")
+print("=" * 75)
+
+display(
+    calibrated_results.style.format(
+        metric_format,
+        na_rep="-"
+    )
+)
+
+
+# Combined comparison table
+results = original_results.merge(
+    calibrated_results,
+    on="Dataset",
+    suffixes=("_Original", "_Calibrated")
+)
+
+
+# ============================================================
+# 10. CALIBRATION CURVES
+# ============================================================
+
+# Original = PD_BASELINE
+# Calibrated = PD_CALIBRATED
+#
+# Same predictions as Sections 9 tables.
+
+def plot_calibration(df, name):
+
+    data = df[
+        df[target_col].isin([0, 1])
+        & df["PD_BASELINE"].notna()
+        & df["PD_CALIBRATED"].notna()
+    ].copy()
+
+    if data.empty or data[target_col].nunique() < 2:
+
+        print(
+            f"{name}: Insufficient target data."
+        )
+        return
+
+    y = data[target_col].astype(int)
+
+    plt.figure(figsize=(8, 6))
+
+    for col, label in [
+        (
+            "PD_BASELINE",
+            "Original XGBoost"
+        ),
+        (
+            "PD_CALIBRATED",
+            "Isotonic Calibrated XGBoost"
+        )
+    ]:
+
+        prob_true, prob_pred = calibration_curve(
+            y,
+            data[col],
+            n_bins=10,
+            strategy="quantile"
+        )
+
+        plt.plot(
+            prob_pred,
+            prob_true,
+            marker="o",
+            label=label
+        )
+
+    plt.plot(
+        [0, 1],
+        [0, 1],
+        "k--",
+        label="Perfect Calibration"
+    )
+
+    plt.xlabel("Mean Predicted Probability")
+    plt.ylabel("Observed Bad Rate")
+
+    plt.title(
+        name + " Calibration Curve"
+    )
+
+    plt.legend()
+    plt.grid(True)
+    plt.show()
+
+
+plot_calibration(df_train, "TRAIN")
+plot_calibration(df_test, "TEST")
+plot_calibration(df_val, "VALIDATION")
+
+
+# ============================================================
+# 11. SAVE CALIBRATED FILES AND MODEL
+# ============================================================
+
+# Save full datasets, including missing-target rows.
+
+df_train.to_csv(
+    "df_train_calibrated.csv",
+    index=False
+)
+
+df_test.to_csv(
+    "df_test_calibrated.csv",
+    index=False
+)
+
+df_val.to_csv(
+    "df_val_calibrated.csv",
+    index=False
+)
+
+# Save isotonic mapping.
+# Input: PD_BASELINE
+# Output: PD_CALIBRATED
+
+joblib.dump(
+    isotonic_model,
+    "xgb_isotonic_calibrated.joblib"
+)
+
+# Save original performance table
+original_results.to_csv(
+    "original_xgboost_performance.csv",
+    index=False
+)
+
+# Save calibrated performance table
+calibrated_results.to_csv(
+    "isotonic_calibrated_xgboost_performance.csv",
+    index=False
+)
+
+# Save combined comparison
+results.to_csv(
+    "calibration_performance.csv",
+    index=False
+)
+
+# Save Validation swapset
+swapset_table.to_csv(
+    "validation_decile_swapset.csv"
+)
+
+print("\nAll calibrated files saved successfully.")
