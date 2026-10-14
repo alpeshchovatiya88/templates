@@ -1,20 +1,455 @@
+
+# ============================================================
+# 1. IMPORT LIBRARIES
+# ============================================================
+
+import numpy as np
+import pandas as pd
+import joblib
+import matplotlib.pyplot as plt
+
 from IPython.display import display
+from sklearn.base import clone
+from sklearn.model_selection import StratifiedKFold
+from sklearn.calibration import (
+    CalibratedClassifierCV,
+    calibration_curve
+)
+from sklearn.frozen import FrozenEstimator
+from sklearn.metrics import (
+    roc_auc_score,
+    brier_score_loss,
+    log_loss
+)
+
+
+# ============================================================
+# 2. LOAD DATASETS AND MODEL
+# ============================================================
+
+df_train_file = "df_train_scored.csv"
+df_test_file = "df_test_scored.csv"
+df_val_file = "df_val_scored.csv"
+
+df_train = pd.read_csv(df_train_file, low_memory=False)
+df_test = pd.read_csv(df_test_file, low_memory=False)
+df_val = pd.read_csv(df_val_file, low_memory=False)
+
+xgb_model = joblib.load("best_xgb.joblib")
+
+print("Model:", type(xgb_model))
+print("Train:", df_train.shape)
+print("Test:", df_test.shape)
+print("Validation:", df_val.shape)
+
+
+# ============================================================
+# 3. TARGET AND FEATURES
+# ============================================================
+
+# CHANGE THIS TO YOUR ACTUAL TARGET COLUMN
+target_col = "BAD_FLAG"
+
+# Original fitted pipeline input features
+feature_cols = list(xgb_model.feature_names_in_)
+
+for name, df in [
+    ("Train", df_train),
+    ("Test", df_test),
+    ("Validation", df_val)
+]:
+    missing_cols = [
+        c for c in feature_cols + [target_col]
+        if c not in df.columns
+    ]
+
+    if missing_cols:
+        raise ValueError(
+            f"{name} missing columns: {missing_cols}"
+        )
+
+    invalid = (
+        df[target_col].notna()
+        & ~df[target_col].isin([0, 1])
+    )
+
+    if invalid.any():
+        raise ValueError(
+            f"{name} contains nonbinary target values."
+        )
+
+    print(
+        f"{name}: {len(df):,} rows, "
+        f"{df[target_col].isna().sum():,} missing targets"
+    )
+
+
+# ============================================================
+# 4. PREPARE OBSERVED-TARGET DATA
+# ============================================================
+
+train_obs = df_train[
+    df_train[target_col].isin([0, 1])
+].copy()
+
+test_obs = df_test[
+    df_test[target_col].isin([0, 1])
+].copy()
+
+val_obs = df_val[
+    df_val[target_col].isin([0, 1])
+].copy()
+
+X_train = train_obs[feature_cols]
+y_train = train_obs[target_col].astype(int)
+
+X_test = test_obs[feature_cols]
+y_test = test_obs[target_col].astype(int)
+
+X_val = val_obs[feature_cols]
+y_val = val_obs[target_col].astype(int)
+
+if y_train.value_counts().min() < 5:
+    raise ValueError(
+        "Training data needs at least 5 examples of each class."
+    )
+
+if y_test.nunique() != 2:
+    raise ValueError(
+        "Calibration dataset must contain both classes."
+    )
+
+
+# ============================================================
+# 5. TRAIN 5-FOLD CV:
+#    ORIGINAL VS CALIBRATED XGBOOST
+# ============================================================
+
+outer_cv = StratifiedKFold(
+    n_splits=5,
+    shuffle=True,
+    random_state=42
+)
+
+original_oof = np.full(len(X_train), np.nan)
+calibrated_oof = np.full(len(X_train), np.nan)
+
+fold_results = []
+
+for fold, (tr_idx, va_idx) in enumerate(
+    outer_cv.split(X_train, y_train),
+    start=1
+):
+
+    print(f"\nRunning outer fold {fold}/5")
+
+    X_tr = X_train.iloc[tr_idx]
+    y_tr = y_train.iloc[tr_idx]
+
+    X_va = X_train.iloc[va_idx]
+    y_va = y_train.iloc[va_idx]
+
+    # Original XGBoost
+    original_model = clone(xgb_model)
+    original_model.fit(X_tr, y_tr)
+
+    p_original = original_model.predict_proba(
+        X_va
+    )[:, 1]
+
+    # Inner 5-fold isotonic calibration
+    calibrated_model = CalibratedClassifierCV(
+        estimator=clone(xgb_model),
+        method="isotonic",
+        cv=5,
+        ensemble=False
+    )
+
+    calibrated_model.fit(X_tr, y_tr)
+
+    p_calibrated = calibrated_model.predict_proba(
+        X_va
+    )[:, 1]
+
+    original_oof[va_idx] = p_original
+    calibrated_oof[va_idx] = p_calibrated
+
+    fold_results.append({
+        "Fold": fold,
+        "Original_AUC": roc_auc_score(
+            y_va, p_original
+        ),
+        "Calibrated_AUC": roc_auc_score(
+            y_va, p_calibrated
+        ),
+        "Original_Brier": brier_score_loss(
+            y_va, p_original
+        ),
+        "Calibrated_Brier": brier_score_loss(
+            y_va, p_calibrated
+        )
+    })
+
+
+# ============================================================
+# 6. 5-FOLD CV RESULTS
+# ============================================================
+
+fold_results = pd.DataFrame(fold_results)
+
+print("\n5-FOLD CROSS-VALIDATION RESULTS")
 
 display(
-    results.style
-    .format({
+    fold_results.style.format({
+        "Original_AUC": "{:.4f}",
+        "Calibrated_AUC": "{:.4f}",
+        "Original_Brier": "{:.4f}",
+        "Calibrated_Brier": "{:.4f}"
+    })
+)
+
+print("\nMean Original Fold AUC:",
+      round(fold_results["Original_AUC"].mean(), 4))
+
+print("Mean Calibrated Fold AUC:",
+      round(fold_results["Calibrated_AUC"].mean(), 4))
+
+print("Pooled Original OOF AUC:",
+      round(roc_auc_score(y_train, original_oof), 4))
+
+print("Pooled Calibrated OOF AUC:",
+      round(roc_auc_score(y_train, calibrated_oof), 4))
+
+
+# ============================================================
+# 7. FIT FINAL ISOTONIC CALIBRATION
+# ============================================================
+
+# IMPORTANT:
+# This is the FINAL calibration of the saved XGBoost model.
+# It is separate from the 5-fold CV procedure.
+#
+# Test 2021-2023 must not have been used for
+# training, tuning, or model selection.
+
+final_calibrated_model = CalibratedClassifierCV(
+    estimator=FrozenEstimator(xgb_model),
+    method="isotonic"
+)
+
+final_calibrated_model.fit(X_test, y_test)
+
+print("\nFinal isotonic calibration completed.")
+
+
+# ============================================================
+# 8. GENERATE ORIGINAL AND CALIBRATED SCORES
+# ============================================================
+
+# Preserve every row, including missing-target rows.
+
+for df in [df_train, df_test, df_val]:
+
+    X_all = df[feature_cols]
+
+    df["PD_ORIGINAL"] = (
+        xgb_model.predict_proba(X_all)[:, 1]
+    )
+
+    df["PD_CALIBRATED"] = (
+        final_calibrated_model.predict_proba(
+            X_all
+        )[:, 1]
+    )
+
+# Store true out-of-fold predictions separately.
+# Do not confuse them with the final model's train scores.
+
+df_train["PD_ORIGINAL_OOF"] = np.nan
+df_train["PD_CALIBRATED_OOF"] = np.nan
+
+df_train.loc[
+    train_obs.index, "PD_ORIGINAL_OOF"
+] = original_oof
+
+df_train.loc[
+    train_obs.index, "PD_CALIBRATED_OOF"
+] = calibrated_oof
+
+
+# ============================================================
+# 9. PERFORMANCE EVALUATION
+# ============================================================
+
+def evaluate_predictions(y, original, calibrated, name):
+
+    y = np.asarray(y).astype(int)
+    original = np.asarray(original)
+    calibrated = np.asarray(calibrated)
+
+    result = {
+        "Dataset": name,
+        "N_Observed": len(y),
+        "Actual_Bad_Rate": y.mean(),
+        "Original_Mean_PD": original.mean(),
+        "Calibrated_Mean_PD": calibrated.mean(),
+        "Original_Brier": brier_score_loss(y, original),
+        "Calibrated_Brier": brier_score_loss(y, calibrated),
+        "Original_LogLoss": log_loss(
+            y, original, labels=[0, 1]
+        ),
+        "Calibrated_LogLoss": log_loss(
+            y, calibrated, labels=[0, 1]
+        ),
+        "Original_AUC": (
+            roc_auc_score(y, original)
+            if len(np.unique(y)) == 2 else np.nan
+        ),
+        "Calibrated_AUC": (
+            roc_auc_score(y, calibrated)
+            if len(np.unique(y)) == 2 else np.nan
+        )
+    }
+
+    return result
+
+
+results = pd.DataFrame([
+    evaluate_predictions(
+        y_train,
+        original_oof,
+        calibrated_oof,
+        "TRAIN_5FOLD_OOF"
+    ),
+    evaluate_predictions(
+        y_test,
+        df_test.loc[test_obs.index, "PD_ORIGINAL"],
+        df_test.loc[test_obs.index, "PD_CALIBRATED"],
+        "TEST_2021_2023"
+    ),
+    evaluate_predictions(
+        y_val,
+        df_val.loc[val_obs.index, "PD_ORIGINAL"],
+        df_val.loc[val_obs.index, "PD_CALIBRATED"],
+        "VAL_202510_202605"
+    )
+])
+
+print("\nFINAL PERFORMANCE COMPARISON")
+
+display(
+    results.style.format({
+        "N_Observed": "{:,.0f}",
         "Actual_Bad_Rate": "{:.2%}",
         "Original_Mean_PD": "{:.2%}",
         "Calibrated_Mean_PD": "{:.2%}",
-        "Original_AUC": "{:.4f}",
-        "Calibrated_AUC": "{:.4f}",
         "Original_Brier": "{:.4f}",
         "Calibrated_Brier": "{:.4f}",
         "Original_LogLoss": "{:.4f}",
         "Calibrated_LogLoss": "{:.4f}",
-        "N_Observed": "{:,.0f}"
-    })
-    .set_properties(**{
-        "text-align": "center"
+        "Original_AUC": "{:.4f}",
+        "Calibrated_AUC": "{:.4f}"
     })
 )
+
+
+# ============================================================
+# 10. CALIBRATION CURVES
+# ============================================================
+
+def plot_calibration(y, original, calibrated, name):
+
+    y = np.asarray(y).astype(int)
+
+    plt.figure(figsize=(8, 6))
+
+    for probabilities, label in [
+        (original, "Original XGBoost"),
+        (calibrated, "Calibrated XGBoost")
+    ]:
+
+        prob_true, prob_pred = calibration_curve(
+            y,
+            np.asarray(probabilities),
+            n_bins=10,
+            strategy="quantile"
+        )
+
+        plt.plot(
+            prob_pred,
+            prob_true,
+            marker="o",
+            label=label
+        )
+
+    plt.plot(
+        [0, 1], [0, 1],
+        "k--",
+        label="Perfect Calibration"
+    )
+
+    plt.xlabel("Mean Predicted PD")
+    plt.ylabel("Observed Bad Rate")
+    plt.title(name)
+    plt.legend()
+    plt.grid(True)
+    plt.show()
+
+
+plot_calibration(
+    y_train,
+    original_oof,
+    calibrated_oof,
+    "TRAIN - 5 Fold OOF Calibration"
+)
+
+plot_calibration(
+    y_test,
+    df_test.loc[test_obs.index, "PD_ORIGINAL"],
+    df_test.loc[test_obs.index, "PD_CALIBRATED"],
+    "TEST - Calibration Fit Data"
+)
+
+plot_calibration(
+    y_val,
+    df_val.loc[val_obs.index, "PD_ORIGINAL"],
+    df_val.loc[val_obs.index, "PD_CALIBRATED"],
+    "VALIDATION - Out of Time"
+)
+
+
+# ============================================================
+# 11. SAVE RESULTS AND MODELS
+# ============================================================
+
+df_train.to_csv(
+    "df_train_calibrated.csv",
+    index=False
+)
+
+df_test.to_csv(
+    "df_test_calibrated.csv",
+    index=False
+)
+
+df_val.to_csv(
+    "df_val_calibrated.csv",
+    index=False
+)
+
+fold_results.to_csv(
+    "five_fold_cv_results.csv",
+    index=False
+)
+
+results.to_csv(
+    "calibration_performance.csv",
+    index=False
+)
+
+joblib.dump(
+    final_calibrated_model,
+    "xgb_isotonic_calibrated.joblib"
+)
+
+print("\nAll results saved successfully.")
