@@ -73,6 +73,44 @@ for name, df in [
         )
 
 
+# ------------------------------------------------------------
+# CHECK EXISTING ORIGINAL PROBABILITY COLUMNS
+# ------------------------------------------------------------
+
+original_probability_columns = [
+    (df_train, "oof_pred_proba", "Train"),
+    (df_test, "prediction_probability", "Test"),
+    (df_val, "prediction_probability", "Validation")
+]
+
+for df, col, name in original_probability_columns:
+
+    if col not in df.columns:
+        raise ValueError(
+            f"{name} is missing original probability "
+            f"column: {col}"
+        )
+
+    df[col] = pd.to_numeric(
+        df[col],
+        errors="coerce"
+    )
+
+    observed = df[target_col].isin([0, 1])
+
+    if df.loc[observed, col].isna().any():
+        raise ValueError(
+            f"{name} contains missing {col} "
+            "values on observed-target rows."
+        )
+
+    if not df.loc[observed, col].between(0, 1).all():
+        raise ValueError(
+            f"{name} contains probabilities "
+            "outside [0, 1]."
+        )
+
+
 # ============================================================
 # 5. PREPARE DATA WITH OBSERVED TARGETS
 # ============================================================
@@ -123,21 +161,19 @@ if y_train.value_counts().min() < 5:
 # 6. GET ORIGINAL XGBOOST PROBABILITIES
 # ============================================================
 
-# Use original saved XGBoost model.
+# Your datasets already have original probabilities:
 #
-# No probability adjustment.
+# TRAIN      : oof_pred_proba
+# TEST       : prediction_probability
+# VALIDATION : prediction_probability
 #
-# Predict ALL rows, including missing-target rows.
+# These existing columns are used for the original
+# performance table and calibration curves.
+#
+# No odds adjustment.
+# No new raw PD_ORIGINAL calculation required.
 
-for df in [df_train, df_test, df_val]:
-
-    X = df[feature_cols]
-
-    df["PD_ORIGINAL"] = (
-        xgb_model.predict_proba(X)[:, 1]
-    )
-
-print("\nOriginal probabilities generated.")
+print("\nOriginal probabilities available.")
 
 
 # ============================================================
@@ -145,11 +181,10 @@ print("\nOriginal probabilities generated.")
 #    USING TRAINING DATA WITH 5-FOLD CV
 # ============================================================
 
-# Fit calibration on Train, following
-# the approach in your screenshot.
+# Following your requested training-based CV approach.
 #
-# sklearn internally fits model copies in CV.
-# The original loaded xgb_model is not modified.
+# CalibratedClassifierCV fits cloned XGBoost models
+# within the folds. The loaded xgb_model is not modified.
 
 calibrated_clf = CalibratedClassifierCV(
     estimator=xgb_model,
@@ -169,13 +204,10 @@ print("\n5-fold isotonic calibration completed.")
 # 8. GENERATE CALIBRATED PROBABILITIES
 # ============================================================
 
-# No 34.05 odds adjustment.
-#
-# Apply calibrated model to all datasets,
+# Apply fitted calibrated classifier to all rows,
 # including rows with missing target values.
 #
-# Train predictions here are in-sample.
-# Test and Validation are held-out predictions.
+# No odds adjustment.
 
 for df in [df_train, df_test, df_val]:
 
@@ -190,26 +222,26 @@ print("\nCalibrated probabilities generated.")
 
 # ============================================================
 # 8A. VALIDATION ONLY:
-#     CALIBRATED LOSS, LR AND D1-D20
+#     CREATE ADDITIONAL COLUMNS FOR CSV
 # ============================================================
 
-# Creates columns in df_val only.
+# No display or print statements.
 #
 # No odds adjustment.
-# No display.
-# No print.
 #
 # Uses PD_CALIBRATED directly.
 #
-# New columns:
-# 1. SMI3_LOSS_calibrated
-# 2. SMI3_L-R_calibrated
-# 3. decile_original
-# 4. decile_calibrated
+# Creates:
+# SMI3_LOSS_calibrated
+# SMI3_L-R_calibrated
+# decile_original
+# decile_calibrated
+#
+# Existing original columns remain unchanged.
 
 
 # ------------------------------------------------------------
-# 8A.1 CALIBRATED LOSS AND LOSS RATIO
+# 8A.1 CALIBRATED LOSS
 # ------------------------------------------------------------
 
 lgd = pd.to_numeric(
@@ -222,19 +254,21 @@ premium = pd.to_numeric(
     errors="coerce"
 ).replace(0, np.nan)
 
-
-# Calibrated loss:
-# lgd * PD_CALIBRATED * 0.62
+calibrated_pd = pd.to_numeric(
+    df_val["PD_CALIBRATED"],
+    errors="coerce"
+)
 
 df_val["SMI3_LOSS_calibrated"] = (
     lgd
-    * df_val["PD_CALIBRATED"]
+    * calibrated_pd
     * 0.62
 )
 
 
-# Calibrated loss ratio:
-# calibrated loss / premium * 100
+# ------------------------------------------------------------
+# 8A.2 CALIBRATED LOSS RATIO
+# ------------------------------------------------------------
 
 df_val["SMI3_L-R_calibrated"] = (
     df_val["SMI3_LOSS_calibrated"]
@@ -243,18 +277,18 @@ df_val["SMI3_L-R_calibrated"] = (
 
 
 # ------------------------------------------------------------
-# 8A.2 D1-D20 FUNCTION
+# 8A.3 CREATE D1-D20 RANKING FUNCTION
 # ------------------------------------------------------------
 
-# Assumed ranking:
+# Assumed:
 # D1 = highest loss ratio
 # D20 = lowest loss ratio
 #
 # Approximately equal-sized groups.
 # Ties broken by row order.
 #
-# Confirm this matches the existing
-# rr_model_decile methodology.
+# Verify against existing rr_model_decile
+# before using the rankings for swapset analysis.
 
 def create_20_deciles(scores):
 
@@ -299,38 +333,29 @@ def create_20_deciles(scores):
 
 
 # ------------------------------------------------------------
-# 8A.3 ORIGINAL LOSS RATIO FOR RANKING
+# 8A.4 ORIGINAL LOSS RATIO FOR DECILE RANKING
 # ------------------------------------------------------------
 
-# Original loss ratio is based on the
-# existing production prediction_probability,
-# if that column is available.
+# Use original existing production probability.
+# Do not use raw xgb_model.predict_proba().
 #
-# It does not overwrite original SMI3_LR.
+# This does not overwrite existing SMI3_LR.
 
-original_pd_col = "prediction_probability"
-
-if original_pd_col not in df_val.columns:
-    raise ValueError(
-        "Validation is missing prediction_probability, "
-        "which is needed to recreate original deciles."
-    )
-
-original_pd = pd.to_numeric(
-    df_val[original_pd_col],
+original_probability = pd.to_numeric(
+    df_val["prediction_probability"],
     errors="coerce"
 )
 
 original_lr = (
     lgd
-    * original_pd
+    * original_probability
     * 0.62
     / premium
 ) * 100
 
 
 # ------------------------------------------------------------
-# 8A.4 ORIGINAL AND CALIBRATED DECILES
+# 8A.5 CREATE ORIGINAL AND CALIBRATED DECILES
 # ------------------------------------------------------------
 
 df_val["decile_original"] = (
@@ -351,13 +376,13 @@ df_val["decile_calibrated"] = (
 #    TWO SEPARATE TABLES
 # ============================================================
 
-# Threshold used for Precision, Recall, FPR
+# Threshold for Precision, Recall and FPR
 threshold = 0.50
 
 
 def evaluate(df, name, probability_col):
 
-    # Exclude missing-target rows
+    # Use original observed-target filtering
     data = df[
         df[target_col].isin([0, 1])
     ].copy()
@@ -368,7 +393,16 @@ def evaluate(df, name, probability_col):
 
     y = data[target_col].astype(int)
 
-    probabilities = data[probability_col]
+    probabilities = pd.to_numeric(
+        data[probability_col],
+        errors="coerce"
+    )
+
+    if probabilities.isna().any():
+        raise ValueError(
+            f"{name}: Missing {probability_col} "
+            "values in observed-target data."
+        )
 
     n_observed = len(data)
     n_bad_events = int(y.sum())
@@ -406,7 +440,7 @@ def evaluate(df, name, probability_col):
         else np.nan
     )
 
-    # AUC and KS require both classes
+    # AUC and KS
     if y.nunique() == 2:
 
         auc = roc_auc_score(
@@ -424,6 +458,7 @@ def evaluate(df, name, probability_col):
         )
 
     else:
+
         auc = np.nan
         ks = np.nan
 
@@ -450,29 +485,34 @@ def evaluate(df, name, probability_col):
     }
 
 
-# ------------------------------------------------------------
+# ============================================================
 # TABLE 1: ORIGINAL XGBOOST PERFORMANCE
-# ------------------------------------------------------------
+# ============================================================
 
-# Uses original saved XGBoost predictions.
-# No odds adjustment.
+# TRAIN      : oof_pred_proba
+# TEST       : prediction_probability
+# VALIDATION : prediction_probability
 
 original_results_list = [
+
     evaluate(
         df_train,
         "TRAIN_2009_2015",
-        "PD_ORIGINAL"
+        "oof_pred_proba"
     ),
+
     evaluate(
         df_test,
         "TEST_2021_2023",
-        "PD_ORIGINAL"
+        "prediction_probability"
     ),
+
     evaluate(
         df_val,
         "VAL_202510_202605",
-        "PD_ORIGINAL"
+        "prediction_probability"
     )
+
 ]
 
 original_results = pd.DataFrame([
@@ -481,26 +521,32 @@ original_results = pd.DataFrame([
 ])
 
 
-# ------------------------------------------------------------
+# ============================================================
 # TABLE 2: ISOTONIC CALIBRATED XGBOOST PERFORMANCE
-# ------------------------------------------------------------
+# ============================================================
+
+# All three datasets use PD_CALIBRATED.
 
 calibrated_results_list = [
+
     evaluate(
         df_train,
         "TRAIN_2009_2015",
         "PD_CALIBRATED"
     ),
+
     evaluate(
         df_test,
         "TEST_2021_2023",
         "PD_CALIBRATED"
     ),
+
     evaluate(
         df_val,
         "VAL_202510_202605",
         "PD_CALIBRATED"
     )
+
 ]
 
 calibrated_results = pd.DataFrame([
@@ -509,9 +555,9 @@ calibrated_results = pd.DataFrame([
 ])
 
 
-# ------------------------------------------------------------
-# DISPLAY TABLES
-# ------------------------------------------------------------
+# ============================================================
+# DISPLAY BOTH PERFORMANCE TABLES
+# ============================================================
 
 metric_format = {
     "N_Observed": "{:,.0f}",
@@ -552,7 +598,7 @@ display(
 )
 
 
-# Combine original and calibrated results
+# Combined results for saving
 results = original_results.merge(
     calibrated_results,
     on="Dataset",
@@ -564,9 +610,15 @@ results = original_results.merge(
 # 10. PLOT CALIBRATION CURVES
 # ============================================================
 
-def plot_calibration(df, name):
+# Same filtering and plotting method as your original.
+#
+# Only change:
+# original_col identifies the existing original
+# probability column for each dataset.
 
-    # Original observed-target filtering
+def plot_calibration(df, name, original_col):
+
+    # Use observed targets only
     data = df[
         df[target_col].isin([0, 1])
     ].copy()
@@ -580,7 +632,7 @@ def plot_calibration(df, name):
     plt.figure(figsize=(8, 6))
 
     for col, label in [
-        ("PD_ORIGINAL", "Original XGBoost"),
+        (original_col, "Original XGBoost"),
         ("PD_CALIBRATED", "Calibrated XGBoost")
     ]:
 
@@ -613,14 +665,35 @@ def plot_calibration(df, name):
     plt.show()
 
 
-plot_calibration(df_train, "TRAIN")
-plot_calibration(df_test, "TEST")
-plot_calibration(df_val, "VALIDATION")
+# TRAIN: Original OOF probability
+plot_calibration(
+    df_train,
+    "TRAIN",
+    "oof_pred_proba"
+)
+
+
+# TEST: Original production probability
+plot_calibration(
+    df_test,
+    "TEST",
+    "prediction_probability"
+)
+
+
+# VALIDATION: Original production probability
+plot_calibration(
+    df_val,
+    "VALIDATION",
+    "prediction_probability"
+)
 
 
 # ============================================================
 # 11. SAVE CALIBRATED FILES AND MODEL
 # ============================================================
+
+# Save full datasets, including missing-target rows.
 
 df_train.to_csv(
     "df_train_calibrated.csv",
@@ -637,11 +710,13 @@ df_val.to_csv(
     index=False
 )
 
+# Save fitted calibrated classifier
 joblib.dump(
     calibrated_clf,
     "xgb_isotonic_calibrated.joblib"
 )
 
+# Save separate performance tables
 original_results.to_csv(
     "original_xgboost_performance.csv",
     index=False
@@ -652,6 +727,7 @@ calibrated_results.to_csv(
     index=False
 )
 
+# Save combined performance table
 results.to_csv(
     "calibration_performance.csv",
     index=False
