@@ -1,386 +1,660 @@
 
-import math
-from pathlib import Path
+# ============================================================
+# 4. DEFINE TARGET AND FEATURES
+# ============================================================
 
 import numpy as np
 import pandas as pd
+import joblib
 import matplotlib.pyplot as plt
-from matplotlib.ticker import FuncFormatter
 
-# =====================================================
-# 1. DATAFRAMES
-# =====================================================
+from IPython.display import display
 
-dfs = {
-    "RS42": df_rs42,
-    "RS532": df_rs532,
-    "RS3458": df_rs3458,
-    "RS499": df_rs499,
-    "RS345": df_rs345,
-    "RS1999": df_rs1999,
-    "RS2324": df_rs2324,
-}
+from sklearn.calibration import (
+    CalibratedClassifierCV,
+    calibration_curve
+)
 
-SEEDS = list(dfs.keys())
+from sklearn.metrics import (
+    roc_auc_score,
+    roc_curve,
+    confusion_matrix,
+    precision_score,
+    recall_score,
+    brier_score_loss,
+    log_loss
+)
 
-# =====================================================
-# 2. IMPROVED COLOR PALETTE
-# =====================================================
+# Replace with your actual target column
+target_col = "BAD_FLAG"
 
-colors = {
-    "RS42":   "#355C7D",  # Steel blue
-    "RS532":  "#6C9A8B",  # Sage teal
-    "RS3458": "#8172B3",  # Muted violet
-    "RS499":  "#DD9A59",  # Soft orange
-    "RS345":  "#C76D7E",  # Dusty rose
-    "RS1999": "#7A9E65",  # Olive green
-    "RS2324": "#5B8DB8",  # Cornflower blue
-}
+# Get original pipeline input features
+feature_cols = list(xgb_model.feature_names_in_)
 
-# =====================================================
-# 3. CONFIGURATION
-# =====================================================
+print("Number of features:", len(feature_cols))
 
-DECILE_COL = "rr_model_decile"
+# Check required columns
+for name, df in [
+    ("Train", df_train),
+    ("Test", df_test),
+    ("Validation", df_val)
+]:
 
-# Change to 1 if SMI3_LR is already stored as %
-LR_SCALE = 100
+    missing_cols = [
+        c for c in feature_cols + [target_col]
+        if c not in df.columns
+    ]
 
-N_COLS = 4
+    if missing_cols:
+        raise ValueError(
+            f"{name} missing columns: {missing_cols}"
+        )
 
-# Font sizes
-VALUE_LABEL_SIZE = 14
-SEED_LABEL_SIZE = 12
-VENTILE_TITLE_SIZE = 17
-MAIN_TITLE_SIZE = 24
+    print(f"\n{name}")
+    print("Total rows:", len(df))
+    print(
+        "Missing targets:",
+        df[target_col].isna().sum()
+    )
+    print("Target distribution:")
+    print(
+        df[target_col].value_counts(dropna=False)
+    )
 
-# Figure settings
-SUBPLOT_WIDTH = 8
-SUBPLOT_HEIGHT = 5.5
-DPI = 300
+    # Reject unexpected nonmissing target values
+    invalid = (
+        df[target_col].notna()
+        & ~df[target_col].isin([0, 1])
+    )
 
-output_dir = Path("seed_sensitivity_plots")
-output_dir.mkdir(parents=True, exist_ok=True)
+    if invalid.any():
+        raise ValueError(
+            f"{name} contains nonbinary target values."
+        )
 
-# =====================================================
-# 4. PREPARE DATA
-# =====================================================
 
-prepared = {}
+# ============================================================
+# 5. PREPARE DATA WITH OBSERVED TARGETS
+# ============================================================
 
-for seed, df in dfs.items():
+# Only rows with observed 0/1 targets
 
-    temp = df.copy()
+df_train_eval = df_train[
+    df_train[target_col].isin([0, 1])
+].copy()
 
-    # Extract numeric decile/ventile
-    temp["_decile"] = pd.to_numeric(
-        temp[DECILE_COL]
-        .astype(str)
-        .str.extract(r"(\d+)")[0],
+df_test_eval = df_test[
+    df_test[target_col].isin([0, 1])
+].copy()
+
+df_val_eval = df_val[
+    df_val[target_col].isin([0, 1])
+].copy()
+
+
+X_train = df_train_eval[feature_cols]
+y_train = df_train_eval[target_col].astype(int)
+
+X_test = df_test_eval[feature_cols]
+y_test = df_test_eval[target_col].astype(int)
+
+X_val = df_val_eval[feature_cols]
+y_val = df_val_eval[target_col].astype(int)
+
+
+print("\nObserved-target sample sizes:")
+print("Train:", len(X_train))
+print("Test:", len(X_test))
+print("Validation:", len(X_val))
+
+if y_train.nunique() != 2:
+    raise ValueError(
+        "Training data must contain both classes."
+    )
+
+if y_train.value_counts().min() < 5:
+    raise ValueError(
+        "At least 5 observations of each class "
+        "are needed for 5-fold CV."
+    )
+
+
+# ============================================================
+# 6. GET ORIGINAL XGBOOST PROBABILITIES
+# ============================================================
+
+# Use original saved XGBoost model.
+#
+# No probability adjustment.
+#
+# Predict ALL rows, including missing-target rows.
+
+for df in [df_train, df_test, df_val]:
+
+    X = df[feature_cols]
+
+    df["PD_ORIGINAL"] = (
+        xgb_model.predict_proba(X)[:, 1]
+    )
+
+print("\nOriginal probabilities generated.")
+
+
+# ============================================================
+# 7. FIT ISOTONIC CALIBRATION
+#    USING TRAINING DATA WITH 5-FOLD CV
+# ============================================================
+
+# Fit calibration on Train, following
+# the approach in your screenshot.
+#
+# sklearn internally fits model copies in CV.
+# The original loaded xgb_model is not modified.
+
+calibrated_clf = CalibratedClassifierCV(
+    estimator=xgb_model,
+    method="isotonic",
+    cv=5
+)
+
+calibrated_clf.fit(
+    X_train,
+    y_train
+)
+
+print("\n5-fold isotonic calibration completed.")
+
+
+# ============================================================
+# 8. GENERATE CALIBRATED PROBABILITIES
+# ============================================================
+
+# No 34.05 odds adjustment.
+#
+# Apply calibrated model to all datasets,
+# including rows with missing target values.
+#
+# Train predictions here are in-sample.
+# Test and Validation are held-out predictions.
+
+for df in [df_train, df_test, df_val]:
+
+    X = df[feature_cols]
+
+    df["PD_CALIBRATED"] = (
+        calibrated_clf.predict_proba(X)[:, 1]
+    )
+
+print("\nCalibrated probabilities generated.")
+
+
+# ============================================================
+# 8A. VALIDATION ONLY:
+#     CALIBRATED LOSS, LR AND D1-D20
+# ============================================================
+
+# Creates columns in df_val only.
+#
+# No odds adjustment.
+# No display.
+# No print.
+#
+# Uses PD_CALIBRATED directly.
+#
+# New columns:
+# 1. SMI3_LOSS_calibrated
+# 2. SMI3_L-R_calibrated
+# 3. decile_original
+# 4. decile_calibrated
+
+
+# ------------------------------------------------------------
+# 8A.1 CALIBRATED LOSS AND LOSS RATIO
+# ------------------------------------------------------------
+
+lgd = pd.to_numeric(
+    df_val["lgd"],
+    errors="coerce"
+)
+
+premium = pd.to_numeric(
+    df_val["premium"],
+    errors="coerce"
+).replace(0, np.nan)
+
+
+# Calibrated loss:
+# lgd * PD_CALIBRATED * 0.62
+
+df_val["SMI3_LOSS_calibrated"] = (
+    lgd
+    * df_val["PD_CALIBRATED"]
+    * 0.62
+)
+
+
+# Calibrated loss ratio:
+# calibrated loss / premium * 100
+
+df_val["SMI3_L-R_calibrated"] = (
+    df_val["SMI3_LOSS_calibrated"]
+    / premium
+) * 100
+
+
+# ------------------------------------------------------------
+# 8A.2 D1-D20 FUNCTION
+# ------------------------------------------------------------
+
+# Assumed ranking:
+# D1 = highest loss ratio
+# D20 = lowest loss ratio
+#
+# Approximately equal-sized groups.
+# Ties broken by row order.
+#
+# Confirm this matches the existing
+# rr_model_decile methodology.
+
+def create_20_deciles(scores):
+
+    scores = pd.to_numeric(
+        scores,
         errors="coerce"
     )
 
-    for metric in ["SMI3_LOSS", "SMI3_LR"]:
+    result = pd.Series(
+        pd.NA,
+        index=scores.index,
+        dtype="string"
+    )
 
-        temp[metric] = pd.to_numeric(
-            temp[metric],
-            errors="coerce"
-        ).replace(
-            [np.inf, -np.inf],
-            np.nan
+    valid = scores.notna()
+
+    if valid.any():
+
+        ranks = scores.loc[valid].rank(
+            method="first",
+            ascending=False
         )
 
-    temp = temp.dropna(subset=["_decile"])
-    temp["_decile"] = temp["_decile"].astype(int)
+        n_groups = min(
+            20,
+            int(valid.sum())
+        )
 
-    prepared[seed] = temp
+        groups = (
+            pd.qcut(
+                ranks,
+                q=n_groups,
+                labels=False
+            ) + 1
+        )
 
-# Automatically detect available groups
-deciles = sorted(
-    set().union(
-        *(set(df["_decile"].unique()) for df in prepared.values())
+        result.loc[valid] = (
+            "D" + groups.astype(str)
+        )
+
+    return result
+
+
+# ------------------------------------------------------------
+# 8A.3 ORIGINAL LOSS RATIO FOR RANKING
+# ------------------------------------------------------------
+
+# Original loss ratio is based on the
+# existing production prediction_probability,
+# if that column is available.
+#
+# It does not overwrite original SMI3_LR.
+
+original_pd_col = "prediction_probability"
+
+if original_pd_col not in df_val.columns:
+    raise ValueError(
+        "Validation is missing prediction_probability, "
+        "which is needed to recreate original deciles."
+    )
+
+original_pd = pd.to_numeric(
+    df_val[original_pd_col],
+    errors="coerce"
+)
+
+original_lr = (
+    lgd
+    * original_pd
+    * 0.62
+    / premium
+) * 100
+
+
+# ------------------------------------------------------------
+# 8A.4 ORIGINAL AND CALIBRATED DECILES
+# ------------------------------------------------------------
+
+df_val["decile_original"] = (
+    create_20_deciles(
+        original_lr
     )
 )
 
-if not deciles:
-    raise ValueError(
-        "No valid deciles found in rr_model_decile."
+df_val["decile_calibrated"] = (
+    create_20_deciles(
+        df_val["SMI3_L-R_calibrated"]
+    )
+)
+
+
+# ============================================================
+# 9. EVALUATE CALIBRATION PERFORMANCE
+#    TWO SEPARATE TABLES
+# ============================================================
+
+# Threshold used for Precision, Recall, FPR
+threshold = 0.50
+
+
+def evaluate(df, name, probability_col):
+
+    # Exclude missing-target rows
+    data = df[
+        df[target_col].isin([0, 1])
+    ].copy()
+
+    if data.empty:
+        print(f"{name}: No observed targets.")
+        return None
+
+    y = data[target_col].astype(int)
+
+    probabilities = data[probability_col]
+
+    n_observed = len(data)
+    n_bad_events = int(y.sum())
+
+    # Predicted class
+    y_pred = (
+        probabilities >= threshold
+    ).astype(int)
+
+    # Confusion matrix
+    tn, fp, fn, tp = confusion_matrix(
+        y,
+        y_pred,
+        labels=[0, 1]
+    ).ravel()
+
+    # Precision
+    precision = precision_score(
+        y,
+        y_pred,
+        zero_division=0
     )
 
-N_ROWS = math.ceil(len(deciles) / N_COLS)
+    # Recall
+    recall = recall_score(
+        y,
+        y_pred,
+        zero_division=0
+    )
 
-# =====================================================
-# 5. PLOTTING FUNCTION
-# =====================================================
+    # False Positive Rate
+    fpr = (
+        fp / (fp + tn)
+        if (fp + tn) > 0
+        else np.nan
+    )
 
-def plot_metric(metric, aggregation, scale=1):
+    # AUC and KS require both classes
+    if y.nunique() == 2:
 
-    fig, axes = plt.subplots(
-        N_ROWS,
-        N_COLS,
-        figsize=(
-            N_COLS * SUBPLOT_WIDTH,
-            N_ROWS * SUBPLOT_HEIGHT
+        auc = roc_auc_score(
+            y,
+            probabilities
+        )
+
+        fpr_curve, tpr_curve, _ = roc_curve(
+            y,
+            probabilities
+        )
+
+        ks = np.max(
+            tpr_curve - fpr_curve
+        )
+
+    else:
+        auc = np.nan
+        ks = np.nan
+
+    return {
+        "Dataset": name,
+        "N_Observed": n_observed,
+        "N_Bad_Events": n_bad_events,
+        "Actual_Bad_Rate": y.mean(),
+        "Mean_PD": probabilities.mean(),
+        "AUC": auc,
+        "KS": ks,
+        "Precision": precision,
+        "Recall": recall,
+        "FPR": fpr,
+        "Brier_Score": brier_score_loss(
+            y,
+            probabilities
         ),
-        squeeze=False,
-        facecolor="white"
+        "Log_Loss": log_loss(
+            y,
+            probabilities,
+            labels=[0, 1]
+        )
+    }
+
+
+# ------------------------------------------------------------
+# TABLE 1: ORIGINAL XGBOOST PERFORMANCE
+# ------------------------------------------------------------
+
+# Uses original saved XGBoost predictions.
+# No odds adjustment.
+
+original_results_list = [
+    evaluate(
+        df_train,
+        "TRAIN_2009_2015",
+        "PD_ORIGINAL"
+    ),
+    evaluate(
+        df_test,
+        "TEST_2021_2023",
+        "PD_ORIGINAL"
+    ),
+    evaluate(
+        df_val,
+        "VAL_202510_202605",
+        "PD_ORIGINAL"
+    )
+]
+
+original_results = pd.DataFrame([
+    r for r in original_results_list
+    if r is not None
+])
+
+
+# ------------------------------------------------------------
+# TABLE 2: ISOTONIC CALIBRATED XGBOOST PERFORMANCE
+# ------------------------------------------------------------
+
+calibrated_results_list = [
+    evaluate(
+        df_train,
+        "TRAIN_2009_2015",
+        "PD_CALIBRATED"
+    ),
+    evaluate(
+        df_test,
+        "TEST_2021_2023",
+        "PD_CALIBRATED"
+    ),
+    evaluate(
+        df_val,
+        "VAL_202510_202605",
+        "PD_CALIBRATED"
+    )
+]
+
+calibrated_results = pd.DataFrame([
+    r for r in calibrated_results_list
+    if r is not None
+])
+
+
+# ------------------------------------------------------------
+# DISPLAY TABLES
+# ------------------------------------------------------------
+
+metric_format = {
+    "N_Observed": "{:,.0f}",
+    "N_Bad_Events": "{:,.0f}",
+    "Actual_Bad_Rate": "{:.2%}",
+    "Mean_PD": "{:.2%}",
+    "AUC": "{:.4f}",
+    "KS": "{:.4f}",
+    "Precision": "{:.2%}",
+    "Recall": "{:.2%}",
+    "FPR": "{:.2%}",
+    "Brier_Score": "{:.4f}",
+    "Log_Loss": "{:.4f}"
+}
+
+
+print("\n" + "=" * 75)
+print("TABLE 1: ORIGINAL XGBOOST PERFORMANCE")
+print("=" * 75)
+
+display(
+    original_results.style.format(
+        metric_format,
+        na_rep="-"
+    )
+)
+
+
+print("\n" + "=" * 75)
+print("TABLE 2: ISOTONIC CALIBRATED XGBOOST PERFORMANCE")
+print("=" * 75)
+
+display(
+    calibrated_results.style.format(
+        metric_format,
+        na_rep="-"
+    )
+)
+
+
+# Combine original and calibrated results
+results = original_results.merge(
+    calibrated_results,
+    on="Dataset",
+    suffixes=("_Original", "_Calibrated")
+)
+
+
+# ============================================================
+# 10. PLOT CALIBRATION CURVES
+# ============================================================
+
+def plot_calibration(df, name):
+
+    # Original observed-target filtering
+    data = df[
+        df[target_col].isin([0, 1])
+    ].copy()
+
+    if data.empty or data[target_col].nunique() < 2:
+        print(f"{name}: Insufficient target data.")
+        return
+
+    y = data[target_col].astype(int)
+
+    plt.figure(figsize=(8, 6))
+
+    for col, label in [
+        ("PD_ORIGINAL", "Original XGBoost"),
+        ("PD_CALIBRATED", "Calibrated XGBoost")
+    ]:
+
+        prob_true, prob_pred = calibration_curve(
+            y,
+            data[col],
+            n_bins=10,
+            strategy="quantile"
+        )
+
+        plt.plot(
+            prob_pred,
+            prob_true,
+            marker="o",
+            label=label
+        )
+
+    plt.plot(
+        [0, 1],
+        [0, 1],
+        "k--",
+        label="Perfect Calibration"
     )
 
-    axes = axes.flatten()
-
-    # -----------------------------------------
-    # Aggregate values for each seed
-    # -----------------------------------------
-
-    aggregated = {}
-
-    for seed, df in prepared.items():
-
-        grouped = df.groupby("_decile")[metric]
-
-        if aggregation == "sum":
-            values = grouped.sum(min_count=1)
-        elif aggregation == "mean":
-            values = grouped.mean()
-        else:
-            raise ValueError(
-                "aggregation must be 'sum' or 'mean'"
-            )
-
-        aggregated[seed] = (
-            values.reindex(deciles) * scale
-        )
-
-    # -----------------------------------------
-    # Create one subplot per decile
-    # -----------------------------------------
-
-    for i, decile in enumerate(deciles):
-
-        ax = axes[i]
-
-        values = [
-            aggregated[seed].loc[decile]
-            for seed in SEEDS
-        ]
-
-        x = np.arange(len(SEEDS))
-
-        # -------------------------------------
-        # Bars with improved colors
-        # -------------------------------------
-
-        bars = ax.bar(
-            x,
-            values,
-            color=[colors[seed] for seed in SEEDS],
-            width=0.70,
-            edgecolor="white",
-            linewidth=1.2,
-            zorder=3
-        )
-
-        # -------------------------------------
-        # LARGE BOLD VALUE LABELS
-        # -------------------------------------
-
-        for bar, value in zip(bars, values):
-
-            if pd.isna(value):
-                continue
-
-            if metric == "SMI3_LOSS":
-                label = f"{value / 1_000_000:.2f}M"
-            else:
-                label = f"{value:.2f}%"
-
-            ax.annotate(
-                label,
-                xy=(
-                    bar.get_x() + bar.get_width() / 2,
-                    bar.get_height()
-                ),
-                xytext=(0, 7),
-                textcoords="offset points",
-                ha="center",
-                va="bottom",
-                fontsize=VALUE_LABEL_SIZE,
-                fontweight="bold",
-                color="#263238",
-                clip_on=False
-            )
-
-        # -------------------------------------
-        # BOLD VENTILE TITLE
-        # -------------------------------------
-
-        ax.set_title(
-            f"VENTILE: {decile}",
-            fontsize=VENTILE_TITLE_SIZE,
-            fontweight="bold",
-            color="#1F2937",
-            pad=20
-        )
-
-        # -------------------------------------
-        # BOLD SEED LABELS
-        # -------------------------------------
-
-        ax.set_xticks(x)
-
-        ax.set_xticklabels(
-            SEEDS,
-            rotation=45,
-            ha="right",
-            fontsize=SEED_LABEL_SIZE,
-            fontweight="bold",
-            color="#374151"
-        )
-
-        # -------------------------------------
-        # Y-AXIS FORMATTING
-        # -------------------------------------
-
-        ax.tick_params(
-            axis="y",
-            labelsize=11,
-            colors="#4B5563"
-        )
-
-        for tick in ax.get_yticklabels():
-            tick.set_fontweight("bold")
-
-        if metric == "SMI3_LOSS":
-
-            ax.yaxis.set_major_formatter(
-                FuncFormatter(
-                    lambda value, pos:
-                    f"{value / 1_000_000:.1f}M"
-                )
-            )
-
-        else:
-
-            ax.yaxis.set_major_formatter(
-                FuncFormatter(
-                    lambda value, pos:
-                    f"{value:.0f}%"
-                )
-            )
-
-        # -------------------------------------
-        # SOFT GRIDLINES
-        # -------------------------------------
-
-        ax.grid(
-            axis="y",
-            color="#E5E7EB",
-            linestyle="-",
-            linewidth=0.8,
-            zorder=0
-        )
-
-        ax.set_axisbelow(True)
-
-        # -------------------------------------
-        # ADD HEADROOM ABOVE LABELS
-        # -------------------------------------
-
-        valid_values = [
-            float(v)
-            for v in values
-            if pd.notna(v)
-        ]
-
-        if valid_values and min(valid_values) >= 0:
-
-            ymax = max(valid_values)
-
-            ax.set_ylim(
-                0,
-                ymax * 1.35 if ymax > 0 else 1
-            )
-
-        # -------------------------------------
-        # CLEAN SUBPLOT STYLE
-        # -------------------------------------
-
-        ax.set_facecolor("white")
-
-        ax.spines["top"].set_visible(False)
-        ax.spines["right"].set_visible(False)
-
-        ax.spines["left"].set_color("#D1D5DB")
-        ax.spines["bottom"].set_color("#D1D5DB")
-
-        ax.tick_params(
-            axis="x",
-            length=0,
-            pad=7
-        )
-
-    # Hide unused subplot positions
-    for j in range(len(deciles), len(axes)):
-        axes[j].axis("off")
-
-    # -----------------------------------------
-    # MAIN TITLE
-    # -----------------------------------------
-
-    fig.suptitle(
-        f"Random Seed Sensitivity - {metric} by Ventile",
-        fontsize=MAIN_TITLE_SIZE,
-        fontweight="bold",
-        color="#111827",
-        y=0.995
-    )
-
-    # Spacing between subplots
-    fig.tight_layout(
-        rect=[0.01, 0.01, 0.99, 0.97],
-        h_pad=4.0,
-        w_pad=2.5
-    )
-
-    # -----------------------------------------
-    # SAVE PNG
-    # -----------------------------------------
-
-    png_path = (
-        output_dir /
-        f"{metric}_by_decile.png"
-    )
-
-    fig.savefig(
-        png_path,
-        dpi=DPI,
-        bbox_inches="tight",
-        facecolor="white"
-    )
-
-    print(f"Saved: {png_path.resolve()}")
-
+    plt.xlabel("Mean Predicted Probability")
+    plt.ylabel("Observed Bad Rate")
+    plt.title(name + " Calibration Curve")
+    plt.legend()
+    plt.grid(True)
     plt.show()
 
-    return fig
+
+plot_calibration(df_train, "TRAIN")
+plot_calibration(df_test, "TEST")
+plot_calibration(df_val, "VALIDATION")
 
 
-# =====================================================
-# 6. SMI3_LOSS: SUM BY DECILE
-# =====================================================
+# ============================================================
+# 11. SAVE CALIBRATED FILES AND MODEL
+# ============================================================
 
-fig_loss = plot_metric(
-    metric="SMI3_LOSS",
-    aggregation="sum"
+df_train.to_csv(
+    "df_train_calibrated.csv",
+    index=False
 )
 
-
-# =====================================================
-# 7. SMI3_LR: MEAN BY DECILE
-# =====================================================
-
-fig_lr = plot_metric(
-    metric="SMI3_LR",
-    aggregation="mean",
-    scale=LR_SCALE
+df_test.to_csv(
+    "df_test_calibrated.csv",
+    index=False
 )
+
+df_val.to_csv(
+    "df_val_calibrated.csv",
+    index=False
+)
+
+joblib.dump(
+    calibrated_clf,
+    "xgb_isotonic_calibrated.joblib"
+)
+
+original_results.to_csv(
+    "original_xgboost_performance.csv",
+    index=False
+)
+
+calibrated_results.to_csv(
+    "isotonic_calibrated_xgboost_performance.csv",
+    index=False
+)
+
+results.to_csv(
+    "calibration_performance.csv",
+    index=False
+)
+
+print("\nAll calibrated files saved successfully.")
