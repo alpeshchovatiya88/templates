@@ -1,12 +1,15 @@
+
 import math
+from pathlib import Path
+
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
-from pathlib import Path
+from matplotlib.ticker import FuncFormatter
 
-# ==========================================
+# =====================================================
 # 1. DATAFRAMES
-# ==========================================
+# =====================================================
 
 dfs = {
     "RS42": df_rs42,
@@ -18,68 +21,116 @@ dfs = {
     "RS2324": df_rs2324,
 }
 
+SEEDS = list(dfs.keys())
+
+# =====================================================
+# 2. IMPROVED COLOR PALETTE
+# =====================================================
+
 colors = {
-    "RS42": "#17365D",
-    "RS532": "#007F73",
-    "RS3458": "#6A1B9A",
-    "RS499": "#B45309",
-    "RS345": "#9F1239",
-    "RS1999": "#166534",
-    "RS2324": "#1D4ED8",
+    "RS42":   "#355C7D",  # Steel blue
+    "RS532":  "#6C9A8B",  # Sage teal
+    "RS3458": "#8172B3",  # Muted violet
+    "RS499":  "#DD9A59",  # Soft orange
+    "RS345":  "#C76D7E",  # Dusty rose
+    "RS1999": "#7A9E65",  # Olive green
+    "RS2324": "#5B8DB8",  # Cornflower blue
 }
 
+# =====================================================
+# 3. CONFIGURATION
+# =====================================================
+
 DECILE_COL = "rr_model_decile"
-LR_SCALE = 100  # Change to 1 if SMI3_LR is already in %
+
+# Change to 1 if SMI3_LR is already stored as %
+LR_SCALE = 100
+
+N_COLS = 4
+
+# Font sizes
+VALUE_LABEL_SIZE = 14
+SEED_LABEL_SIZE = 12
+VENTILE_TITLE_SIZE = 17
+MAIN_TITLE_SIZE = 24
+
+# Figure settings
+SUBPLOT_WIDTH = 8
+SUBPLOT_HEIGHT = 5.5
+DPI = 300
 
 output_dir = Path("seed_sensitivity_plots")
-output_dir.mkdir(exist_ok=True)
+output_dir.mkdir(parents=True, exist_ok=True)
 
-seeds = list(dfs.keys())
-
-# ==========================================
-# 2. PREPARE DATA
-# ==========================================
+# =====================================================
+# 4. PREPARE DATA
+# =====================================================
 
 prepared = {}
 
 for seed, df in dfs.items():
+
     temp = df.copy()
 
+    # Extract numeric decile/ventile
     temp["_decile"] = pd.to_numeric(
-        temp[DECILE_COL].astype(str).str.extract(r"(\d+)")[0],
+        temp[DECILE_COL]
+        .astype(str)
+        .str.extract(r"(\d+)")[0],
         errors="coerce"
     )
 
-    temp["SMI3_LOSS"] = pd.to_numeric(
-        temp["SMI3_LOSS"], errors="coerce"
+    for metric in ["SMI3_LOSS", "SMI3_LR"]:
+
+        temp[metric] = pd.to_numeric(
+            temp[metric],
+            errors="coerce"
+        ).replace(
+            [np.inf, -np.inf],
+            np.nan
+        )
+
+    temp = temp.dropna(subset=["_decile"])
+    temp["_decile"] = temp["_decile"].astype(int)
+
+    prepared[seed] = temp
+
+# Automatically detect available groups
+deciles = sorted(
+    set().union(
+        *(set(df["_decile"].unique()) for df in prepared.values())
+    )
+)
+
+if not deciles:
+    raise ValueError(
+        "No valid deciles found in rr_model_decile."
     )
 
-    temp["SMI3_LR"] = pd.to_numeric(
-        temp["SMI3_LR"], errors="coerce"
-    )
+N_ROWS = math.ceil(len(deciles) / N_COLS)
 
-    prepared[seed] = temp.dropna(subset=["_decile"])
-
-deciles = sorted(set().union(
-    *(set(df["_decile"].unique()) for df in prepared.values())
-))
-
-# ==========================================
-# 3. PLOTTING FUNCTION
-# ==========================================
+# =====================================================
+# 5. PLOTTING FUNCTION
+# =====================================================
 
 def plot_metric(metric, aggregation, scale=1):
 
-    ncols = 4
-    nrows = math.ceil(len(deciles) / ncols)
-
     fig, axes = plt.subplots(
-        nrows,
-        ncols,
-        figsize=(24, nrows * 4.5)
+        N_ROWS,
+        N_COLS,
+        figsize=(
+            N_COLS * SUBPLOT_WIDTH,
+            N_ROWS * SUBPLOT_HEIGHT
+        ),
+        squeeze=False,
+        facecolor="white"
     )
 
-    axes = np.array(axes).flatten()
+    axes = axes.flatten()
+
+    # -----------------------------------------
+    # Aggregate values for each seed
+    # -----------------------------------------
 
     aggregated = {}
 
@@ -89,28 +140,50 @@ def plot_metric(metric, aggregation, scale=1):
 
         if aggregation == "sum":
             values = grouped.sum(min_count=1)
-        else:
+        elif aggregation == "mean":
             values = grouped.mean()
+        else:
+            raise ValueError(
+                "aggregation must be 'sum' or 'mean'"
+            )
 
-        aggregated[seed] = values * scale
+        aggregated[seed] = (
+            values.reindex(deciles) * scale
+        )
+
+    # -----------------------------------------
+    # Create one subplot per decile
+    # -----------------------------------------
 
     for i, decile in enumerate(deciles):
 
         ax = axes[i]
 
         values = [
-            aggregated[seed].get(decile, np.nan)
-            for seed in seeds
+            aggregated[seed].loc[decile]
+            for seed in SEEDS
         ]
 
+        x = np.arange(len(SEEDS))
+
+        # -------------------------------------
+        # Bars with improved colors
+        # -------------------------------------
+
         bars = ax.bar(
-            seeds,
+            x,
             values,
-            color=[colors[s] for s in seeds],
-            width=0.7
+            color=[colors[seed] for seed in SEEDS],
+            width=0.70,
+            edgecolor="white",
+            linewidth=1.2,
+            zorder=3
         )
 
-        # Value labels above bars
+        # -------------------------------------
+        # LARGE BOLD VALUE LABELS
+        # -------------------------------------
+
         for bar, value in zip(bars, values):
 
             if pd.isna(value):
@@ -127,74 +200,184 @@ def plot_metric(metric, aggregation, scale=1):
                     bar.get_x() + bar.get_width() / 2,
                     bar.get_height()
                 ),
-                xytext=(0, 4),
+                xytext=(0, 7),
                 textcoords="offset points",
                 ha="center",
                 va="bottom",
-                fontsize=9
+                fontsize=VALUE_LABEL_SIZE,
+                fontweight="bold",
+                color="#263238",
+                clip_on=False
             )
 
+        # -------------------------------------
+        # BOLD VENTILE TITLE
+        # -------------------------------------
+
         ax.set_title(
-            f"VENTILE: {int(decile)}",
-            fontsize=14,
-            fontweight="bold"
+            f"VENTILE: {decile}",
+            fontsize=VENTILE_TITLE_SIZE,
+            fontweight="bold",
+            color="#1F2937",
+            pad=20
         )
 
-        ax.tick_params(axis="x", rotation=45, labelsize=9)
-        ax.tick_params(axis="y", labelsize=9)
+        # -------------------------------------
+        # BOLD SEED LABELS
+        # -------------------------------------
+
+        ax.set_xticks(x)
+
+        ax.set_xticklabels(
+            SEEDS,
+            rotation=45,
+            ha="right",
+            fontsize=SEED_LABEL_SIZE,
+            fontweight="bold",
+            color="#374151"
+        )
+
+        # -------------------------------------
+        # Y-AXIS FORMATTING
+        # -------------------------------------
+
+        ax.tick_params(
+            axis="y",
+            labelsize=11,
+            colors="#4B5563"
+        )
+
+        for tick in ax.get_yticklabels():
+            tick.set_fontweight("bold")
+
+        if metric == "SMI3_LOSS":
+
+            ax.yaxis.set_major_formatter(
+                FuncFormatter(
+                    lambda value, pos:
+                    f"{value / 1_000_000:.1f}M"
+                )
+            )
+
+        else:
+
+            ax.yaxis.set_major_formatter(
+                FuncFormatter(
+                    lambda value, pos:
+                    f"{value:.0f}%"
+                )
+            )
+
+        # -------------------------------------
+        # SOFT GRIDLINES
+        # -------------------------------------
 
         ax.grid(
             axis="y",
-            linestyle="--",
-            alpha=0.3
+            color="#E5E7EB",
+            linestyle="-",
+            linewidth=0.8,
+            zorder=0
         )
 
         ax.set_axisbelow(True)
 
-        valid = [v for v in values if pd.notna(v)]
+        # -------------------------------------
+        # ADD HEADROOM ABOVE LABELS
+        # -------------------------------------
 
-        if valid and min(valid) >= 0:
-            ymax = max(valid)
-            ax.set_ylim(0, ymax * 1.25 if ymax else 1)
+        valid_values = [
+            float(v)
+            for v in values
+            if pd.notna(v)
+        ]
 
-    # Hide unused subplots
+        if valid_values and min(valid_values) >= 0:
+
+            ymax = max(valid_values)
+
+            ax.set_ylim(
+                0,
+                ymax * 1.35 if ymax > 0 else 1
+            )
+
+        # -------------------------------------
+        # CLEAN SUBPLOT STYLE
+        # -------------------------------------
+
+        ax.set_facecolor("white")
+
+        ax.spines["top"].set_visible(False)
+        ax.spines["right"].set_visible(False)
+
+        ax.spines["left"].set_color("#D1D5DB")
+        ax.spines["bottom"].set_color("#D1D5DB")
+
+        ax.tick_params(
+            axis="x",
+            length=0,
+            pad=7
+        )
+
+    # Hide unused subplot positions
     for j in range(len(deciles), len(axes)):
         axes[j].axis("off")
 
+    # -----------------------------------------
+    # MAIN TITLE
+    # -----------------------------------------
+
     fig.suptitle(
         f"Random Seed Sensitivity - {metric} by Ventile",
-        fontsize=22,
+        fontsize=MAIN_TITLE_SIZE,
         fontweight="bold",
-        y=1.01
+        color="#111827",
+        y=0.995
     )
 
-    plt.tight_layout()
+    # Spacing between subplots
+    fig.tight_layout(
+        rect=[0.01, 0.01, 0.99, 0.97],
+        h_pad=4.0,
+        w_pad=2.5
+    )
 
-    # Save directly as PNG
-    filename = output_dir / f"{metric}_by_decile.png"
+    # -----------------------------------------
+    # SAVE PNG
+    # -----------------------------------------
+
+    png_path = (
+        output_dir /
+        f"{metric}_by_decile.png"
+    )
 
     fig.savefig(
-        filename,
-        dpi=300,
+        png_path,
+        dpi=DPI,
         bbox_inches="tight",
         facecolor="white"
     )
 
-    print(f"Saved: {filename}")
+    print(f"Saved: {png_path.resolve()}")
 
     plt.show()
 
     return fig
 
 
-# ==========================================
-# 4. CREATE AND SAVE BOTH PNG FIGURES
-# ==========================================
+# =====================================================
+# 6. SMI3_LOSS: SUM BY DECILE
+# =====================================================
 
 fig_loss = plot_metric(
     metric="SMI3_LOSS",
     aggregation="sum"
 )
+
+
+# =====================================================
+# 7. SMI3_LR: MEAN BY DECILE
+# =====================================================
 
 fig_lr = plot_metric(
     metric="SMI3_LR",
