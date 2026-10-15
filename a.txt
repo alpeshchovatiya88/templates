@@ -1,109 +1,294 @@
-
-# ============================================================
-# VALIDATION ONLY: ADJUSTED PD, LOSS, LR AND D1-D20
-# ============================================================
-
+import re
 import numpy as np
 import pandas as pd
+import plotly.graph_objects as go
 
-odds_factor = 34.05
+# Your seven experiment DataFrames
+dfs = {
+    "RS42": df_rs42,
+    "RS532": df_rs532,
+    "RS3458": df_rs3458,
+    "RS499": df_rs499,
+    "RS345": df_rs345,
+    "RS1999": df_rs1999,
+    "RS2324": df_rs2324,
+}
 
-# 1. Adjust original and calibrated PD
-def adjust_pd(p):
-    p = pd.to_numeric(p, errors="coerce")
-    return p / (p + odds_factor * (1 - p))
+# Experiment colors
+colors = {
+    "RS42":   "#17365D",  # Navy blue - Baseline
+    "RS532":  "#007F73",  # Dark teal
+    "RS3458": "#6A1B9A",  # Deep purple
+    "RS499":  "#B45309",  # Burnt orange
+    "RS345":  "#9F1239",  # Dark rose
+    "RS1999": "#166534",  # Forest green
+    "RS2324": "#1D4ED8",  # Royal blue
+}
 
+VENTILE_COL = "rr_model_decile"
+VENTILES = list(range(1, 21))
 
-df_val["PD_ORIGINAL_adjusted"] = adjust_pd(
-    df_val["PD_ORIGINAL"]
-)
-
-df_val["PD_CALIBRATED_adjusted"] = adjust_pd(
-    df_val["PD_CALIBRATED"]
-)
-
-
-# 2. Calibrated loss and loss ratio
-lgd = pd.to_numeric(df_val["lgd"], errors="coerce")
-
-premium = pd.to_numeric(
-    df_val["premium"], errors="coerce"
-).replace(0, np.nan)
-
-df_val["SMI3_LOSS_calibrated"] = (
-    lgd * df_val["PD_CALIBRATED_adjusted"] * 0.62
-)
-
-df_val["SMI3_L-R_calibrated"] = (
-    df_val["SMI3_LOSS_calibrated"] / premium
-) * 100
-
-
-# 3. D1-D20 decile function
-# D1 = highest loss ratio; D20 = lowest
-
-def create_20_deciles(scores):
-    scores = pd.to_numeric(scores, errors="coerce")
-
-    result = pd.Series(
-        pd.NA, index=scores.index, dtype="string"
+def prepare_ventiles(df):
+    """Extract numeric ventiles, including labels such as 'Ventile 01'."""
+    result = df.copy()
+    result["_ventile_num"] = pd.to_numeric(
+        result[VENTILE_COL]
+        .astype(str)
+        .str.extract(r"(\d+)")[0],
+        errors="coerce"
     )
-
-    valid = scores.notna()
-
-    if valid.any():
-        ranks = scores.loc[valid].rank(
-            method="first", ascending=False
-        )
-
-        groups = pd.qcut(
-            ranks,
-            q=min(20, int(valid.sum())),
-            labels=False
-        ) + 1
-
-        result.loc[valid] = (
-            "D" + groups.astype(str)
-        )
-
     return result
 
+===========
 
-# 4. Original adjusted loss ratio for ranking
-original_lr_adjusted = (
-    lgd * df_val["PD_ORIGINAL_adjusted"] * 0.62
-    / premium
-) * 100
 
-df_val["decile_original"] = create_20_deciles(
-    original_lr_adjusted
+# ==========================================================
+# SMI3_LOSS - HORIZONTAL GROUPED BAR CHART
+# ==========================================================
+
+fig_loss = go.Figure()
+
+for seed, df in dfs.items():
+
+    temp = prepare_ventiles(df)
+
+    temp["SMI3_LOSS"] = pd.to_numeric(
+        temp["SMI3_LOSS"], errors="coerce"
+    )
+
+    ventile_loss = (
+        temp.groupby("_ventile_num")["SMI3_LOSS"]
+        .sum(min_count=1)
+        .reindex(VENTILES)
+    )
+
+    fig_loss.add_trace(
+        go.Bar(
+            name=seed,
+            y=[str(v) for v in VENTILES],
+            x=ventile_loss.tolist(),
+            orientation="h",
+            marker_color=colors[seed],
+            text=[
+                f"{v:,.2f}" if pd.notna(v) else ""
+                for v in ventile_loss
+            ],
+            textposition="outside",
+            textfont=dict(size=12),
+            cliponaxis=False,
+            hovertemplate=(
+                f"<b>{seed}</b><br>"
+                "Ventile: %{y}<br>"
+                "Total SMI3_LOSS: %{x:,.2f}"
+                "<extra></extra>"
+            ),
+        )
+    )
+
+# Dynamic height for more experiments
+chart_height = max(
+    900,
+    len(VENTILES) * len(dfs) * 25
 )
 
-df_val["decile_calibrated"] = create_20_deciles(
-    df_val["SMI3_L-R_calibrated"]
+fig_loss.update_layout(
+    title=dict(
+        text="Random Seed Sensitivity - SMI3_LOSS by Ventile",
+        x=0.5,
+        font=dict(size=22),
+    ),
+
+    barmode="group",
+    height=chart_height,
+    width=1500,
+
+    bargap=0.20,
+    bargroupgap=0.05,
+
+    xaxis=dict(
+        title="Total SMI3_LOSS",
+        tickformat=",.0f",
+        rangemode="tozero",
+    ),
+
+    yaxis=dict(
+        title="Ventile",
+        type="category",
+        autorange="reversed",
+    ),
+
+    legend=dict(
+        orientation="h",
+        x=0.5,
+        xanchor="center",
+        y=1.02,
+        yanchor="bottom",
+    ),
+
+    margin=dict(
+        l=110,
+        r=170,
+        t=130,
+        b=80,
+    ),
+
+    plot_bgcolor="white",
+    paper_bgcolor="white",
+
+    font=dict(size=13),
+
+    uniformtext=dict(
+        minsize=11,
+        mode="show",
+    ),
 )
 
+fig_loss.update_xaxes(showgrid=True, gridcolor="#E5E7EB")
+fig_loss.update_yaxes(showgrid=False)
 
-# 5. Compare with existing production deciles
-display_cols = [
-    "PD_ORIGINAL_adjusted",
-    "PD_CALIBRATED_adjusted",
-    "SMI3_LOSS_calibrated",
-    "SMI3_L-R_calibrated",
-    "decile_original",
-    "decile_calibrated"
-]
-
-if "rr_model_decile" in df_val.columns:
-    display_cols.insert(4, "rr_model_decile")
-
-display(df_val[display_cols].head(20))
+fig_loss.show()
 
 
-# 6. Save validation file
-df_val.to_csv(
-    "df_val_calibrated.csv",
-    index=False
+=========
+
+
+# ==========================================================
+# SMI3_LR - HORIZONTAL GROUPED BAR CHART
+# ==========================================================
+
+fig_lr = go.Figure()
+
+for seed, df in dfs.items():
+
+    temp = prepare_ventiles(df)
+
+    temp["SMI3_LR"] = pd.to_numeric(
+        temp["SMI3_LR"], errors="coerce"
+    )
+
+    ventile_lr = (
+        temp.groupby("_ventile_num")["SMI3_LR"]
+        .mean()
+        .reindex(VENTILES)
+        * 100
+    )
+
+    fig_lr.add_trace(
+        go.Bar(
+            name=seed,
+            y=[str(v) for v in VENTILES],
+            x=ventile_lr.tolist(),
+            orientation="h",
+            marker_color=colors[seed],
+            text=[
+                f"{v:.2f}%" if pd.notna(v) else ""
+                for v in ventile_lr
+            ],
+            textposition="outside",
+            textfont=dict(size=12),
+            cliponaxis=False,
+            hovertemplate=(
+                f"<b>{seed}</b><br>"
+                "Ventile: %{y}<br>"
+                "Average SMI3_LR: %{x:.2f}%"
+                "<extra></extra>"
+            ),
+        )
+    )
+
+# Dynamic height for more experiments
+chart_height = max(
+    900,
+    len(VENTILES) * len(dfs) * 25
 )
 
-print("Validation calibrated columns saved.")
+fig_lr.update_layout(
+    title=dict(
+        text="Random Seed Sensitivity - Loss Ratio by Ventile",
+        x=0.5,
+        font=dict(size=22),
+    ),
+
+    barmode="group",
+    height=chart_height,
+    width=1500,
+
+    bargap=0.20,
+    bargroupgap=0.05,
+
+    xaxis=dict(
+        title="Average SMI3_LR (%)",
+        ticksuffix="%",
+        rangemode="tozero",
+    ),
+
+    yaxis=dict(
+        title="Ventile",
+        type="category",
+        autorange="reversed",
+    ),
+
+    legend=dict(
+        orientation="h",
+        x=0.5,
+        xanchor="center",
+        y=1.02,
+        yanchor="bottom",
+    ),
+
+    margin=dict(
+        l=110,
+        r=170,
+        t=130,
+        b=80,
+    ),
+
+    plot_bgcolor="white",
+    paper_bgcolor="white",
+
+    font=dict(size=13),
+
+    uniformtext=dict(
+        minsize=11,
+        mode="show",
+    ),
+)
+
+fig_lr.update_xaxes(showgrid=True, gridcolor="#E5E7EB")
+fig_lr.update_yaxes(showgrid=False)
+
+fig_lr.show()
+
+========
+
+%pip install -U kaleido
+
+=======
+
+import plotly.io as pio
+
+pio.get_chrome()
+
+=======
+
+fig_loss.write_image(
+    "SMI3_LOSS_high_res.pdf",
+    format="pdf",
+    width=1500,
+    height=3500,
+    scale=2
+)
+
+fig_loss.show()
+
+=======
+
+fig_lr.write_image(
+    "SMI3_LR_high_res.pdf",
+    format="pdf",
+    width=1500,
+    height=3500,
+    scale=2
+)
+
+fig_lr.show()
