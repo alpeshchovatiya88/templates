@@ -292,3 +292,479 @@ fig_lr.write_image(
 )
 
 fig_lr.show()
+
+
+
+===========
+
+
+# ============================================================
+# 4. DEFINE TARGET AND FEATURES
+# ============================================================
+
+import numpy as np
+import pandas as pd
+import joblib
+import matplotlib.pyplot as plt
+
+from IPython.display import display
+
+# Replace with your actual target column
+target_col = "BAD_FLAG"
+
+# Get original pipeline input features
+feature_cols = list(xgb_model.feature_names_in_)
+
+print("Number of features:", len(feature_cols))
+
+# Check required columns
+for name, df in [
+    ("Train", df_train),
+    ("Test", df_test),
+    ("Validation", df_val)
+]:
+    missing_cols = [
+        c for c in feature_cols + [target_col]
+        if c not in df.columns
+    ]
+
+    if missing_cols:
+        raise ValueError(
+            f"{name} missing columns: {missing_cols}"
+        )
+
+    print(f"\n{name}")
+    print("Total rows:", len(df))
+    print("Missing targets:", df[target_col].isna().sum())
+    print("Target distribution:")
+    print(df[target_col].value_counts(dropna=False))
+
+    # Reject unexpected nonmissing target values
+    invalid = (
+        df[target_col].notna()
+        & ~df[target_col].isin([0, 1])
+    )
+
+    if invalid.any():
+        raise ValueError(
+            f"{name} contains nonbinary target values."
+        )
+
+
+# ============================================================
+# 5. PREPARE DATA WITH OBSERVED TARGETS
+# ============================================================
+
+# Only rows with observed 0/1 targets
+df_train_eval = df_train[
+    df_train[target_col].isin([0, 1])
+].copy()
+
+df_test_eval = df_test[
+    df_test[target_col].isin([0, 1])
+].copy()
+
+df_val_eval = df_val[
+    df_val[target_col].isin([0, 1])
+].copy()
+
+X_train = df_train_eval[feature_cols]
+y_train = df_train_eval[target_col].astype(int)
+
+X_test = df_test_eval[feature_cols]
+y_test = df_test_eval[target_col].astype(int)
+
+X_val = df_val_eval[feature_cols]
+y_val = df_val_eval[target_col].astype(int)
+
+print("\nObserved-target sample sizes:")
+print("Train:", len(X_train))
+print("Test:", len(X_test))
+print("Validation:", len(X_val))
+
+if y_test.nunique() != 2:
+    raise ValueError(
+        "Test calibration data must contain both classes."
+    )
+
+
+# ============================================================
+# 6. GET ORIGINAL XGBOOST PROBABILITIES
+# ============================================================
+
+# Predict ALL rows, including missing-target rows
+
+for df in [df_train, df_test, df_val]:
+
+    X = df[feature_cols]
+
+    df["PD_ORIGINAL"] = (
+        xgb_model.predict_proba(X)[:, 1]
+    )
+
+print("\nOriginal probabilities generated.")
+
+
+# ============================================================
+# 7. FIT ISOTONIC CALIBRATION
+# ============================================================
+
+from sklearn.calibration import CalibratedClassifierCV
+from sklearn.frozen import FrozenEstimator
+
+# Use observed-target rows from TEST (2021-2023)
+# XGBoost model remains frozen.
+#
+# ORIGINAL ISOTONIC CALIBRATION - UNCHANGED
+
+calibrated_clf = CalibratedClassifierCV(
+    estimator=FrozenEstimator(xgb_model),
+    method="isotonic"
+)
+
+calibrated_clf.fit(X_test, y_test)
+
+print("\nIsotonic calibration completed.")
+
+
+# ============================================================
+# 8. GENERATE CALIBRATED PROBABILITIES
+# ============================================================
+
+# Apply to ALL rows, including missing targets
+#
+# ORIGINAL CALIBRATION CODE - UNCHANGED
+
+for df in [df_train, df_test, df_val]:
+
+    X = df[feature_cols]
+
+    df["PD_CALIBRATED"] = (
+        calibrated_clf.predict_proba(X)[:, 1]
+    )
+
+print("\nCalibrated probabilities generated.")
+
+
+# ============================================================
+# 8A. VALIDATION ONLY:
+#     CREATE ADDITIONAL COLUMNS FOR CSV
+# ============================================================
+
+# This section does not change PD_ORIGINAL,
+# PD_CALIBRATED, the fitted isotonic model,
+# performance tables or calibration curves.
+#
+# No display or print output is generated here.
+
+odds_factor = 34.05
+
+
+# ------------------------------------------------------------
+# 8A.1 ADJUST ORIGINAL AND CALIBRATED PD
+# ------------------------------------------------------------
+
+def adjust_pd(p):
+
+    p = pd.to_numeric(
+        p,
+        errors="coerce"
+    )
+
+    return p / (
+        p + odds_factor * (1 - p)
+    )
+
+
+df_val["PD_ORIGINAL_adjusted"] = adjust_pd(
+    df_val["PD_ORIGINAL"]
+)
+
+df_val["PD_CALIBRATED_adjusted"] = adjust_pd(
+    df_val["PD_CALIBRATED"]
+)
+
+
+# ------------------------------------------------------------
+# 8A.2 CALCULATE CALIBRATED LOSS
+# ------------------------------------------------------------
+
+# SMI3_LOSS_calibrated =
+# lgd * PD_CALIBRATED_adjusted * 0.62
+
+lgd = pd.to_numeric(
+    df_val["lgd"],
+    errors="coerce"
+)
+
+premium = pd.to_numeric(
+    df_val["premium"],
+    errors="coerce"
+).replace(0, np.nan)
+
+
+df_val["SMI3_LOSS_calibrated"] = (
+    lgd
+    * df_val["PD_CALIBRATED_adjusted"]
+    * 0.62
+)
+
+
+# ------------------------------------------------------------
+# 8A.3 CALCULATE CALIBRATED LOSS RATIO
+# ------------------------------------------------------------
+
+# SMI3_L-R_calibrated =
+# (SMI3_LOSS_calibrated / premium) * 100
+
+df_val["SMI3_L-R_calibrated"] = (
+    df_val["SMI3_LOSS_calibrated"]
+    / premium
+) * 100
+
+
+# ------------------------------------------------------------
+# 8A.4 DEFINE D1-D20 RANKING FUNCTION
+# ------------------------------------------------------------
+
+# D1 = highest loss ratio
+# D20 = lowest loss ratio
+#
+# Approximately equal-sized groups.
+# Ties are broken by row order.
+
+def create_20_deciles(scores):
+
+    scores = pd.to_numeric(
+        scores,
+        errors="coerce"
+    )
+
+    result = pd.Series(
+        pd.NA,
+        index=scores.index,
+        dtype="string"
+    )
+
+    valid = scores.notna()
+
+    if valid.any():
+
+        ranks = scores.loc[valid].rank(
+            method="first",
+            ascending=False
+        )
+
+        groups = pd.qcut(
+            ranks,
+            q=min(20, int(valid.sum())),
+            labels=False
+        ) + 1
+
+        result.loc[valid] = (
+            "D" + groups.astype(str)
+        )
+
+    return result
+
+
+# ------------------------------------------------------------
+# 8A.5 CALCULATE ORIGINAL ADJUSTED LOSS RATIO
+#      FOR ORIGINAL DECILE RANKING
+# ------------------------------------------------------------
+
+# Does NOT overwrite existing SMI3_LR.
+
+original_lr_adjusted = (
+    lgd
+    * df_val["PD_ORIGINAL_adjusted"]
+    * 0.62
+    / premium
+) * 100
+
+
+# ------------------------------------------------------------
+# 8A.6 CREATE ORIGINAL AND CALIBRATED DECILES
+# ------------------------------------------------------------
+
+df_val["decile_original"] = (
+    create_20_deciles(
+        original_lr_adjusted
+    )
+)
+
+df_val["decile_calibrated"] = (
+    create_20_deciles(
+        df_val["SMI3_L-R_calibrated"]
+    )
+)
+
+
+# ============================================================
+# 9. EVALUATE CALIBRATION PERFORMANCE
+# ============================================================
+
+from sklearn.metrics import (
+    roc_auc_score,
+    brier_score_loss,
+    log_loss
+)
+
+
+def evaluate(df, name):
+
+    # Exclude missing target rows from evaluation
+    data = df[
+        df[target_col].isin([0, 1])
+    ].copy()
+
+    if data.empty:
+        print(f"{name}: No observed targets.")
+        return None
+
+    y = data[target_col].astype(int)
+
+    original = data["PD_ORIGINAL"]
+    calibrated = data["PD_CALIBRATED"]
+
+    results = {
+        "Dataset": name,
+        "N_Observed": len(data),
+        "Actual_Bad_Rate": y.mean(),
+        "Original_Mean_PD": original.mean(),
+        "Calibrated_Mean_PD": calibrated.mean(),
+        "Original_Brier": brier_score_loss(y, original),
+        "Calibrated_Brier": brier_score_loss(y, calibrated),
+        "Original_LogLoss": log_loss(y, original),
+        "Calibrated_LogLoss": log_loss(y, calibrated)
+    }
+
+    # AUC requires both classes
+    if y.nunique() == 2:
+
+        results["Original_AUC"] = roc_auc_score(
+            y, original
+        )
+
+        results["Calibrated_AUC"] = roc_auc_score(
+            y, calibrated
+        )
+
+    else:
+
+        results["Original_AUC"] = np.nan
+        results["Calibrated_AUC"] = np.nan
+
+    return results
+
+
+results_list = [
+    evaluate(df_train, "TRAIN_2009_2015"),
+    evaluate(df_test, "TEST_2021_2023"),
+    evaluate(df_val, "VAL_202510_202605")
+]
+
+results = pd.DataFrame([
+    r for r in results_list if r is not None
+])
+
+print("\nCALIBRATION PERFORMANCE RESULTS")
+print(results.to_string(index=False))
+
+
+# ============================================================
+# 10. PLOT CALIBRATION CURVES
+# ============================================================
+
+from sklearn.calibration import calibration_curve
+import matplotlib.pyplot as plt
+
+
+def plot_calibration(df, name):
+
+    # Use observed targets only
+    data = df[
+        df[target_col].isin([0, 1])
+    ].copy()
+
+    if data.empty or data[target_col].nunique() < 2:
+
+        print(
+            f"{name}: Insufficient target data."
+        )
+        return
+
+    y = data[target_col].astype(int)
+
+    plt.figure(figsize=(8, 6))
+
+    for col, label in [
+        ("PD_ORIGINAL", "Original XGBoost"),
+        ("PD_CALIBRATED", "Calibrated XGBoost")
+    ]:
+
+        prob_true, prob_pred = calibration_curve(
+            y,
+            data[col],
+            n_bins=10,
+            strategy="quantile"
+        )
+
+        plt.plot(
+            prob_pred,
+            prob_true,
+            marker="o",
+            label=label
+        )
+
+    plt.plot(
+        [0, 1],
+        [0, 1],
+        "k--",
+        label="Perfect Calibration"
+    )
+
+    plt.xlabel("Mean Predicted Probability")
+    plt.ylabel("Observed Bad Rate")
+    plt.title(name + " Calibration Curve")
+    plt.legend()
+    plt.grid(True)
+    plt.show()
+
+
+plot_calibration(df_train, "TRAIN")
+plot_calibration(df_test, "TEST")
+plot_calibration(df_val, "VALIDATION")
+
+
+# ============================================================
+# 11. SAVE CALIBRATED FILES AND MODEL
+# ============================================================
+
+df_train.to_csv(
+    "df_train_calibrated.csv",
+    index=False
+)
+
+df_test.to_csv(
+    "df_test_calibrated.csv",
+    index=False
+)
+
+df_val.to_csv(
+    "df_val_calibrated.csv",
+    index=False
+)
+
+joblib.dump(
+    calibrated_clf,
+    "xgb_isotonic_calibrated.joblib"
+)
+
+results.to_csv(
+    "calibration_performance.csv",
+    index=False
+)
+
+print("\nAll calibrated files saved successfully.")
+
