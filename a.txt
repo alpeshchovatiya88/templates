@@ -3,12 +3,10 @@ import pandas as pd
 import numpy as np
 
 from openpyxl import Workbook
-from openpyxl.styles import (
-    Font, PatternFill, Alignment, Border, Side
-)
+from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 
 # =====================================================
-# 1. EXPERIMENTS - EDIT THIS DICTIONARY
+# 1. EXPERIMENTS - CHANGE ONLY THIS DICTIONARY
 # =====================================================
 
 dfs = {
@@ -17,63 +15,27 @@ dfs = {
     "HPI_+5": df_hpi_5,
 }
 
-# Optional descriptions
-descriptions = {
-    # "HPI_+4": "Description",
-    # "HPI_+3": "Description",
-}
-
 DECILE_COL = "rr_model_decile"
 LOSS_COL = "SMI3_LOSS"
 LR_COL = "SMI3_LR"
 
-LR_SCALE = 1  # Set to 100 if LR is stored as decimal fractions
+# Set to 100 if LR values are stored as decimals
+# Set to 1 if LR values are already percentages
+LR_SCALE = 1
 
 OUTPUT_FILE = "seed_experiments.xlsx"
 
-# =====================================================
-# 2. WORKBOOK - SINGLE SHEET
-# =====================================================
-
-wb = Workbook()
-ws = wb.active
-ws.title = "Seed Experiments"
-
-yellow = PatternFill("solid", fgColor="FFFF00")
-light_blue = PatternFill("solid", fgColor="DDEBF7")
-
-thin = Side(style="thin", color="B7B7B7")
-table_border = Border(
-    left=thin,
-    right=thin,
-    top=thin,
-    bottom=thin
-)
-
-# IMPORTANT:
-# No column_dimensions.width changes.
-# No row_dimensions.height changes.
+# Optional descriptions
+descriptions = {
+    # "HPI_+4": "Experiment description",
+}
 
 # =====================================================
-# 3. HELPER FOR MIN/MAX
+# 2. CALCULATE TOTAL LOSS AND AVERAGE LR
+#    FOR EACH EXPERIMENT
 # =====================================================
 
-def get_range(series):
-    values = pd.to_numeric(series, errors="coerce")
-    values = values.replace([np.inf, -np.inf], np.nan)
-    values = values.dropna()
-
-    if values.empty:
-        return None, None
-
-    return float(values.min()), float(values.max())
-
-
-# =====================================================
-# 4. BUILD EXPERIMENT TABLES
-# =====================================================
-
-row = 1
+results = []
 
 for experiment, df in dfs.items():
 
@@ -96,46 +58,115 @@ for experiment, df in dfs.items():
 
     temp[LOSS_COL] = pd.to_numeric(
         temp[LOSS_COL], errors="coerce"
-    )
+    ).replace([np.inf, -np.inf], np.nan)
 
-    temp[LR_COL] = (
-        pd.to_numeric(temp[LR_COL], errors="coerce")
-        * LR_SCALE
-    )
+    temp[LR_COL] = pd.to_numeric(
+        temp[LR_COL], errors="coerce"
+    ).replace([np.inf, -np.inf], np.nan)
 
     decile1 = temp[temp["_decile"] == 1]
 
-    overall_loss_min, overall_loss_max = get_range(
-        temp[LOSS_COL]
-    )
-    overall_lr_min, overall_lr_max = get_range(
-        temp[LR_COL]
+    results.append({
+        "Experiment": experiment,
+
+        "Overall Loss": temp[LOSS_COL].sum(min_count=1),
+        "Overall LR": temp[LR_COL].mean() * LR_SCALE,
+
+        "Decile 1 Loss": decile1[LOSS_COL].sum(min_count=1),
+        "Decile 1 LR": decile1[LR_COL].mean() * LR_SCALE,
+    })
+
+summary = pd.DataFrame(results)
+
+if summary.empty:
+    raise ValueError("The dfs dictionary is empty.")
+
+# =====================================================
+# 3. MIN AND MAX ACROSS ALL EXPERIMENTS
+# =====================================================
+
+ranges = {
+    "Overall": [
+        summary["Overall Loss"].min(),
+        summary["Overall Loss"].max(),
+        summary["Overall LR"].min(),
+        summary["Overall LR"].max()
+    ],
+
+    "Decile 1": [
+        summary["Decile 1 Loss"].min(),
+        summary["Decile 1 Loss"].max(),
+        summary["Decile 1 LR"].min(),
+        summary["Decile 1 LR"].max()
+    ]
+}
+
+# Show calculated results in notebook
+print("\nIndividual experiment results:")
+print(summary.to_string(index=False))
+
+print("\nMin/max across experiments:")
+for label, values in ranges.items():
+    print(
+        f"{label}: "
+        f"Loss ${values[0]:,.0f} - ${values[1]:,.0f}; "
+        f"LR {values[2]:.2f} - {values[3]:.2f}"
     )
 
-    decile_loss_min, decile_loss_max = get_range(
-        decile1[LOSS_COL]
-    )
-    decile_lr_min, decile_lr_max = get_range(
-        decile1[LR_COL]
-    )
+# =====================================================
+# 4. CREATE EXCEL - SINGLE SHEET
+# =====================================================
+
+wb = Workbook()
+ws = wb.active
+ws.title = "Seed Experiments"
+
+yellow = PatternFill("solid", fgColor="FFFF00")
+blue = PatternFill("solid", fgColor="DDEBF7")
+
+thin = Side(style="thin", color="B7B7B7")
+border = Border(
+    left=thin,
+    right=thin,
+    top=thin,
+    bottom=thin
+)
+
+# No row-height or column-width changes
+
+# =====================================================
+# 5. START AT ROW 4
+#    A1, A2, A3 REMAIN EMPTY
+# =====================================================
+
+row = 4
+
+for experiment in dfs:
 
     # -----------------------------------------
-    # Row 1: Yellow experiment name
+    # Experiment name - Yellow
     # -----------------------------------------
 
-    name_cell = ws.cell(row, 1, str(experiment))
-    name_cell.fill = yellow
-    name_cell.font = Font(bold=True, size=12)
-    name_cell.alignment = Alignment(vertical="center")
+    cell = ws.cell(row, 1, str(experiment))
+    cell.fill = yellow
+    cell.font = Font(bold=True, size=12)
 
-    # Merged headers
+    # -----------------------------------------
+    # Group headers
+    # -----------------------------------------
+
     ws.merge_cells(
-        start_row=row, start_column=2,
-        end_row=row, end_column=3
+        start_row=row,
+        start_column=2,
+        end_row=row,
+        end_column=3
     )
+
     ws.merge_cells(
-        start_row=row, start_column=4,
-        end_row=row, end_column=5
+        start_row=row,
+        start_column=4,
+        end_row=row,
+        end_column=5
     )
 
     for col, text in [
@@ -150,7 +181,7 @@ for experiment, df in dfs.items():
         )
 
     # -----------------------------------------
-    # Row 2: Blue description and min/max
+    # Description - Blue
     # -----------------------------------------
 
     desc = ws.cell(
@@ -158,16 +189,22 @@ for experiment, df in dfs.items():
         1,
         descriptions.get(experiment, "")
     )
-    desc.fill = light_blue
+
+    desc.fill = blue
     desc.alignment = Alignment(
         vertical="center",
         wrap_text=False
     )
 
-    for col, text in enumerate(
-        ["min", "max", "min", "max"], start=2
+    # -----------------------------------------
+    # Min/max headings
+    # -----------------------------------------
+
+    for col, heading in zip(
+        [2, 3, 4, 5],
+        ["min", "max", "min", "max"]
     ):
-        cell = ws.cell(row + 1, col, text)
+        cell = ws.cell(row + 1, col, heading)
         cell.font = Font(bold=True, size=12)
         cell.alignment = Alignment(
             horizontal="center",
@@ -175,40 +212,37 @@ for experiment, df in dfs.items():
         )
 
     # -----------------------------------------
-    # Rows 3-4: Values
+    # Overall and Decile 1
     # -----------------------------------------
 
-    data_rows = [
-        [
-            "Overall",
-            overall_loss_min,
-            overall_loss_max,
-            overall_lr_min,
-            overall_lr_max
-        ],
-        [
-            "Decile 1",
-            decile_loss_min,
-            decile_loss_max,
-            decile_lr_min,
-            decile_lr_max
-        ]
-    ]
-
-    for r, values in enumerate(
-        data_rows, start=row + 2
+    for offset, label in enumerate(
+        ["Overall", "Decile 1"],
+        start=2
     ):
-        for col, value in enumerate(values, start=1):
+
+        r = row + offset
+
+        ws.cell(r, 1, label)
+
+        for col, value in enumerate(
+            ranges[label],
+            start=2
+        ):
+
+            if pd.isna(value):
+                value = None
+            elif isinstance(value, (np.integer, np.floating)):
+                value = value.item()
 
             cell = ws.cell(r, col, value)
 
-            if col in (2, 3):
+            if col in [2, 3]:
                 cell.number_format = '$#,##0'
-            elif col in (4, 5):
+            else:
                 cell.number_format = '0.00'
 
             cell.alignment = Alignment(
-                horizontal="left" if col == 1 else "right",
+                horizontal="right",
                 vertical="center"
             )
 
@@ -218,15 +252,15 @@ for experiment, df in dfs.items():
 
     for r in range(row, row + 4):
         for col in range(1, 6):
-            ws.cell(r, col).border = table_border
+            ws.cell(r, col).border = border
 
     # Two blank rows between experiments
     row += 6
 
 # =====================================================
-# 5. SAVE
+# 6. SAVE EXCEL
 # =====================================================
 
 wb.save(OUTPUT_FILE)
 
-print(f"Saved: {OUTPUT_FILE}")
+print(f"\nExcel saved: {OUTPUT_FILE}")
