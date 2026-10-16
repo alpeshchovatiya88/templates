@@ -1,8 +1,118 @@
+import pandas as pd
+import plotly.graph_objects as go
+
+def create_swapset(df1, df2, id_col, decile_col="rr_model_decile",
+                   region_col="ECON_REGION", name1="HPI_+4",
+                   name2="HPI_+3", filename="swapset.html"):
+
+    a = df1[[id_col, decile_col, region_col]].rename(columns={decile_col:"old"})
+    b = df2[[id_col, decile_col]].rename(columns={decile_col:"new"})
+    df = a.merge(b, on=id_col, how="inner", validate="one_to_one")
+
+    for c in ["old", "new"]:
+        df[c] = pd.to_numeric(
+            df[c].astype(str).str.extract(r"(\d+)")[0], errors="coerce"
+        )
+
+    df = df[df.old.between(1,20) & df.new.between(1,20)]
+    regions = ["ALL"] + sorted(df[region_col].dropna().unique(), key=str)
+    deciles = list(range(1,21))
+    fig = go.Figure()
+
+    for i, region in enumerate(regions):
+
+        d = df if region == "ALL" else df[df[region_col] == region]
+        t = pd.crosstab(d.old, d.new).reindex(
+            index=deciles, columns=deciles, fill_value=0
+        )
+        t["All"] = t.sum(axis=1)
+        t.loc["All"] = t.sum()
+
+        total = t.loc["All", "All"]
+        values, colors = [], []
+
+        for col in t.columns:
+            vals, cols = [], []
+
+            for row in t.index:
+                n = int(t.loc[row, col])
+                base = total if row == "All" else t.loc[row, "All"]
+                pct = 100 * n / base if base else 0
+
+                vals.append(f"{n:,}<br>({pct:.2f}%)")
+                cols.append(
+                    "#E6EAF0" if "All" in (row, col) else
+                    "#FFFFFF" if n == 0 else
+                    "#D5F0DB" if row == col else
+                    "#FFE4B5" if abs(row-col) <= 2 else
+                    "#F8C4C4"
+                )
+
+            values.append(vals)
+            colors.append(cols)
+
+        fig.add_trace(go.Table(
+            header=dict(
+                values=[f"<b>{name1} ↓<br>{name2} →</b>"] + list(t.columns),
+                fill_color="#4472C4",
+                font=dict(color="white", size=12),
+                align="center", height=55
+            ),
+            cells=dict(
+                values=[list(t.index)] + values,
+                fill_color=[["#E6EAF0"] * len(t)] + colors,
+                font=dict(color="#202020", size=11),
+                align="center", height=42
+            ),
+            columnwidth=[120] + [115] * 21,
+            visible=(i == 0)
+        ))
+
+    buttons = [
+        dict(
+            label=str(r),
+            method="update",
+            args=[
+                {"visible": [j == i for j in range(len(regions))]},
+                {"title.text": f"{name1} vs {name2} - {r}"}
+            ]
+        )
+        for i, r in enumerate(regions)
+    ]
+
+    fig.update_layout(
+        title=dict(text=f"{name1} vs {name2} - ALL", x=0.5, y=0.98),
+        width=2700,
+        height=1100,
+        margin=dict(l=20, r=20, t=150, b=40),
+        updatemenus=[dict(
+            buttons=buttons, direction="down",
+            showactive=True, x=0.01, y=1.08
+        )],
+        annotations=[dict(
+            text=f"{name1} ↓ Rows | {name2} → Columns | "
+                 "Green: Same Decile | Orange: 1-2 Movement | "
+                 "Red: 3+ Movement | White: Zero | "
+                 f"Percentage: {name1} Row Total",
+            x=0.5, y=1.02,
+            xref="paper", yref="paper",
+            showarrow=False, font=dict(size=12)
+        )]
+    )
+
+    fig.write_html(filename, include_plotlyjs=True)
+    fig.show()
+    return fig
+
+======
+
 fig = create_swapset(
     df1=df_seed42,
     df2=df_seed101,
     id_col="CUSTOMER_ID",
     decile_col="rr_model_decile",
     region_col="ECON_REGION",
+    name1="HPI_+4",
+    name2="HPI_+3",
     filename="swapset_by_region.html"
 )
