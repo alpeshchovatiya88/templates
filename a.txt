@@ -1,15 +1,30 @@
-Summary: [Bug Fix] Preserve XGBoost Random State for Seed Experiments
+In XGBTrainer.__init__(), 
 
-Description:
+replace:
 
-In Training/train.py, xgb_params.random_state is overwritten by the top-level random_state during initialization, pipeline construction and parameter selection.
+self.xgb_params["random_state"] = self.random_state
 
-Update the implementation to preserve the configured XGBoost seed while keeping CV and search-sampling seeds fixed, enabling experiments that vary only the model seed.
+with:
 
-Acceptance Criteria:
+self.model_random_state = int(
+    self.xgb_params.get("random_state", self.random_state)
+)
+self.xgb_params["random_state"] = self.model_random_state
 
-[] xgb_params.random_state is preserved throughout training and final refitting.
-[] The top-level seed remains responsible for CV splits and search sampling.
-[] Changing only the XGBoost seed is verified in the fitted estimator’s parameters.
-[] Both effective seeds are recorded in logs, metadata and MLflow.
-[] Repeated runs with identical seeds and inputs are checked for reproducibility.
+logger.info(
+    "CV/search seed=%s | XGBoost seed=%s",
+    self.random_state,
+    self.model_random_state,
+)
+
+=================
+
+In _make_pipeline() & run_grid_search()
+
+replace:
+
+model_params["random_state"] = self.random_state
+
+with:
+
+model_params["random_state"] = self.model_random_state
