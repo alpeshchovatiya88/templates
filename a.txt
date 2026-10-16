@@ -1,106 +1,32 @@
 import pandas as pd
-import plotly.graph_objects as go
 
-def create_swapset(df1, df2, id_col, decile_col="rr_model_decile",
-                   region_col="ECON_REGION", name1="HPI_+4",
-                   name2="HPI_+3", filename="swapset.html"):
+def movement_summary(df1, df2, id_col, decile_col="rr_model_decile"):
 
-    a = df1[[id_col, decile_col, region_col]].rename(columns={decile_col:"old"})
-    b = df2[[id_col, decile_col]].rename(columns={decile_col:"new"})
-    df = a.merge(b, on=id_col, how="inner", validate="one_to_one")
+    a = df1[[id_col, decile_col]].rename(columns={decile_col:"base"})
+    b = df2[[id_col, decile_col]].rename(columns={decile_col:"compare"})
+    temp = a.merge(b, on=id_col, validate="one_to_one")
 
-    for c in ["old", "new"]:
-        df[c] = pd.to_numeric(
-            df[c].astype(str).str.extract(r"(\d+)")[0], errors="coerce"
+    for col in ["base", "compare"]:
+        temp[col] = pd.to_numeric(
+            temp[col].astype(str).str.extract(r"(\d+)")[0],
+            errors="coerce"
         )
 
-    df = df[df.old.between(1, 20) & df.new.between(1, 20)]
-    regions = ["ALL"] + sorted(df[region_col].dropna().unique(), key=str)
-    deciles = list(range(1, 21))
-    fig = go.Figure()
+    temp = temp.dropna()
+    temp = temp[temp.base.between(1,20) & temp.compare.between(1,20)]
+    temp["movement"] = temp["compare"] - temp["base"]
+    temp["deciles_moved"] = temp["movement"].abs().astype(int)
 
-    for i, region in enumerate(regions):
-        d = df if region == "ALL" else df[df[region_col] == region]
+    summary = pd.DataFrame({
+        "Lower": temp[temp.movement < 0].groupby("deciles_moved").size(),
+        "Higher": temp[temp.movement > 0].groupby("deciles_moved").size(),
+        "No Movement": temp[temp.movement == 0].groupby("deciles_moved").size()
+    }).reindex(range(20), fill_value=0).fillna(0).astype(int)
 
-        t = pd.crosstab(d.old, d.new).reindex(
-            index=deciles, columns=deciles, fill_value=0
-        )
-        t["All"] = t.sum(axis=1)
-        t.loc["All"] = t.sum()
+    summary["Total Files"] = summary.sum(axis=1)
+    summary["Percentage"] = (
+        summary["Total Files"] / len(temp) * 100
+    ).round(2) if len(temp) else 0
 
-        total = t.loc["All", "All"]
-        values, colors = [], []
-
-        for col in t.columns:
-            vals, cols = [], []
-
-            for row in t.index:
-                n = int(t.loc[row, col])
-                base = total if row == "All" else t.loc[row, "All"]
-                pct = 100 * n / base if base else 0
-
-                vals.append(f"{n:,}<br>({pct:.2f}%)")
-                cols.append(
-                    "#E6EAF0" if "All" in (row, col) else
-                    "#FFFFFF" if n == 0 else
-                    "#D5F0DB" if row == col else
-                    "#FFE4B5" if abs(row-col) <= 2 else
-                    "#F8C4C4"
-                )
-
-            values.append(vals)
-            colors.append(cols)
-
-        fig.add_trace(go.Table(
-            header=dict(
-                values=[f"<b>{name1} ↓<br>{name2} →</b>"] + list(t.columns),
-                fill_color="#4472C4",
-                font=dict(color="white", size=11),
-                align="center", height=55
-            ),
-            cells=dict(
-                values=[list(t.index)] + values,
-                fill_color=[["#E6EAF0"] * len(t)] + colors,
-                font=dict(color="#202020", size=10),
-                align="center", height=42
-            ),
-            columnwidth=[1] * 22,
-            visible=(i == 0)
-        ))
-
-    buttons = [
-        dict(
-            label=str(r),
-            method="update",
-            args=[
-                {"visible": [j == i for j in range(len(regions))]},
-                {"title.text": f"{name1} vs {name2} - {r}"}
-            ]
-        )
-        for i, r in enumerate(regions)
-    ]
-
-    fig.update_layout(
-        autosize=True,
-        height=1050,
-        margin=dict(l=0, r=0, t=65, b=0),
-        title=None,
-        updatemenus=[dict(
-            buttons=buttons, direction="down",
-            showactive=True, x=0, y=1.12,
-            xanchor="left"
-        )],
-        annotations=[dict(
-            text=f"{name1} ↓ Rows | {name2} → Columns | "
-                 "Green: Same Decile | Orange: 1-2 Movement | "
-                 "Red: 3+ Movement | White: Zero | "
-                 f"Percentage: {name1} Row Total",
-            x=0.5, y=1.04,
-            xref="paper", yref="paper",
-            showarrow=False, font=dict(size=11)
-        )]
-    )
-
-    fig.write_html(filename, include_plotlyjs=True)
-    fig.show(config={"responsive": True})
-    return fig
+    display(summary)
+    return summary
