@@ -1,6 +1,181 @@
-summary = movement_summary(
-    df_seed42,
-    df_seed101,
-    id_col="CUSTOMER_ID",
-    decile_col="rr_model_decile"
+
+import pandas as pd
+import numpy as np
+from artifact_tool import Workbook, SpreadsheetFile
+
+# ==========================================
+# 1. EXPERIMENT DATAFRAMES
+# ==========================================
+
+dfs = {
+    "RS42": df_rs42,
+    "RS532": df_rs532,
+    "RS3458": df_rs3458,
+    "RS499": df_rs499,
+    "RS345": df_rs345,
+    "RS1999": df_rs1999,
+    "RS2324": df_rs2324,
+}
+
+DECILE_COL = "rr_model_decile"
+LR_SCALE = 100
+
+# ==========================================
+# 2. CALCULATE METRICS FOR EACH SEED
+# ==========================================
+
+results = []
+
+for seed, df in dfs.items():
+
+    temp = df.copy()
+
+    temp["_decile"] = pd.to_numeric(
+        temp[DECILE_COL].astype(str).str.extract(r"(\d+)")[0],
+        errors="coerce"
+    )
+
+    temp["SMI3_LOSS"] = pd.to_numeric(
+        temp["SMI3_LOSS"], errors="coerce"
+    )
+
+    temp["SMI3_LR"] = pd.to_numeric(
+        temp["SMI3_LR"], errors="coerce"
+    )
+
+    decile1 = temp[temp["_decile"] == 1]
+
+    results.append({
+        "Seed": seed,
+        "Overall Loss": temp["SMI3_LOSS"].sum(min_count=1),
+        "Overall LR": temp["SMI3_LR"].mean() * LR_SCALE,
+        "Decile 1 Loss": decile1["SMI3_LOSS"].sum(min_count=1),
+        "Decile 1 LR": decile1["SMI3_LR"].mean() * LR_SCALE,
+    })
+
+summary = pd.DataFrame(results)
+
+# ==========================================
+# 3. CREATE EXCEL WORKBOOK
+# ==========================================
+
+wb = Workbook.create()
+ws = wb.worksheets.add("Seed Experiments")
+
+ws.get_range("A1").values = [["Seed Experiments"]]
+ws.get_range("A1").format.font.bold = True
+ws.get_range("A1").format.font.size = 18
+
+# Experiment heading
+ws.get_range("A3").values = [["Seed Sensitivity Analysis"]]
+ws.get_range("A3").format.fill = "#FFF200"
+ws.get_range("A3").format.font.bold = True
+
+ws.get_range("A4").values = [[
+    f"Comparison across {len(dfs)} random seeds"
+]]
+ws.get_range("A4").format.fill = "#D9EEF7"
+
+# Grouped headers
+ws.merge_cells("B3:C3")
+ws.merge_cells("D3:E3")
+
+ws.get_range("B3").values = [["Loss range"]]
+ws.get_range("D3").values = [["Loss ratio range"]]
+
+ws.get_range("A5:E5").values = [[
+    "Metric", "min", "max", "min", "max"
+]]
+
+# ==========================================
+# 4. OVERALL AND DECILE 1
+# ==========================================
+
+def metric_range(column):
+    values = pd.to_numeric(summary[column], errors="coerce")
+    return (
+        float(values.min()) if values.notna().any() else None,
+        float(values.max()) if values.notna().any() else None
+    )
+
+overall_loss_min, overall_loss_max = metric_range("Overall Loss")
+overall_lr_min, overall_lr_max = metric_range("Overall LR")
+
+decile_loss_min, decile_loss_max = metric_range("Decile 1 Loss")
+decile_lr_min, decile_lr_max = metric_range("Decile 1 LR")
+
+ws.get_range("A6:E7").values = [
+    [
+        "Overall",
+        overall_loss_min,
+        overall_loss_max,
+        overall_lr_min,
+        overall_lr_max
+    ],
+    [
+        "Decile 1",
+        decile_loss_min,
+        decile_loss_max,
+        decile_lr_min,
+        decile_lr_max
+    ]
+]
+
+# ==========================================
+# 5. FORMATTING
+# ==========================================
+
+ws.get_range("A3:A4").format.column_width = 42
+ws.get_range("B3:C7").format.column_width = 20
+ws.get_range("D3:E7").format.column_width = 18
+
+ws.get_range("B3:E5").format.font.bold = True
+ws.get_range("B3:E5").format.horizontal_alignment = "center"
+
+ws.get_range("A5:E5").format.fill = "#E9EEF5"
+
+ws.get_range("B6:C7").set_number_format(
+    '$#,##0'
 )
+
+ws.get_range("D6:E7").set_number_format(
+    '0.00'
+)
+
+ws.get_range("A3:E7").format.row_height = 27
+
+# ==========================================
+# 6. ADD SEED-LEVEL DETAILS
+# ==========================================
+
+details = wb.worksheets.add("Seed Details")
+
+columns = list(summary.columns)
+rows = summary.replace({np.nan: None}).values.tolist()
+
+details.get_range_by_indexes(
+    0, 0, 1 + len(rows), len(columns)
+).values = [columns] + rows
+
+details.get_range("A1:F1").format.fill = "#355C7D"
+details.get_range("A1:F1").format.font.color = "#FFFFFF"
+details.get_range("A1:F1").format.font.bold = True
+
+details.get_range("A1:A100").format.column_width = 16
+details.get_range("B1:F100").format.column_width = 21
+
+details.get_range("B2:B100").set_number_format('$#,##0')
+details.get_range("D2:D100").set_number_format('$#,##0')
+details.get_range("C2:C100").set_number_format('0.00')
+details.get_range("E2:E100").set_number_format('0.00')
+
+# ==========================================
+# 7. SAVE EXCEL
+# ==========================================
+
+output_file = "seed_experiments_summary.xlsx"
+
+SpreadsheetFile.export_xlsx(wb).save(output_file)
+
+print("Saved:", output_file)
+print(summary)
