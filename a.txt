@@ -1,69 +1,42 @@
-import pandas as pd
-import plotly.graph_objects as go
+    def _save_feature_importance(self) -> None:
+        model = self.best_model_.named_steps["model"]
 
-def create_swapset(df1, df2, id_col, decile_col="rr_model_decile",
-                   region_col="ECON_REGION", filename="swapset.html"):
+        importance_values = model.get_feature_importance()
 
-    a = df1[[id_col, decile_col, region_col]].rename(columns={decile_col:"old"})
-    b = df2[[id_col, decile_col]].rename(columns={decile_col:"new"})
-    df = a.merge(b, on=id_col, how="inner")
+        if len(importance_values) != len(self.feature_names):
+            raise ValueError(
+                "Feature importance count does not match feature names."
+            )
 
-    for c in ["old", "new"]:
-        df[c] = pd.to_numeric(df[c].astype(str).str.extract(r"(\d+)")[0], errors="coerce")
+        rows = []
+        for feature, value in zip(self.feature_names, importance_values):
+            rows.append({
+                "feature": str(feature),
+                "importance": float(value)
+            })
 
-    df = df[df.old.between(1,20) & df.new.between(1,20)]
-    regions = ["ALL"] + sorted(df[region_col].dropna().unique(), key=str)
-    deciles = list(range(1,21))
-    fig = go.Figure()
+        fi = pd.DataFrame(rows, columns=["feature", "importance"])
 
-    for i, region in enumerate(regions):
-        d = df if region == "ALL" else df[df[region_col] == region]
-        t = pd.crosstab(d.old, d.new).reindex(index=deciles, columns=deciles, fill_value=0)
-        t["All"] = t.sum(axis=1)
-        t.loc["All"] = t.sum()
+        if not fi.empty:
+            fi = fi.sort_values(
+                "importance", ascending=False
+            ).reset_index(drop=True)
 
-        total = t.loc["All","All"]
-        values, colors = [], []
+            total_importance = fi["importance"].sum()
 
-        for col in t.columns:
-            vals, cols = [], []
-            for row in t.index:
-                n = int(t.loc[row,col])
-                base = total if row == "All" else t.loc[row,"All"]
-                pct = 100*n/base if base else 0
-                vals.append(f"{n:,}<br>({pct:.2f}%)")
-                cols.append("#E6EAF0" if "All" in (row,col) else
-                            "#FFFFFF" if n == 0 else
-                            "#D5F0DB" if row == col else
-                            "#FFE4B5" if abs(row-col) <= 2 else "#F8C4C4")
-            values.append(vals)
-            colors.append(cols)
+            if total_importance > 0:
+                fi["importance_pct"] = (
+                    fi["importance"] / total_importance
+                )
+            else:
+                fi["importance_pct"] = 0.0
 
-        fig.add_trace(go.Table(
-            header=dict(values=["Old ↓ / New →"] + list(t.columns),
-                        fill_color="#4472C4", font=dict(color="white",size=12),
-                        align="center", height=55),
-            cells=dict(values=[list(t.index)] + values,
-                       fill_color=[["#E6EAF0"]*len(t)] + colors,
-                       align="center", height=42, font=dict(size=11)),
-            columnwidth=[120]+[115]*21,
-            visible=(i==0)
-        ))
+            fi["feature_rank"] = np.arange(1, len(fi) + 1)
 
-    buttons = [dict(label=str(r), method="update",
-                    args=[{"visible":[j==i for j in range(len(regions))]},
-                          {"title.text":f"Swapset - {r}"}])
-               for i,r in enumerate(regions)]
+        self.feature_importance_ = fi
 
-    fig.update_layout(
-        title=dict(text="Swapset - ALL", x=0.5),
-        height=1100, margin=dict(l=20,r=20,t=150,b=40),
-        updatemenus=[dict(buttons=buttons, x=0.01, y=1.08)],
-        annotations=[dict(
-            text="Green: Same | Orange: 1-2 | Red: 3+ | White: Zero | %: Row Total",
-            x=0.5, y=1.02, xref="paper", yref="paper", showarrow=False)]
-    )
-
-    fig.write_html(filename)
-    fig.show()
-    return fig
+        path = os.path.join(
+            self.results_dir,
+            "feature_importance_catboost.csv"
+        )
+        fi.to_csv(path, index=False)
