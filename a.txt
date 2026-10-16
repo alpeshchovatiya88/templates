@@ -1,11 +1,11 @@
+
 import pandas as pd
 import numpy as np
 from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
-from openpyxl.utils import get_column_letter
 
 # =====================================================
-# 1. EXPERIMENTS - CHANGE ONLY THIS DICTIONARY
+# 1. CHANGE ONLY THIS DICTIONARY
 # =====================================================
 
 dfs = {
@@ -19,15 +19,40 @@ dfs = {
 }
 
 DECILE_COL = "rr_model_decile"
-LR_SCALE = 100  # Set to 1 if LR is already a percentage
+LR_SCALE = 1  # Use 100 if SMI3_LR contains decimals such as 0.85
+OUTPUT_FILE = "seed_experiments.xlsx"
 
-OUTPUT_FILE = "seed_experiments_summary.xlsx"
+# Optional: descriptions under experiment names
+descriptions = {
+    # "RS42": "Experiment description",
+    # "RS532": "Another description",
+}
 
 # =====================================================
-# 2. CALCULATE METRICS FOR EACH EXPERIMENT
+# 2. EXCEL FORMATTING
 # =====================================================
 
-results = []
+wb = Workbook()
+ws = wb.active
+ws.title = "Seed Experiments"
+
+yellow = PatternFill("solid", fgColor="FFFF00")
+blue = PatternFill("solid", fgColor="DDEBF7")
+
+thin = Side(style="thin", color="B7B7B7")
+border = Border(left=thin, right=thin, top=thin, bottom=thin)
+
+ws.column_dimensions["A"].width = 65
+ws.column_dimensions["B"].width = 23
+ws.column_dimensions["C"].width = 23
+ws.column_dimensions["D"].width = 19
+ws.column_dimensions["E"].width = 19
+
+# =====================================================
+# 3. AUTOMATICALLY CREATE A SECTION FOR EACH EXPERIMENT
+# =====================================================
+
+row = 1
 
 for experiment, df in dfs.items():
 
@@ -40,201 +65,109 @@ for experiment, df in dfs.items():
 
     temp["SMI3_LOSS"] = pd.to_numeric(
         temp["SMI3_LOSS"], errors="coerce"
-    )
+    ).replace([np.inf, -np.inf], np.nan)
 
     temp["SMI3_LR"] = pd.to_numeric(
         temp["SMI3_LR"], errors="coerce"
-    )
+    ).replace([np.inf, -np.inf], np.nan) * LR_SCALE
 
     decile1 = temp[temp["_decile"] == 1]
 
-    results.append({
-        "Experiment": experiment,
-        "Overall Loss": temp["SMI3_LOSS"].sum(min_count=1),
-        "Overall LR": temp["SMI3_LR"].mean() * LR_SCALE,
-        "Decile 1 Loss": decile1["SMI3_LOSS"].sum(min_count=1),
-        "Decile 1 LR": decile1["SMI3_LR"].mean() * LR_SCALE,
-    })
+    # Header row
+    ws.cell(row, 1, experiment)
+    ws.cell(row, 1).fill = yellow
+    ws.cell(row, 1).font = Font(size=15, bold=True)
 
-summary = pd.DataFrame(results)
-
-if summary.empty:
-    raise ValueError("The dfs dictionary is empty.")
-
-# =====================================================
-# 3. CREATE EXCEL WORKBOOK
-# =====================================================
-
-wb = Workbook()
-ws = wb.active
-ws.title = "Seed Experiments"
-
-# Colors
-YELLOW = "FFF200"
-LIGHT_BLUE = "D9EEF7"
-DARK_BLUE = "355C7D"
-WHITE = "FFFFFF"
-LIGHT_GRAY = "E5E7EB"
-
-thin_border = Border(
-    left=Side(style="thin", color="C8CDD3"),
-    right=Side(style="thin", color="C8CDD3"),
-    top=Side(style="thin", color="C8CDD3"),
-    bottom=Side(style="thin", color="C8CDD3")
-)
-
-# Title
-ws.merge_cells("A1:E1")
-ws["A1"] = "Seed Experiments"
-ws["A1"].font = Font(size=20, bold=True)
-ws["A1"].alignment = Alignment(vertical="center")
-ws.row_dimensions[1].height = 35
-
-# Experiment heading
-ws.merge_cells("A3:E3")
-ws["A3"] = f"Seed Sensitivity Analysis - {len(dfs)} Experiments"
-ws["A3"].fill = PatternFill("solid", fgColor=YELLOW)
-ws["A3"].font = Font(size=15, bold=True)
-ws.row_dimensions[3].height = 30
-
-# Description
-ws.merge_cells("A4:E4")
-ws["A4"] = "Minimum and maximum across selected random seed experiments"
-ws["A4"].fill = PatternFill("solid", fgColor=LIGHT_BLUE)
-ws["A4"].font = Font(size=12)
-ws.row_dimensions[4].height = 26
-
-# Group headers
-ws.merge_cells("B6:C6")
-ws.merge_cells("D6:E6")
-
-ws["B6"] = "Loss range"
-ws["D6"] = "Loss ratio range"
-
-for cell in ["B6", "D6"]:
-    ws[cell].font = Font(size=14, bold=True)
-    ws[cell].alignment = Alignment(horizontal="center")
-
-# Subheaders
-headers = ["Metric", "min", "max", "min", "max"]
-
-for col, header in enumerate(headers, start=1):
-    cell = ws.cell(row=7, column=col, value=header)
-    cell.font = Font(bold=True, size=12)
-    cell.fill = PatternFill("solid", fgColor=LIGHT_BLUE)
-    cell.alignment = Alignment(horizontal="center")
-    cell.border = thin_border
-
-# =====================================================
-# 4. OVERALL AND DECILE 1 RANGES
-# =====================================================
-
-rows = [
-    [
-        "Overall",
-        summary["Overall Loss"].min(),
-        summary["Overall Loss"].max(),
-        summary["Overall LR"].min(),
-        summary["Overall LR"].max(),
-    ],
-    [
-        "Decile 1",
-        summary["Decile 1 Loss"].min(),
-        summary["Decile 1 Loss"].max(),
-        summary["Decile 1 LR"].min(),
-        summary["Decile 1 LR"].max(),
-    ]
-]
-
-for row_num, row_data in enumerate(rows, start=8):
-
-    for col_num, value in enumerate(row_data, start=1):
-
-        if pd.isna(value):
-            value = None
-        elif isinstance(value, (np.integer, np.floating)):
-            value = value.item()
-
-        cell = ws.cell(
-            row=row_num,
-            column=col_num,
-            value=value
-        )
-
-        cell.border = thin_border
-        cell.alignment = Alignment(vertical="center")
-
-        if col_num in [2, 3]:
-            cell.number_format = '$#,##0'
-        elif col_num in [4, 5]:
-            cell.number_format = '0.00'
-
-    ws.row_dimensions[row_num].height = 28
-
-# Column widths
-ws.column_dimensions["A"].width = 32
-ws.column_dimensions["B"].width = 22
-ws.column_dimensions["C"].width = 22
-ws.column_dimensions["D"].width = 18
-ws.column_dimensions["E"].width = 18
-
-# =====================================================
-# 5. SECOND SHEET: INDIVIDUAL EXPERIMENTS
-# =====================================================
-
-detail_ws = wb.create_sheet("Experiment Details")
-
-for col_num, column_name in enumerate(summary.columns, start=1):
-
-    cell = detail_ws.cell(
-        row=1,
-        column=col_num,
-        value=column_name
+    ws.merge_cells(
+        start_row=row, start_column=2,
+        end_row=row, end_column=3
+    )
+    ws.merge_cells(
+        start_row=row, start_column=4,
+        end_row=row, end_column=5
     )
 
-    cell.fill = PatternFill("solid", fgColor=DARK_BLUE)
-    cell.font = Font(color=WHITE, bold=True)
-    cell.alignment = Alignment(horizontal="center")
-    cell.border = thin_border
+    ws.cell(row, 2, "Loss range")
+    ws.cell(row, 4, "Loss ratio range")
 
-for row_num, record in enumerate(
-    summary.itertuples(index=False, name=None),
-    start=2
-):
+    for col in [2, 4]:
+        cell = ws.cell(row, col)
+        cell.font = Font(size=14, bold=True)
+        cell.alignment = Alignment(horizontal="center")
 
-    for col_num, value in enumerate(record, start=1):
+    ws.row_dimensions[row].height = 30
 
-        if pd.isna(value):
-            value = None
-        elif isinstance(value, (np.integer, np.floating)):
-            value = value.item()
+    # Description and min/max headings
+    ws.cell(row + 1, 1, descriptions.get(experiment, ""))
+    ws.cell(row + 1, 1).fill = blue
+    ws.cell(row + 1, 1).alignment = Alignment(
+        wrap_text=True,
+        vertical="center"
+    )
 
-        cell = detail_ws.cell(
-            row=row_num,
-            column=col_num,
-            value=value
+    for col, text in zip(
+        [2, 3, 4, 5],
+        ["min", "max", "min", "max"]
+    ):
+        cell = ws.cell(row + 1, col, text)
+        cell.font = Font(size=13, bold=True)
+        cell.alignment = Alignment(horizontal="center")
+
+    ws.row_dimensions[row + 1].height = 35
+
+    # Overall and Decile 1
+    data = [
+        (
+            "Overall",
+            temp["SMI3_LOSS"].min(),
+            temp["SMI3_LOSS"].max(),
+            temp["SMI3_LR"].min(),
+            temp["SMI3_LR"].max()
+        ),
+        (
+            "Decile 1",
+            decile1["SMI3_LOSS"].min(),
+            decile1["SMI3_LOSS"].max(),
+            decile1["SMI3_LR"].min(),
+            decile1["SMI3_LR"].max()
         )
+    ]
 
-        cell.border = thin_border
+    for r, values in enumerate(data, start=row + 2):
 
-        if col_num in [2, 4]:
-            cell.number_format = '$#,##0'
-        elif col_num in [3, 5]:
-            cell.number_format = '0.00'
+        for col, value in enumerate(values, start=1):
 
-detail_ws.column_dimensions["A"].width = 20
+            if col > 1 and pd.isna(value):
+                value = None
+            elif isinstance(value, (np.integer, np.floating)):
+                value = value.item()
 
-for col in ["B", "C", "D", "E"]:
-    detail_ws.column_dimensions[col].width = 22
+            cell = ws.cell(r, col, value)
 
-detail_ws.freeze_panes = "B2"
-detail_ws.auto_filter.ref = detail_ws.dimensions
+            cell.alignment = Alignment(
+                horizontal="left" if col == 1 else "right",
+                vertical="center"
+            )
+
+            if col in [2, 3]:
+                cell.number_format = '$#,##0'
+            elif col in [4, 5]:
+                cell.number_format = '0.00'
+
+        ws.row_dimensions[r].height = 28
+
+    # Table borders
+    for r in range(row, row + 4):
+        for col in range(1, 6):
+            ws.cell(r, col).border = border
+
+    # Two blank rows before next experiment
+    row += 6
 
 # =====================================================
-# 6. SAVE EXCEL
+# 4. SAVE EXCEL - ONE SHEET ONLY
 # =====================================================
 
 wb.save(OUTPUT_FILE)
 
-print(f"Excel saved successfully: {OUTPUT_FILE}")
-print(summary)
+print(f"Saved: {OUTPUT_FILE}")
