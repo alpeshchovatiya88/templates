@@ -1,32 +1,6 @@
-import pandas as pd
-
-def movement_summary(df1, df2, id_col, decile_col="rr_model_decile"):
-
-    a = df1[[id_col, decile_col]].rename(columns={decile_col:"base"})
-    b = df2[[id_col, decile_col]].rename(columns={decile_col:"compare"})
-    temp = a.merge(b, on=id_col, validate="one_to_one")
-
-    for col in ["base", "compare"]:
-        temp[col] = pd.to_numeric(
-            temp[col].astype(str).str.extract(r"(\d+)")[0],
-            errors="coerce"
-        )
-
-    temp = temp.dropna()
-    temp = temp[temp.base.between(1,20) & temp.compare.between(1,20)]
-    temp["movement"] = temp["compare"] - temp["base"]
-    temp["deciles_moved"] = temp["movement"].abs().astype(int)
-
-    summary = pd.DataFrame({
-        "Lower": temp[temp.movement < 0].groupby("deciles_moved").size(),
-        "Higher": temp[temp.movement > 0].groupby("deciles_moved").size(),
-        "No Movement": temp[temp.movement == 0].groupby("deciles_moved").size()
-    }).reindex(range(20), fill_value=0).fillna(0).astype(int)
-
-    summary["Total Files"] = summary.sum(axis=1)
-    summary["Percentage"] = (
-        summary["Total Files"] / len(temp) * 100
-    ).round(2) if len(temp) else 0
-
-    display(summary)
-    return summary
+summary = movement_summary(
+    df_seed42,
+    df_seed101,
+    id_col="CUSTOMER_ID",
+    decile_col="rr_model_decile"
+)
