@@ -1,19 +1,15 @@
-df_grouped = df.groupby('BOOKYEAR', as_index=False).agg({
-    'n': 'sum',
-    'Actual_n_Delq_and_Claims': 'sum',
-    'Predicted_n_Delq_and_Claims': 'sum',
-    'Actual_n_Claims': 'sum',
-    'Predicted_n_Claims': 'sum',
-    'Actual_n_Delqs': 'sum',
-    'Predicted_n_Delqs': 'sum',
-    'ACTUAL_LOSS': 'sum',
-    'SMT3_LOSS': 'sum',
-    'Loss_diff': 'sum',
-    'ACTUAL_LR': 'mean',
-    'SMT3_LR': 'mean',
-    'LR_diff': 'mean',
-    'Median_PD': 'mean',
-    'Loss_diff_prop': 'mean'
-})
+df_grouped = df.groupby(
+    ['BOOKYEAR', 'ECON_REGION', 'REG_REGION_CODE', 'LOB_RENAMED'],
+    as_index=False
+).sum(numeric_only=True)
 
-df_grouped
+========
+
+df_filtered = df[
+    (df['ECON_REGION'] == '-') &
+    (df['REG_REGION_CODE'] == '-') &
+    (df['LOB_RENAMED'] == '-') &
+    df['BOOKYEAR'].notna()
+]
+
+df_filtered
