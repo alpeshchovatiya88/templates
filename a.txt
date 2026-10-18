@@ -3,60 +3,159 @@ import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 
-df = df.copy()
-df["BOOKYEAR"] = pd.to_numeric(df["BOOKYEAR"])
+def plot_indicator(df, indicator, reference_date=202212):
 
-periods = {
-    "Training (2009–2015)": (2009, 2015, "blue"),
-    "Test (2021–2023)": (2021, 2023, "red"),
-    "Evaluation (2025–2026)": (2025, 2026, "orange")
-}
+    indicator = indicator.upper()
 
-def plot_overlay(df, column, reference_value=None):
+    columns = {
+        "HPI": "HPI_+4",
+        "UE": "UE_+4"
+    }
+
+    if indicator not in columns:
+        raise ValueError("Indicator must be HPI or UE")
+
+    col = columns[indicator]
+
+    data = df.copy()
+
+    # Convert columns to numeric
+    for c in ["BOOKYEAR", "EFFECT_SID", "RECEIVED_SID", col]:
+        data[c] = pd.to_numeric(data[c], errors="coerce")
+
+    # Get reference value at EFFECT_SID = 202212
+    reference_value = data.loc[
+        data["EFFECT_SID"] == reference_date,
+        col
+    ].mean()
+
+    if pd.isna(reference_value):
+        raise ValueError(
+            f"No valid {col} reference at {reference_date}"
+        )
+
+    print(
+        f"{indicator} reference at {reference_date}: "
+        f"{reference_value:.4f}"
+    )
+
+    # Define periods
+    windows = {
+        "Training (2009-2015)": {
+            "filter_col": "BOOKYEAR",
+            "start": 2009,
+            "end": 2015,
+            "plot_col": "BOOKYEAR",
+            "color": "blue"
+        },
+        "Test (2021-2023)": {
+            "filter_col": "BOOKYEAR",
+            "start": 2021,
+            "end": 2023,
+            "plot_col": "BOOKYEAR",
+            "color": "red"
+        },
+        "Validation (Oct 2025-May 2026)": {
+            "filter_col": "RECEIVED_SID",
+            "start": 202510,
+            "end": 202605,
+            "plot_col": "RECEIVED_SID",
+            "color": "orange"
+        }
+    }
+
     fig, ax = plt.subplots(figsize=(12, 6))
 
-    for label, (start, end, color) in periods.items():
-        subset = df[
-            df["BOOKYEAR"].between(start, end)
+    for label, config in windows.items():
+
+        filter_col = config["filter_col"]
+        plot_col = config["plot_col"]
+        start = config["start"]
+        end = config["end"]
+
+        # Filter rows for period
+        subset = data.loc[
+            data[filter_col].between(start, end)
         ].copy()
 
-        # Average values for each year
-        yearly = (
-            subset.groupby("BOOKYEAR")[column]
+        # Average indicator values
+        series = (
+            subset.groupby(plot_col)[col]
             .mean()
+            .dropna()
             .sort_index()
         )
 
-        if yearly.empty:
+        if series.empty:
+            print(f"No data for {label}")
             continue
 
-        # Relative year starting from zero
-        x = yearly.index.to_numpy() - start
+        # Relative time axis
+        if plot_col == "BOOKYEAR":
+            x = series.index.to_numpy() - start
+
+        else:
+            dates = pd.to_datetime(
+                series.index.astype(int).astype(str),
+                format="%Y%m"
+            )
+
+            start_date = pd.to_datetime(
+                str(start), format="%Y%m"
+            )
+
+            x = (
+                (dates.year - start_date.year) * 12
+                + dates.month - start_date.month
+            ) / 12
 
         ax.plot(
-            x, yearly.values,
-            marker="o",
+            x,
+            series.values,
+            color=config["color"],
             linewidth=2,
-            color=color,
+            marker="o",
+            markersize=4,
             label=label
         )
 
-    if reference_value is not None:
-        ax.axhline(
-            y=reference_value,
-            color="green",
-            linewidth=2,
-            linestyle="--",
-            label="4-year reference"
-        )
+        print(f"{label}: {len(series)} points")
 
+    # GREEN REFERENCE LINE
+    ax.axhline(
+        y=reference_value,
+        color="green",
+        linestyle="-",
+        linewidth=2.5,
+        label=f"{indicator} at EFFECT_SID {reference_date}",
+        zorder=5
+    )
+
+    # Include reference value in y-axis limits
+    ymin, ymax = ax.get_ylim()
+
+    ax.set_ylim(
+        min(ymin, reference_value) -
+        0.05 * max(ymax - ymin, 0.01),
+        max(ymax, reference_value) +
+        0.05 * max(ymax - ymin, 0.01)
+    )
+
+    ax.set_title(
+        f"{col} - Training, Test & Validation"
+    )
     ax.set_xlabel("Years from period start")
-    ax.set_ylabel(column)
-    ax.set_title(f"{column} - Period Comparison")
-    ax.legend()
+    ax.set_ylabel(col)
+
     ax.grid(alpha=0.3)
+    ax.legend(loc="best")
+
     plt.tight_layout()
     plt.show()
 
-plot_overlay(df, "HPI_+4")
-plot_overlay(df, "UE_+4")
+    return reference_value
+
+=======
+
+hpi_ref = plot_indicator(df, "HPI")
+ue_ref = plot_indicator(df, "UE")
