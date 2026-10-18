@@ -1,14 +1,3 @@
-    def _get_lightgbm_constraints(self):
-        constraint_map = self.monotone_constraints_by_feature
-
-        preprocessor = clone(self.preprocessor)
-        preprocessor.fit(self.X, self.y)
-
-        feature_names = preprocessor.get_feature_names_out()
-
-        constraints = []
-        for feature in feature_names:
-            original_name = feature.split("__", 1)[-1]
-            constraints.append(int(constraint_map.get(original_name, 0)))
-
-        return constraints
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends libgomp1 && \
+    rm -rf /var/lib/apt/lists/*
