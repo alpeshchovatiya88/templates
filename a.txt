@@ -6,61 +6,88 @@ def plot_indicator(df, indicator, reference_date=202212):
 
     indicator = indicator.upper()
 
-    col = {
+    columns = {
         "HPI": "HPI_+4",
         "UE": "UE_+4"
-    }[indicator]
+    }
+
+    if indicator not in columns:
+        raise ValueError("Choose 'HPI' or 'UE'")
+
+    col = columns[indicator]
 
     data = df.copy()
-    data["BOOKYEAR"] = pd.to_numeric(data["BOOKYEAR"])
 
-    # Get reference value at December 2022
-    reference_value = data.loc[
+    # Convert BOOKYEAR (YYYYMM) to numeric
+    data["BOOKYEAR"] = pd.to_numeric(
+        data["BOOKYEAR"], errors="coerce"
+    )
+
+    data[col] = pd.to_numeric(
+        data[col], errors="coerce"
+    )
+
+    # Reference value at December 2022
+    ref = data.loc[
         data["BOOKYEAR"] == reference_date, col
     ].mean()
 
-    if pd.isna(reference_value):
-        raise ValueError(
-            f"No reference data found for {reference_date}"
-        )
+    if pd.isna(ref):
+        raise ValueError("Reference value not found")
 
     windows = {
-        "Train": (200901, 201512, "blue"),
-        "Test": (202101, 202312, "red"),
-        "Validation": (202510, 202606, "orange")
+        "Train (2009-2015)": (200901, 201512, "blue"),
+        "Test (2021-2023)": (202101, 202312, "red"),
+        "Validation (Oct 2025-Jun 2026)": (
+            202510, 202606, "orange"
+        )
     }
 
-    fig, ax = plt.subplots(figsize=(12, 5))
+    fig, ax = plt.subplots(figsize=(12, 6))
 
-    for name, (start, end, color) in windows.items():
+    for label, (start, end, color) in windows.items():
 
         subset = data.loc[
             data["BOOKYEAR"].between(start, end)
-        ]
+        ].copy()
 
-        series = (
+        if subset.empty:
+            print(f"No data found for {label}")
+            continue
+
+        monthly = (
             subset.groupby("BOOKYEAR")[col]
             .mean()
+            .dropna()
             .sort_index()
         )
 
-        if series.empty:
+        if monthly.empty:
+            print(f"No valid values for {label}")
             continue
 
+        # Convert YYYYMM to actual dates
         dates = pd.to_datetime(
-            series.index.astype(str), format="%Y%m"
+            monthly.index.astype(int).astype(str),
+            format="%Y%m"
         )
+
+        # Relative years from window start
+        x = (dates - dates[0]).days / 365.25
 
         ax.plot(
-            dates,
-            series.values,
+            x,
+            monthly.values,
             color=color,
             linewidth=2,
-            label=name
+            label=label
         )
 
+        print(f"{label}: {len(monthly)} observations")
+
+    # Horizontal reference line
     ax.axhline(
-        reference_value,
+        y=ref,
         color="green",
         linestyle="--",
         linewidth=2,
@@ -68,15 +95,10 @@ def plot_indicator(df, indicator, reference_date=202212):
     )
 
     ax.set_title(f"{indicator} +4: Train, Test & Validation")
-    ax.set_xlabel("BOOKYEAR")
+    ax.set_xlabel("Years from start of each window")
     ax.set_ylabel(col)
-    ax.legend()
     ax.grid(alpha=0.3)
+    ax.legend()
 
     plt.tight_layout()
     plt.show()
-
-==========
-
-plot_indicator(df, "HPI")
-plot_indicator(df, "UE")
