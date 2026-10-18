@@ -1,15 +1,14 @@
-df_grouped = df.groupby(
-    ['BOOKYEAR', 'ECON_REGION', 'REG_REGION_CODE', 'LOB_RENAMED'],
-    as_index=False
-).sum(numeric_only=True)
+    def _get_lightgbm_constraints(self):
+        constraint_map = self.monotone_constraints_by_feature
 
-========
+        preprocessor = clone(self.preprocessor)
+        preprocessor.fit(self.X, self.y)
 
-df_filtered = df[
-    (df['ECON_REGION'] == '-') &
-    (df['REG_REGION_CODE'] == '-') &
-    (df['LOB_RENAMED'] == '-') &
-    df['BOOKYEAR'].notna()
-]
+        feature_names = preprocessor.get_feature_names_out()
 
-df_filtered
+        constraints = []
+        for feature in feature_names:
+            original_name = feature.split("__", 1)[-1]
+            constraints.append(int(constraint_map.get(original_name, 0)))
+
+        return constraints
