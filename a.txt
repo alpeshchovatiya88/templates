@@ -1,104 +1,62 @@
 
 import pandas as pd
+import numpy as np
 import matplotlib.pyplot as plt
 
-def plot_indicator(df, indicator, reference_date=202212):
+df = df.copy()
+df["BOOKYEAR"] = pd.to_numeric(df["BOOKYEAR"])
 
-    indicator = indicator.upper()
+periods = {
+    "Training (2009–2015)": (2009, 2015, "blue"),
+    "Test (2021–2023)": (2021, 2023, "red"),
+    "Evaluation (2025–2026)": (2025, 2026, "orange")
+}
 
-    columns = {
-        "HPI": "HPI_+4",
-        "UE": "UE_+4"
-    }
-
-    if indicator not in columns:
-        raise ValueError("Choose 'HPI' or 'UE'")
-
-    col = columns[indicator]
-
-    data = df.copy()
-
-    # Convert BOOKYEAR (YYYYMM) to numeric
-    data["BOOKYEAR"] = pd.to_numeric(
-        data["BOOKYEAR"], errors="coerce"
-    )
-
-    data[col] = pd.to_numeric(
-        data[col], errors="coerce"
-    )
-
-    # Reference value at December 2022
-    ref = data.loc[
-        data["BOOKYEAR"] == reference_date, col
-    ].mean()
-
-    if pd.isna(ref):
-        raise ValueError("Reference value not found")
-
-    windows = {
-        "Train (2009-2015)": (200901, 201512, "blue"),
-        "Test (2021-2023)": (202101, 202312, "red"),
-        "Validation (Oct 2025-Jun 2026)": (
-            202510, 202606, "orange"
-        )
-    }
-
+def plot_overlay(df, column, reference_value=None):
     fig, ax = plt.subplots(figsize=(12, 6))
 
-    for label, (start, end, color) in windows.items():
-
-        subset = data.loc[
-            data["BOOKYEAR"].between(start, end)
+    for label, (start, end, color) in periods.items():
+        subset = df[
+            df["BOOKYEAR"].between(start, end)
         ].copy()
 
-        if subset.empty:
-            print(f"No data found for {label}")
-            continue
-
-        monthly = (
-            subset.groupby("BOOKYEAR")[col]
+        # Average values for each year
+        yearly = (
+            subset.groupby("BOOKYEAR")[column]
             .mean()
-            .dropna()
             .sort_index()
         )
 
-        if monthly.empty:
-            print(f"No valid values for {label}")
+        if yearly.empty:
             continue
 
-        # Convert YYYYMM to actual dates
-        dates = pd.to_datetime(
-            monthly.index.astype(int).astype(str),
-            format="%Y%m"
-        )
-
-        # Relative years from window start
-        x = (dates - dates[0]).days / 365.25
+        # Relative year starting from zero
+        x = yearly.index.to_numpy() - start
 
         ax.plot(
-            x,
-            monthly.values,
-            color=color,
+            x, yearly.values,
+            marker="o",
             linewidth=2,
+            color=color,
             label=label
         )
 
-        print(f"{label}: {len(monthly)} observations")
+    if reference_value is not None:
+        ax.axhline(
+            y=reference_value,
+            color="green",
+            linewidth=2,
+            linestyle="--",
+            label="4-year reference"
+        )
 
-    # Horizontal reference line
-    ax.axhline(
-        y=ref,
-        color="green",
-        linestyle="--",
-        linewidth=2,
-        label=f"{indicator} reference ({reference_date})"
-    )
-
-    ax.set_title(f"{indicator} +4: Train, Test & Validation")
-    ax.set_xlabel("Years from start of each window")
-    ax.set_ylabel(col)
-    ax.grid(alpha=0.3)
+    ax.set_xlabel("Years from period start")
+    ax.set_ylabel(column)
+    ax.set_title(f"{column} - Period Comparison")
     ax.legend()
-
+    ax.grid(alpha=0.3)
     plt.tight_layout()
     plt.show()
+
+plot_overlay(df, "HPI_+4")
+plot_overlay(df, "UE_+4")
