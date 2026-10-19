@@ -1,395 +1,77 @@
 
 import pandas as pd
-import numpy as np
-import plotly.graph_objects as go
-from plotly.subplots import make_subplots
+import matplotlib.pyplot as plt
 
-
-def create_region_dashboard(
-    df,
-    reference_date=202212,
-    output_file="economic_region_dashboard.html"
-):
+def plot_hpi_training(df):
 
     data = df.copy()
 
-    # -----------------------------------
-    # 1. Clean data
-    # -----------------------------------
+    data["BOOKYEAR"] = pd.to_numeric(
+        data["BOOKYEAR"], errors="coerce"
+    )
 
-    numeric_cols = [
-        "BOOKYEAR",
-        "EFFECT_SID",
-        "RECEIVED_SID",
-        "HPI_+4",
-        "UE_+4"
-    ]
+    data["HPI_+4"] = pd.to_numeric(
+        data["HPI_+4"], errors="coerce"
+    )
 
-    for col in numeric_cols:
-        data[col] = pd.to_numeric(
-            data[col],
-            errors="coerce"
+    # Filter training period
+    train = data[
+        data["BOOKYEAR"].between(2009, 2015)
+    ].copy()
+
+    fig, ax = plt.subplots(figsize=(12, 6))
+
+    # Individual regions - dotted lines
+    for region, region_df in train.groupby("ECON_REGION"):
+
+        region_hpi = (
+            region_df.groupby("BOOKYEAR")["HPI_+4"]
+            .mean()
+            .sort_index()
         )
 
-    data["ECON_REGION"] = (
-        data["ECON_REGION"]
-        .fillna("Unknown")
-        .astype(str)
-        .str.strip()
-    )
-
-    # Include All Regions option
-    regions = ["All Regions"] + sorted(
-        data["ECON_REGION"].unique().tolist()
-    )
-
-    # -----------------------------------
-    # 2. Define periods
-    # -----------------------------------
-
-    windows = {
-        "Training (2009-2015)": {
-            "filter_col": "BOOKYEAR",
-            "start": 2009,
-            "end": 2015,
-            "color": "blue"
-        },
-        "Test (2021-2023)": {
-            "filter_col": "BOOKYEAR",
-            "start": 2021,
-            "end": 2023,
-            "color": "red"
-        },
-        "Validation (Oct 2025-May 2026)": {
-            "filter_col": "RECEIVED_SID",
-            "start": 202510,
-            "end": 202605,
-            "color": "orange"
-        }
-    }
-
-    indicators = {
-        "HPI": "HPI_+4",
-        "UE": "UE_+4"
-    }
-
-    # -----------------------------------
-    # 3. Create figure
-    # -----------------------------------
-
-    fig = make_subplots(
-        rows=2,
-        cols=1,
-        subplot_titles=[
-            "HPI +4 - Period Comparison",
-            "UE +4 - Period Comparison"
-        ],
-        vertical_spacing=0.15
-    )
-
-    region_traces = {}
-    region_ranges = {}
-
-    # -----------------------------------
-    # 4. Generate plots for each region
-    # -----------------------------------
-
-    for region_idx, region in enumerate(regions):
-
-        if region == "All Regions":
-            region_df = data
-        else:
-            region_df = data.loc[
-                data["ECON_REGION"] == region
-            ]
-
-        region_traces[region] = []
-        region_ranges[region] = {}
-
-        for row_idx, (indicator, col) in enumerate(
-            indicators.items(), start=1
-        ):
-
-            # Reference value for selected region
-            reference_value = region_df.loc[
-                region_df["EFFECT_SID"] == reference_date,
-                col
-            ].mean()
-
-            all_y = []
-
-            # Plot Training, Test, Validation
-            for label, config in windows.items():
-
-                date_col = config["filter_col"]
-                start = config["start"]
-                end = config["end"]
-
-                subset = region_df.loc[
-                    region_df[date_col].between(start, end)
-                ]
-
-                series = (
-                    subset.groupby(date_col)[col]
-                    .mean()
-                    .dropna()
-                    .sort_index()
-                )
-
-                if series.empty:
-                    x = []
-                    y = []
-
-                elif date_col == "BOOKYEAR":
-
-                    x = (
-                        series.index.to_numpy() - start
-                    ).tolist()
-
-                    y = series.values.tolist()
-
-                else:
-
-                    dates = pd.to_datetime(
-                        series.index.astype(int).astype(str),
-                        format="%Y%m"
-                    )
-
-                    start_date = pd.to_datetime(
-                        str(start),
-                        format="%Y%m"
-                    )
-
-                    x = (
-                        (dates.year - start_date.year) * 12
-                        + dates.month - start_date.month
-                    ) / 12
-
-                    x = x.tolist()
-                    y = series.values.tolist()
-
-                all_y.extend(y)
-
-                fig.add_trace(
-                    go.Scatter(
-                        x=x,
-                        y=y,
-                        mode="lines+markers",
-                        name=label,
-                        line=dict(
-                            color=config["color"],
-                            width=2.5
-                        ),
-                        marker=dict(size=6),
-                        legendgroup=label,
-                        showlegend=(row_idx == 1),
-                        visible=(region_idx == 0),
-                        hovertemplate=(
-                            "Relative year: %{x:.2f}"
-                            "<br>Value: %{y:.4f}"
-                            "<extra>%{fullData.name}</extra>"
-                        )
-                    ),
-                    row=row_idx,
-                    col=1
-                )
-
-                region_traces[region].append(
-                    len(fig.data) - 1
-                )
-
-            # -----------------------------------
-            # 5. Green reference line
-            # -----------------------------------
-
-            if pd.notna(reference_value):
-
-                all_y.append(reference_value)
-
-                ref_x = [0, 6]
-                ref_y = [
-                    reference_value,
-                    reference_value
-                ]
-
-            else:
-                ref_x = []
-                ref_y = []
-
-            fig.add_trace(
-                go.Scatter(
-                    x=ref_x,
-                    y=ref_y,
-                    mode="lines",
-                    name=f"{indicator} Reference ({reference_date})",
-                    line=dict(
-                        color="green",
-                        width=3,
-                        dash="dash"
-                    ),
-                    legendgroup=f"{indicator}_reference",
-                    showlegend=True,
-                    visible=(region_idx == 0),
-                    hovertemplate=(
-                        f"{indicator} reference: "
-                        "%{y:.4f}<extra></extra>"
-                    )
-                ),
-                row=row_idx,
-                col=1
-            )
-
-            region_traces[region].append(
-                len(fig.data) - 1
-            )
-
-            # Store y-axis range for each region
-            if all_y:
-                ymin = min(all_y)
-                ymax = max(all_y)
-
-                padding = max(
-                    (ymax - ymin) * 0.1,
-                    0.01
-                )
-
-                region_ranges[region][indicator] = [
-                    ymin - padding,
-                    ymax + padding
-                ]
-            else:
-                region_ranges[region][indicator] = None
-
-    # -----------------------------------
-    # 6. Dropdown for region selection
-    # -----------------------------------
-
-    buttons = []
-
-    for region in regions:
-
-        visible = [False] * len(fig.data)
-
-        for idx in region_traces[region]:
-            visible[idx] = True
-
-        layout_updates = {
-            "title.text": (
-                f"Economic Indicators - {region}"
-            )
-        }
-
-        hpi_range = region_ranges[region]["HPI"]
-        ue_range = region_ranges[region]["UE"]
-
-        if hpi_range is not None:
-            layout_updates["yaxis.range"] = hpi_range
-
-        if ue_range is not None:
-            layout_updates["yaxis2.range"] = ue_range
-
-        buttons.append(
-            dict(
-                label=region,
-                method="update",
-                args=[
-                    {"visible": visible},
-                    layout_updates
-                ]
-            )
+        ax.plot(
+            region_hpi.index,
+            region_hpi.values,
+            linestyle=":",
+            linewidth=1.5,
+            alpha=0.75,
+            label=str(region)
         )
 
-    # -----------------------------------
-    # 7. Layout and styling
-    # -----------------------------------
-
-    fig.update_layout(
-        title=dict(
-            text="Economic Indicators - All Regions",
-            x=0.5,
-            xanchor="center"
-        ),
-
-        height=900,
-        template="plotly_white",
-
-        updatemenus=[
-            dict(
-                buttons=buttons,
-                direction="down",
-                showactive=True,
-                x=0.5,
-                xanchor="center",
-                y=1.10,
-                yanchor="top",
-                bgcolor="white",
-                bordercolor="gray",
-                borderwidth=1
-            )
-        ],
-
-        legend=dict(
-            orientation="h",
-            y=-0.12,
-            x=0.5,
-            xanchor="center"
-        ),
-
-        margin=dict(
-            t=160,
-            b=110,
-            l=80,
-            r=60
-        ),
-
-        hovermode="closest"
+    # Overall training average - solid blue
+    overall_hpi = (
+        train.groupby("BOOKYEAR")["HPI_+4"]
+        .mean()
+        .sort_index()
     )
 
-    # Axis labels
-    fig.update_xaxes(
-        title_text="Years from period start",
-        range=[-0.1, 6.2],
-        showgrid=True,
-        row=1,
-        col=1
+    ax.plot(
+        overall_hpi.index,
+        overall_hpi.values,
+        color="blue",
+        linestyle="-",
+        linewidth=3,
+        marker="o",
+        label="Overall Training HPI",
+        zorder=10
     )
 
-    fig.update_xaxes(
-        title_text="Years from period start",
-        range=[-0.1, 6.2],
-        showgrid=True,
-        row=2,
-        col=1
+    ax.set_title(
+        "HPI +4 - Training (2009-2015)"
     )
 
-    fig.update_yaxes(
-        title_text="HPI_+4",
-        range=region_ranges["All Regions"]["HPI"],
-        row=1,
-        col=1
+    ax.set_xlabel("BOOKYEAR")
+    ax.set_ylabel("HPI_+4")
+
+    ax.set_xticks(range(2009, 2016))
+    ax.grid(alpha=0.3)
+
+    ax.legend(
+        title="Economic Region",
+        bbox_to_anchor=(1.02, 1),
+        loc="upper left"
     )
 
-    fig.update_yaxes(
-        title_text="UE_+4",
-        range=region_ranges["All Regions"]["UE"],
-        row=2,
-        col=1
-    )
-
-    # -----------------------------------
-    # 8. Save standalone HTML
-    # -----------------------------------
-
-    fig.write_html(
-        output_file,
-        include_plotlyjs=True,
-        full_html=True,
-        auto_open=False
-    )
-
-    fig.show()
-
-    print(f"Dashboard saved successfully: {output_file}")
-    print(f"Total regions: {len(regions) - 1}")
-
-    return fig
+    plt.tight_layout()
+    plt.show()
