@@ -9,19 +9,34 @@ def plot_hpi_training(df):
     data["BOOKYEAR"] = pd.to_numeric(
         data["BOOKYEAR"], errors="coerce"
     )
-
     data["HPI_+4"] = pd.to_numeric(
         data["HPI_+4"], errors="coerce"
     )
 
-    # Filter training period
+    # Training data only
     train = data[
         data["BOOKYEAR"].between(2009, 2015)
     ].copy()
 
-    fig, ax = plt.subplots(figsize=(12, 6))
+    # Distinct colors for regions
+    region_colors = {
+        "Alberta": "#E41A1C",
+        "British_Columbia": "#FF7F00",
+        "Manitoba": "#4DAF4A",
+        "New_Brunswick": "#984EA3",
+        "Newfoundland_Labrador": "#A65628",
+        "Nova_Scotia": "#F781BF",
+        "Prince_Edward_Island": "#808000",
+        "Quebec": "#00A6A6",
+        "Rest_of_Ontario": "#D62728",
+        "Saskatchewan": "#8C564B",
+        "Territories": "#7F7F7F",
+        "Toronto": "#B8860B"
+    }
 
-    # Individual regions - dotted lines
+    fig, ax = plt.subplots(figsize=(15, 7))
+
+    # Individual regions: bold dotted lines
     for region, region_df in train.groupby("ECON_REGION"):
 
         region_hpi = (
@@ -33,13 +48,17 @@ def plot_hpi_training(df):
         ax.plot(
             region_hpi.index,
             region_hpi.values,
+            color=region_colors.get(region, "#444444"),
             linestyle=":",
-            linewidth=1.5,
-            alpha=0.75,
-            label=str(region)
+            linewidth=3,
+            alpha=1,
+            marker="o",
+            markersize=4,
+            label=str(region),
+            zorder=2
         )
 
-    # Overall training average - solid blue
+    # Overall HPI: solid blue line
     overall_hpi = (
         train.groupby("BOOKYEAR")["HPI_+4"]
         .mean()
@@ -49,29 +68,43 @@ def plot_hpi_training(df):
     ax.plot(
         overall_hpi.index,
         overall_hpi.values,
-        color="blue",
+        color="#0047FF",
         linestyle="-",
-        linewidth=3,
+        linewidth=4.5,
         marker="o",
+        markersize=8,
+        markeredgecolor="white",
+        markeredgewidth=1.5,
         label="Overall Training HPI",
         zorder=10
     )
 
     ax.set_title(
-        "HPI +4 - Training (2009-2015)"
+        "HPI +4 - Training (2009-2015)",
+        fontsize=17,
+        fontweight="bold",
+        pad=15
     )
 
-    ax.set_xlabel("BOOKYEAR")
-    ax.set_ylabel("HPI_+4")
+    ax.set_xlabel("BOOKYEAR", fontsize=12)
+    ax.set_ylabel("HPI_+4", fontsize=12)
 
     ax.set_xticks(range(2009, 2016))
-    ax.grid(alpha=0.3)
+    ax.grid(
+        alpha=0.18,
+        linestyle="--"
+    )
 
     ax.legend(
         title="Economic Region",
         bbox_to_anchor=(1.02, 1),
-        loc="upper left"
+        loc="upper left",
+        fontsize=10,
+        frameon=False
     )
+
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
 
     plt.tight_layout()
     plt.show()
