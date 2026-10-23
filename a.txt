@@ -1,184 +1,109 @@
 
-import pandas as pd
-import plotly.graph_objects as go
+from openpyxl import Workbook
+from openpyxl.styles import Font, PatternFill
+from openpyxl.worksheet.datavalidation import DataValidation
+from openpyxl.utils import get_column_letter
 
-def plot_hpi_training(df):
+# Build movement counts by region, including Overall
+temp["Economic Region"] = temp[region_col].astype(str)
 
-    data = df.copy()
+overall = temp.copy()
+overall["Economic Region"] = "Overall"
 
-    data["BOOKYEAR"] = pd.to_numeric(
-        data["BOOKYEAR"], errors="coerce"
-    )
-    data["HPI_+4"] = pd.to_numeric(
-        data["HPI_+4"], errors="coerce"
-    )
+all_data = pd.concat([overall, temp], ignore_index=True)
 
-    # Filter training period
-    train = data[
-        data["BOOKYEAR"].between(2009, 2015)
-    ].copy()
+all_data["Direction"] = "No Movement"
+all_data.loc[all_data["movement"] < 0, "Direction"] = "Lower"
+all_data.loc[all_data["movement"] > 0, "Direction"] = "Higher"
 
-    # Overall average
-    overall = (
-        train.groupby("BOOKYEAR")["HPI_+4"]
-        .mean()
-        .sort_index()
-    )
+counts = (
+    all_data.groupby(
+        ["Economic Region", "deciles_moved", "Direction"]
+    ).size().reset_index(name="Count")
+)
 
-    regions = sorted(
-        train["ECON_REGION"].dropna().unique()
-    )
+totals = (
+    all_data.groupby("Economic Region")
+    .size().to_dict()
+)
 
-    # Distinct colors
-    colors = [
-        "#E41A1C",  # Red
-        "#FF7F00",  # Orange
-        "#228B22",  # Green
-        "#984EA3",  # Purple
-        "#00A6A6",  # Teal
-        "#A65628",  # Brown
-        "#D81B60",  # Pink
-        "#808000",  # Olive
-        "#000000",  # Black
-        "#17BECF",  # Cyan
-        "#8B008B",  # Dark magenta
-        "#B8860B",  # Gold
-    ]
+wb = Workbook()
+ws = wb.active
+ws.title = "Movement Summary"
+data_ws = wb.create_sheet("Data")
 
-    # Different marker shapes
-    markers = [
-        "square",
-        "diamond",
-        "triangle-up",
-        "cross",
-        "x",
-        "star",
-        "triangle-down",
-        "pentagon",
-        "hexagon",
-        "triangle-left",
-        "triangle-right",
-        "hourglass"
-    ]
+# Store all summary counts in a hidden sheet
+data_ws.append(["Region", "Movement", "Direction", "Count"])
 
-    # Different line patterns
-    dash_styles = [
-        "dot",
-        "dash",
-        "dashdot",
-        "longdash",
-        "longdashdot"
-    ]
+for row in counts.itertuples(index=False, name=None):
+    data_ws.append(list(row))
 
-    fig = go.Figure()
+data_ws["F1"] = "Region"
+data_ws["G1"] = "Total"
 
-    # Plot each region
-    for i, region in enumerate(regions):
+for i, (region, total) in enumerate(totals.items(), start=2):
+    data_ws.cell(i, 6, region)
+    data_ws.cell(i, 7, total)
 
-        region_df = train[
-            train["ECON_REGION"] == region
-        ]
+last_row = data_ws.max_row
+total_last = len(totals) + 1
 
-        yearly = (
-            region_df.groupby("BOOKYEAR")["HPI_+4"]
-            .mean()
-            .sort_index()
+# Visible summary
+ws["A1"] = "Economic Region"
+ws["B1"] = "Overall"
+
+headers = [
+    "Deciles Moved", "Lower", "Higher",
+    "No Movement", "Total Files", "Percentage"
+]
+
+for col, header in enumerate(headers, start=1):
+    ws.cell(3, col, header)
+
+for r in range(4, 24):
+    ws.cell(r, 1, r - 4)
+
+    for col, direction in [(2, "Lower"), (3, "Higher"), (4, "No Movement")]:
+        ws.cell(
+            r, col,
+            f'=SUMIFS(Data!$D$2:$D${last_row},'
+            f'Data!$A$2:$A${last_row},$B$1,'
+            f'Data!$B$2:$B${last_row},$A{r},'
+            f'Data!$C$2:$C${last_row},"{direction}")'
         )
 
-        fig.add_trace(
-            go.Scatter(
-                x=yearly.index,
-                y=yearly.values,
-                mode="lines+markers",
-                name=str(region),
-
-                line=dict(
-                    color=colors[i % len(colors)],
-                    width=3,
-                    dash=dash_styles[
-                        i % len(dash_styles)
-                    ]
-                ),
-
-                marker=dict(
-                    symbol=markers[i % len(markers)],
-                    size=10,
-                    color=colors[i % len(colors)],
-                    line=dict(
-                        color="white",
-                        width=1
-                    )
-                ),
-
-                hovertemplate=(
-                    f"Region: {region}<br>"
-                    "Year: %{x}<br>"
-                    "HPI: %{y:.4f}"
-                    "<extra></extra>"
-                )
-            )
-        )
-
-    # Overall HPI: bold blue
-    fig.add_trace(
-        go.Scatter(
-            x=overall.index,
-            y=overall.values,
-            mode="lines+markers",
-            name="Overall Training HPI",
-            line=dict(
-                color="#0047FF",
-                width=5,
-                dash="solid"
-            ),
-            marker=dict(
-                symbol="circle",
-                size=12,
-                color="#0047FF",
-                line=dict(
-                    color="white",
-                    width=2
-                )
-            ),
-            hovertemplate=(
-                "Overall HPI<br>"
-                "Year: %{x}<br>"
-                "HPI: %{y:.4f}"
-                "<extra></extra>"
-            )
-        )
+    ws.cell(r, 5, f"=SUM(B{r}:D{r})")
+    ws.cell(
+        r, 6,
+        f'=IFERROR(E{r}/SUMIF('
+        f'Data!$F$2:$F${total_last},$B$1,'
+        f'Data!$G$2:$G${total_last}),0)'
     )
+    ws.cell(r, 6).number_format = "0.00%"
 
-    fig.update_layout(
-        title="HPI +4 - Training (2009-2015)",
-        xaxis_title="BOOKYEAR",
-        yaxis_title="HPI_+4",
-        template="plotly_white",
-        height=700,
-        width=1300,
+# Dropdown for region selection
+dropdown = DataValidation(
+    type="list",
+    formula1=f"'Data'!$F$2:$F${total_last}"
+)
+ws.add_data_validation(dropdown)
+dropdown.add(ws["B1"])
 
-        hovermode="closest",
+# Formatting
+for cell in ws[3]:
+    cell.fill = PatternFill("solid", fgColor="17365D")
+    cell.font = Font(color="FFFFFF", bold=True)
 
-        legend=dict(
-            title="Economic Region",
-            x=1.02,
-            y=1,
-            xanchor="left"
-        ),
+ws["A1"].font = Font(bold=True)
+ws["B1"].fill = PatternFill("solid", fgColor="FFF2CC")
 
-        margin=dict(
-            l=80,
-            r=240,
-            t=80,
-            b=70
-        )
-    )
+for c in range(1, 7):
+    ws.column_dimensions[get_column_letter(c)].width = 19
 
-    fig.update_xaxes(
-        tickmode="linear",
-        dtick=1
-    )
+data_ws.sheet_state = "hidden"
 
-    fig.show()
+filename = f"Ventile_Movement_{name1}_vs_{name2}.xlsx"
+wb.save(filename)
 
-    return fig
+display(ws.title)
+print("Saved:", filename)
