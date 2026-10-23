@@ -1,109 +1,270 @@
 
+import pandas as pd
 from openpyxl import Workbook
-from openpyxl.styles import Font, PatternFill
+from openpyxl.styles import Font, PatternFill, Alignment
 from openpyxl.worksheet.datavalidation import DataValidation
 from openpyxl.utils import get_column_letter
+from openpyxl.workbook.properties import CalcProperties
 
-# Build movement counts by region, including Overall
-temp["Economic Region"] = temp[region_col].astype(str)
 
-overall = temp.copy()
-overall["Economic Region"] = "Overall"
+def movement_summary(
+    df1,
+    df2,
+    id_col,
+    decile_col="rr_model_decile",
+    region_col="economic_region",
+    name1=None,
+    name2=None
+):
 
-all_data = pd.concat([overall, temp], ignore_index=True)
+    # 1. Prepare data
+    a = df1[[id_col, decile_col, region_col]].rename(
+        columns={decile_col: "base"}
+    )
 
-all_data["Direction"] = "No Movement"
-all_data.loc[all_data["movement"] < 0, "Direction"] = "Lower"
-all_data.loc[all_data["movement"] > 0, "Direction"] = "Higher"
+    b = df2[[id_col, decile_col]].rename(
+        columns={decile_col: "compare"}
+    )
 
-counts = (
-    all_data.groupby(
-        ["Economic Region", "deciles_moved", "Direction"]
-    ).size().reset_index(name="Count")
-)
+    temp = a.merge(
+        b,
+        on=id_col,
+        how="inner",
+        validate="one_to_one"
+    )
 
-totals = (
-    all_data.groupby("Economic Region")
-    .size().to_dict()
-)
-
-wb = Workbook()
-ws = wb.active
-ws.title = "Movement Summary"
-data_ws = wb.create_sheet("Data")
-
-# Store all summary counts in a hidden sheet
-data_ws.append(["Region", "Movement", "Direction", "Count"])
-
-for row in counts.itertuples(index=False, name=None):
-    data_ws.append(list(row))
-
-data_ws["F1"] = "Region"
-data_ws["G1"] = "Total"
-
-for i, (region, total) in enumerate(totals.items(), start=2):
-    data_ws.cell(i, 6, region)
-    data_ws.cell(i, 7, total)
-
-last_row = data_ws.max_row
-total_last = len(totals) + 1
-
-# Visible summary
-ws["A1"] = "Economic Region"
-ws["B1"] = "Overall"
-
-headers = [
-    "Deciles Moved", "Lower", "Higher",
-    "No Movement", "Total Files", "Percentage"
-]
-
-for col, header in enumerate(headers, start=1):
-    ws.cell(3, col, header)
-
-for r in range(4, 24):
-    ws.cell(r, 1, r - 4)
-
-    for col, direction in [(2, "Lower"), (3, "Higher"), (4, "No Movement")]:
-        ws.cell(
-            r, col,
-            f'=SUMIFS(Data!$D$2:$D${last_row},'
-            f'Data!$A$2:$A${last_row},$B$1,'
-            f'Data!$B$2:$B${last_row},$A{r},'
-            f'Data!$C$2:$C${last_row},"{direction}")'
+    # 2. Convert deciles to numeric
+    for col in ["base", "compare"]:
+        temp[col] = pd.to_numeric(
+            temp[col].astype(str).str.extract(r"(\d+)")[0],
+            errors="coerce"
         )
 
-    ws.cell(r, 5, f"=SUM(B{r}:D{r})")
-    ws.cell(
-        r, 6,
-        f'=IFERROR(E{r}/SUMIF('
-        f'Data!$F$2:$F${total_last},$B$1,'
-        f'Data!$G$2:$G${total_last}),0)'
+    temp = temp.dropna(
+        subset=["base", "compare"]
+    ).copy()
+
+    temp = temp[
+        temp["base"].between(1, 20) &
+        temp["compare"].between(1, 20)
+    ].copy()
+
+    # 3. Calculate movement
+    temp["movement"] = (
+        temp["compare"] - temp["base"]
     )
-    ws.cell(r, 6).number_format = "0.00%"
 
-# Dropdown for region selection
-dropdown = DataValidation(
-    type="list",
-    formula1=f"'Data'!$F$2:$F${total_last}"
-)
-ws.add_data_validation(dropdown)
-dropdown.add(ws["B1"])
+    temp["deciles_moved"] = (
+        temp["movement"].abs().astype(int)
+    )
 
-# Formatting
-for cell in ws[3]:
-    cell.fill = PatternFill("solid", fgColor="17365D")
-    cell.font = Font(color="FFFFFF", bold=True)
+    temp["Direction"] = "No Movement"
 
-ws["A1"].font = Font(bold=True)
-ws["B1"].fill = PatternFill("solid", fgColor="FFF2CC")
+    temp.loc[
+        temp["movement"] < 0, "Direction"
+    ] = "Lower"
 
-for c in range(1, 7):
-    ws.column_dimensions[get_column_letter(c)].width = 19
+    temp.loc[
+        temp["movement"] > 0, "Direction"
+    ] = "Higher"
 
-data_ws.sheet_state = "hidden"
+    # 4. Add Overall alongside regions
+    temp["Economic Region"] = (
+        temp[region_col]
+        .fillna("Missing")
+        .astype(str)
+    )
 
-filename = f"Ventile_Movement_{name1}_vs_{name2}.xlsx"
-wb.save(filename)
+    # Reserve Overall as a summary label
+    if (temp["Economic Region"] == "Overall").any():
+        raise ValueError(
+            "'Overall' already exists as an Economic Region."
+        )
 
-display(ws.title)
-print("Saved:", filename)
+    overall = temp.copy()
+    overall["Economic Region"] = "Overall"
+
+    all_data = pd.concat(
+        [overall, temp],
+        ignore_index=True
+    )
+
+    # 5. Calculate counts
+    counts = (
+        all_data.groupby(
+            [
+                "Economic Region",
+                "deciles_moved",
+                "Direction"
+            ]
+        )
+        .size()
+        .reset_index(name="Count")
+    )
+
+    totals = (
+        all_data.groupby("Economic Region")
+        .size()
+        .to_dict()
+    )
+
+    regions = ["Overall"] + sorted(
+        r for r in totals if r != "Overall"
+    )
+
+    # 6. Create Excel workbook
+    wb = Workbook()
+
+    ws = wb.active
+    ws.title = "Movement Summary"
+
+    data_ws = wb.create_sheet("Data")
+
+    # 7. Hidden data table
+    data_ws.append([
+        "Region",
+        "Movement",
+        "Direction",
+        "Count"
+    ])
+
+    for row in counts.itertuples(
+        index=False, name=None
+    ):
+        data_ws.append(list(row))
+
+    data_ws["F1"] = "Region"
+    data_ws["G1"] = "Total"
+
+    for i, region in enumerate(regions, start=2):
+        data_ws.cell(i, 6, region)
+        data_ws.cell(i, 7, totals[region])
+
+    last_row = data_ws.max_row
+    total_last = len(regions) + 1
+
+    # 8. Main summary title
+    ws["A1"] = "Economic Region"
+    ws["B1"] = "Overall"
+
+    ws["A2"] = (
+        f"Ventile Movement: "
+        f"DataSplit Seed {name1} vs Model-{name2}"
+    )
+
+    headers = [
+        "Deciles Moved",
+        "Lower",
+        "Higher",
+        "No Movement",
+        "Total Files",
+        "Percentage"
+    ]
+
+    for col, header in enumerate(headers, 1):
+        ws.cell(3, col, header)
+
+    # 9. Dynamic 20-row summary
+    for r in range(4, 24):
+
+        ws.cell(r, 1, r - 4)
+
+        for col, direction in [
+            (2, "Lower"),
+            (3, "Higher"),
+            (4, "No Movement")
+        ]:
+
+            formula = (
+                f'=SUMIFS('
+                f'Data!$D$2:$D${last_row},'
+                f'Data!$A$2:$A${last_row},$B$1,'
+                f'Data!$B$2:$B${last_row},$A{r},'
+                f'Data!$C$2:$C${last_row},'
+                f'"{direction}")'
+            )
+
+            ws.cell(r, col, formula)
+
+        # Total Files
+        ws.cell(
+            r, 5,
+            f"=SUM(B{r}:D{r})"
+        )
+
+        # Percentage within selected region
+        ws.cell(
+            r, 6,
+            f'=IFERROR('
+            f'E{r}/SUMIF('
+            f'Data!$F$2:$F${total_last},'
+            f'$B$1,'
+            f'Data!$G$2:$G${total_last}'
+            f'),0)'
+        )
+
+        ws.cell(r, 6).number_format = "0.00%"
+
+    # 10. Economic Region dropdown
+    dropdown = DataValidation(
+        type="list",
+        formula1=f"'Data'!$F$2:$F${total_last}",
+        allow_blank=False
+    )
+
+    dropdown.error = "Select a region from the list."
+    dropdown.errorTitle = "Invalid Region"
+    dropdown.showErrorMessage = True
+
+    ws.add_data_validation(dropdown)
+    dropdown.add(ws["B1"])
+
+    # 11. Formatting
+    header_fill = PatternFill(
+        "solid", fgColor="17365D"
+    )
+
+    for cell in ws[3]:
+        cell.fill = header_fill
+        cell.font = Font(
+            color="FFFFFF",
+            bold=True
+        )
+        cell.alignment = Alignment(
+            horizontal="center"
+        )
+
+    ws["A1"].font = Font(bold=True)
+
+    ws["B1"].fill = PatternFill(
+        "solid", fgColor="FFF2CC"
+    )
+    ws["B1"].font = Font(bold=True)
+
+    for col in range(1, 7):
+        ws.column_dimensions[
+            get_column_letter(col)
+        ].width = 20
+
+    ws.freeze_panes = "B4"
+
+    # Hide supporting data
+    data_ws.sheet_state = "hidden"
+
+    # Recalculate formulas when opened in Excel
+    wb.calculation = CalcProperties(
+        calcMode="auto",
+        fullCalcOnLoad=True
+    )
+
+    # 12. Save ONE Excel file
+    filename = (
+        f"Ventile_Movement_DataSplit_Seed_"
+        f"{name1}_vs_{name2}.xlsx"
+    )
+
+    wb.save(filename)
+
+    print(f"Excel file created: {filename}")
+
+    return filename
