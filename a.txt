@@ -6,34 +6,57 @@ def check_reproducibility(
     key_columns,
     target_col="Target",
     probability_col="Predicted_Probability",
-    loss_col="Loss",
-    loss_ratio_col="Loss_Ratio",
-    probability_tolerance=1e-8,
-    metric_tolerance=1e-8,
-    loss_tolerance=1e-6,
-    loss_ratio_tolerance=1e-8,
-    total_loss_tolerance=1e-4,
+    loss_col="SMIE_LOSS",
+    loss_ratio_col="SMIE_LR",
+    tolerance=1e-8,
     output_folder=None
 ):
     """
-    Compare Developer and Validator DataFrames.
+    MRM model reproducibility assessment.
 
-    Required columns:
-        Key(s), Target, Predicted_Probability
+    Inputs:
+        Developer and Validator pandas DataFrames.
 
-    Optional columns:
-        Loss, Loss_Ratio
+    Record-level checks:
+        Target (exact match)
+        Predicted Probability
+        Loss (if present)
+        Loss Ratio (if present)
 
-    Dataset metrics:
-        AUC, Brier Score, Log Loss
+    Missing-value treatment:
+        NaN vs NaN = reproducibility match
+        NaN vs numeric = mismatch
 
-    If output_folder is provided, save Excel and CSV reports.
-    Otherwise, return results without writing files.
+    Dataset-level checks:
+        AUC
+        Brier Score
+        Log Loss
+        Total Loss (if available)
+        Mean Loss Ratio (if available)
+
+    All numerical comparisons use absolute tolerance.
+
+    Dataset-level performance is calculated on the
+    common matched records with identical, nonmissing
+    Target values. Missing or different records still
+    cause the overall assessment to FAIL.
+
+    Returns a dictionary of DataFrames and results.
     """
 
-    # --------------------------------------------------
-    # 1. Configuration validation
-    # --------------------------------------------------
+    # ==================================================
+    # 1. Input validation
+    # ==================================================
+
+    if not isinstance(developer_df, pd.DataFrame):
+        raise TypeError(
+            "developer_df must be a pandas DataFrame."
+        )
+
+    if not isinstance(validator_df, pd.DataFrame):
+        raise TypeError(
+            "validator_df must be a pandas DataFrame."
+        )
 
     if isinstance(key_columns, str):
         key_columns = [key_columns]
@@ -41,44 +64,30 @@ def check_reproducibility(
         key_columns = list(key_columns)
 
     if not key_columns:
-        raise ValueError("Provide at least one key column.")
-
-    if not isinstance(developer_df, pd.DataFrame):
-        raise TypeError("developer_df must be a DataFrame.")
-
-    if not isinstance(validator_df, pd.DataFrame):
-        raise TypeError("validator_df must be a DataFrame.")
-
-    required = key_columns + [target_col, probability_col]
-
-    if len(set(required)) != len(required):
         raise ValueError(
-            "Key, target and probability columns must be distinct."
+            "At least one key column is required."
         )
 
-    tolerances = [
-        probability_tolerance,
-        metric_tolerance,
-        loss_tolerance,
-        loss_ratio_tolerance,
-        total_loss_tolerance
-    ]
-
-    if any(
-        not np.isfinite(tol) or tol < 0
-        for tol in tolerances
-    ):
+    if not np.isfinite(tolerance) or tolerance < 0:
         raise ValueError(
-            "Tolerances must be finite and nonnegative."
+            "Tolerance must be finite and nonnegative."
         )
 
-    # Copies avoid changing original DataFrames.
+    required_columns = (
+        key_columns + [target_col, probability_col]
+    )
+
+    if len(set(required_columns)) != len(required_columns):
+        raise ValueError(
+            "Required column names must be distinct."
+        )
+
     dev = developer_df.copy()
     val = validator_df.copy()
 
-    # --------------------------------------------------
-    # 2. Validate required columns and data
-    # --------------------------------------------------
+    # ==================================================
+    # 2. Validate columns and required values
+    # ==================================================
 
     for name, df in [
         ("Developer", dev),
@@ -87,11 +96,11 @@ def check_reproducibility(
 
         if not df.columns.is_unique:
             raise ValueError(
-                f"{name}: duplicate column names."
+                f"{name}: duplicate column names found."
             )
 
         missing_cols = [
-            col for col in required
+            col for col in required_columns
             if col not in df.columns
         ]
 
@@ -102,102 +111,115 @@ def check_reproducibility(
 
         if df[key_columns].isna().any().any():
             raise ValueError(
-                f"{name}: missing record identifiers."
+                f"{name}: missing application identifiers."
             )
 
         if df.duplicated(subset=key_columns).any():
             raise ValueError(
-                f"{name}: duplicate record identifiers."
+                f"{name}: duplicate application identifiers."
             )
 
-        for col in [target_col, probability_col]:
+        # Target: allow NaN, but nonmissing values
+        # must be binary 0 or 1.
+        df[target_col] = pd.to_numeric(
+            df[target_col],
+            errors="raise"
+        )
 
-            df[col] = pd.to_numeric(
-                df[col],
-                errors="raise"
-            )
-
-            if df[col].isna().any():
-                raise ValueError(
-                    f"{name}: missing values in {col}."
-                )
-
-            if not np.isfinite(df[col]).all():
-                raise ValueError(
-                    f"{name}: non-finite values in {col}."
-                )
-
-        if not df[target_col].isin([0, 1]).all():
+        if not df[target_col].dropna().isin([0, 1]).all():
             raise ValueError(
-                f"{name}: Target must contain only 0 and 1."
+                f"{name}: Target must be 0, 1, or NaN."
+            )
+
+        # Predicted Probability: required for every row.
+        df[probability_col] = pd.to_numeric(
+            df[probability_col],
+            errors="raise"
+        )
+
+        if df[probability_col].isna().any():
+            raise ValueError(
+                f"{name}: missing predicted probabilities."
+            )
+
+        if not np.isfinite(df[probability_col]).all():
+            raise ValueError(
+                f"{name}: non-finite probabilities."
             )
 
         if not df[probability_col].between(0, 1).all():
             raise ValueError(
-                f"{name}: probabilities must be between 0 and 1."
+                f"{name}: probabilities must be in [0, 1]."
             )
 
-    # --------------------------------------------------
-    # 3. Optional Loss and Loss Ratio columns
-    # --------------------------------------------------
+    # ==================================================
+    # 3. Identify optional Loss and LR columns
+    # ==================================================
 
-    optional_metrics = {}
+    optional_columns = {}
 
-    for metric, col, tolerance in [
-        ("Loss", loss_col, loss_tolerance),
-        ("Loss_Ratio", loss_ratio_col, loss_ratio_tolerance)
+    for metric, column in [
+        ("Loss", loss_col),
+        ("Loss_Ratio", loss_ratio_col)
     ]:
 
-        if col is None:
+        if column is None:
             continue
 
-        in_dev = col in dev.columns
-        in_val = col in val.columns
+        in_dev = column in dev.columns
+        in_val = column in val.columns
 
         if in_dev != in_val:
             raise ValueError(
-                f"{col} is present in only one DataFrame."
+                f"{column} exists in only one DataFrame."
             )
 
         if in_dev:
+
+            if column in required_columns:
+                raise ValueError(
+                    f"{column} conflicts with a required column."
+                )
 
             for name, df in [
                 ("Developer", dev),
                 ("Validator", val)
             ]:
 
-                df[col] = pd.to_numeric(
-                    df[col],
+                df[column] = pd.to_numeric(
+                    df[column],
                     errors="raise"
                 )
 
-                if np.isinf(df[col]).any():
+                if np.isinf(df[column]).any():
                     raise ValueError(
-                        f"{name}: infinite values in {col}."
+                        f"{name}: infinite values in {column}."
                     )
 
-            optional_metrics[metric] = (
-                col,
-                tolerance
-            )
+            optional_columns[metric] = column
 
-    # --------------------------------------------------
-    # 4. Match records by unique key
-    # --------------------------------------------------
+    if len(set(optional_columns.values())) != len(
+        optional_columns
+    ):
+        raise ValueError(
+            "Loss and Loss Ratio columns must be different."
+        )
 
-    compare_cols = [
+    # ==================================================
+    # 4. Align records using application identifier
+    # ==================================================
+
+    columns_to_compare = [
         target_col,
         probability_col
-    ] + [
-        col for col, _ in optional_metrics.values()
-    ]
+    ] + list(optional_columns.values())
 
-    selected_cols = list(
-        dict.fromkeys(key_columns + compare_cols)
+    selected_columns = (
+        key_columns + columns_to_compare
     )
 
-    merged = dev[selected_cols].merge(
-        val[selected_cols],
+    merged = dev[selected_columns].merge(
+        val[selected_columns],
         on=key_columns,
         how="outer",
         suffixes=("_DEV", "_VAL"),
@@ -227,52 +249,96 @@ def check_reproducibility(
         merged["_merge"] == "both"
     ].copy()
 
-    # --------------------------------------------------
-    # 5. Record-level comparisons
-    # --------------------------------------------------
+    # ==================================================
+    # 5. Record-level comparison
+    # ==================================================
 
     record_metrics = {
-        "Target": (target_col, 0.0),
-        "Predicted_Probability": (
-            probability_col,
-            probability_tolerance
-        )
+        "Target": target_col,
+        "Predicted_Probability": probability_col
     }
 
-    record_metrics.update(optional_metrics)
+    record_metrics.update(optional_columns)
 
     record_rows = []
     mismatch_frames = []
+    missing_value_rows = []
 
-    for metric, (col, tolerance) in record_metrics.items():
+    for metric, column in record_metrics.items():
 
-        dev_values = matched[f"{col}_DEV"]
-        val_values = matched[f"{col}_VAL"]
+        dev_values = matched[f"{column}_DEV"]
+        val_values = matched[f"{column}_VAL"]
+
+        both_missing = (
+            dev_values.isna()
+            & val_values.isna()
+        )
+
+        one_sided_missing = (
+            dev_values.isna()
+            ^ val_values.isna()
+        )
+
+        both_numeric = (
+            dev_values.notna()
+            & val_values.notna()
+        )
 
         absolute_diff = (
             dev_values - val_values
         ).abs()
 
-        passed = (
-            dev_values.notna()
-            & val_values.notna()
-            & (absolute_diff <= tolerance)
-        )
+        if metric == "Target":
+
+            # Target must match exactly.
+            numeric_match = (
+                both_numeric
+                & (dev_values == val_values)
+            )
+
+        else:
+
+            # All other numeric metrics use 1e-8.
+            numeric_match = (
+                both_numeric
+                & (absolute_diff <= tolerance)
+            )
+
+        # Both missing = matching output pattern.
+        passed = both_missing | numeric_match
 
         failed = ~passed
+
         mismatch_count = int(failed.sum())
+
+        numeric_differences = absolute_diff.loc[
+            both_numeric
+        ]
+
+        max_diff = (
+            numeric_differences.max()
+            if not numeric_differences.empty
+            else np.nan
+        )
 
         record_rows.append({
             "Dataset": dataset_name,
             "Metric": metric,
             "Records_Compared": len(matched),
+            "Both_Missing": int(both_missing.sum()),
+            "One_Sided_Missing": int(
+                one_sided_missing.sum()
+            ),
             "Mismatch_Count": mismatch_count,
             "Mismatch_Percentage": (
                 100 * mismatch_count / len(matched)
-                if len(matched) else np.nan
+                if len(matched) > 0 else np.nan
             ),
-            "Max_Absolute_Difference": absolute_diff.max(),
-            "Tolerance": tolerance,
+            "Max_Absolute_Difference": max_diff,
+            "Tolerance": (
+                0.0 if metric == "Target"
+                else tolerance
+            ),
             "Status": (
                 "PASS"
                 if len(matched) > 0 and mismatch_count == 0
@@ -280,7 +346,22 @@ def check_reproducibility(
             )
         })
 
-        if mismatch_count:
+        missing_value_rows.append({
+            "Dataset": dataset_name,
+            "Metric": metric,
+            "Developer_Missing": int(
+                dev_values.isna().sum()
+            ),
+            "Validator_Missing": int(
+                val_values.isna().sum()
+            ),
+            "Both_Missing": int(both_missing.sum()),
+            "One_Sided_Missing": int(
+                one_sided_missing.sum()
+            )
+        })
+
+        if mismatch_count > 0:
 
             detail = matched.loc[
                 failed,
@@ -289,20 +370,37 @@ def check_reproducibility(
 
             detail["Dataset"] = dataset_name
             detail["Metric"] = metric
+
             detail["Developer_Value"] = (
                 dev_values.loc[failed]
             )
+
             detail["Validator_Value"] = (
                 val_values.loc[failed]
             )
+
             detail["Absolute_Difference"] = (
                 absolute_diff.loc[failed]
             )
-            detail["Tolerance"] = tolerance
+
+            detail["Issue"] = np.where(
+                one_sided_missing.loc[failed],
+                "One-sided missing value",
+                "Numerical mismatch"
+            )
+
+            detail["Tolerance"] = (
+                0.0 if metric == "Target"
+                else tolerance
+            )
 
             mismatch_frames.append(detail)
 
     record_summary = pd.DataFrame(record_rows)
+
+    missing_value_summary = pd.DataFrame(
+        missing_value_rows
+    )
 
     mismatch_columns = key_columns + [
         "Dataset",
@@ -310,109 +408,222 @@ def check_reproducibility(
         "Developer_Value",
         "Validator_Value",
         "Absolute_Difference",
+        "Issue",
         "Tolerance"
     ]
 
     if mismatch_frames:
+
         mismatches = pd.concat(
             mismatch_frames,
             ignore_index=True
         )
+
     else:
+
         mismatches = pd.DataFrame(
             columns=mismatch_columns
         )
 
-    # --------------------------------------------------
-    # 6. Dataset-level performance metrics
-    # --------------------------------------------------
+    # ==================================================
+    # 6. Performance metric eligibility
+    # ==================================================
 
-    def calculate_performance(df):
+    dev_target = matched[f"{target_col}_DEV"]
+    val_target = matched[f"{target_col}_VAL"]
 
-        y = df[target_col].to_numpy(dtype=int)
-        p = df[probability_col].to_numpy(dtype=float)
+    both_targets_present = (
+        dev_target.notna()
+        & val_target.notna()
+    )
 
-        if len(np.unique(y)) != 2:
-            raise ValueError(
-                f"{dataset_name}: AUC requires both "
-                "target classes (0 and 1)."
-            )
+    targets_equal = (
+        dev_target == val_target
+    ).fillna(False)
 
-        return {
-            "AUC": roc_auc_score(y, p),
-            "Brier_Score": brier_score_loss(y, p),
-            "Log_Loss": log_loss(
-                y,
-                p,
-                labels=[0, 1]
-            )
-        }
+    eligible = (
+        both_targets_present
+        & targets_equal
+    )
 
-    dev_performance = calculate_performance(dev)
-    val_performance = calculate_performance(val)
+    y = dev_target.loc[
+        eligible
+    ].to_numpy(dtype=int)
+
+    dev_prob = matched.loc[
+        eligible,
+        f"{probability_col}_DEV"
+    ].to_numpy(dtype=float)
+
+    val_prob = matched.loc[
+        eligible,
+        f"{probability_col}_VAL"
+    ].to_numpy(dtype=float)
+
+    # ==================================================
+    # 7. AUC, Brier Score and Log Loss
+    # ==================================================
 
     performance_rows = []
 
-    for metric in dev_performance:
+    has_observations = len(y) > 0
+    has_both_classes = (
+        has_observations
+        and len(np.unique(y)) == 2
+    )
 
-        dev_value = dev_performance[metric]
-        val_value = val_performance[metric]
+    def add_metric(
+        metric,
+        developer_value,
+        validator_value,
+        evaluable
+    ):
 
-        absolute_diff = abs(dev_value - val_value)
+        if evaluable:
+
+            diff = abs(
+                developer_value - validator_value
+            )
+
+            status = (
+                "PASS" if diff <= tolerance
+                else "FAIL"
+            )
+
+        else:
+
+            developer_value = np.nan
+            validator_value = np.nan
+            diff = np.nan
+            status = "NOT_EVALUABLE"
 
         performance_rows.append({
             "Dataset": dataset_name,
             "Metric": metric,
-            "Developer_Value": dev_value,
-            "Validator_Value": val_value,
-            "Absolute_Difference": absolute_diff,
-            "Tolerance": metric_tolerance,
-            "Status": (
-                "PASS"
-                if absolute_diff <= metric_tolerance
-                else "FAIL"
-            )
+            "Eligible_Records": len(y),
+            "Developer_Value": developer_value,
+            "Validator_Value": validator_value,
+            "Absolute_Difference": diff,
+            "Tolerance": tolerance,
+            "Status": status
         })
+
+    # AUC requires both target classes.
+    if has_both_classes:
+
+        add_metric(
+            "AUC",
+            roc_auc_score(y, dev_prob),
+            roc_auc_score(y, val_prob),
+            True
+        )
+
+    else:
+
+        add_metric("AUC", np.nan, np.nan, False)
+
+    # Brier Score requires at least one observed target.
+    if has_observations:
+
+        add_metric(
+            "Brier_Score",
+            brier_score_loss(y, dev_prob),
+            brier_score_loss(y, val_prob),
+            True
+        )
+
+        add_metric(
+            "Log_Loss",
+            log_loss(
+                y, dev_prob, labels=[0, 1]
+            ),
+            log_loss(
+                y, val_prob, labels=[0, 1]
+            ),
+            True
+        )
+
+    else:
+
+        add_metric(
+            "Brier_Score", np.nan, np.nan, False
+        )
+
+        add_metric(
+            "Log_Loss", np.nan, np.nan, False
+        )
 
     performance_summary = pd.DataFrame(
         performance_rows
     )
 
-    # --------------------------------------------------
-    # 7. Aggregate total Loss
-    # --------------------------------------------------
+    # ==================================================
+    # 8. Aggregate Loss and Mean LR
+    # ==================================================
 
     aggregate_rows = []
 
-    if "Loss" in optional_metrics:
+    for metric, column, method in [
+        ("Total_Loss", loss_col, "sum"),
+        ("Mean_Loss_Ratio", loss_ratio_col, "mean")
+    ]:
 
-        dev_total = dev[loss_col].sum(min_count=1)
-        val_total = val[loss_col].sum(min_count=1)
+        if column is None:
+            continue
 
-        absolute_diff = abs(dev_total - val_total)
+        if column not in dev.columns:
+            continue
 
-        complete_loss = (
-            dev[loss_col].notna().all()
-            and val[loss_col].notna().all()
+        if method == "sum":
+
+            dev_value = dev[column].sum(
+                min_count=1
+            )
+
+            val_value = val[column].sum(
+                min_count=1
+            )
+
+        else:
+
+            dev_value = dev[column].mean()
+            val_value = val[column].mean()
+
+        dev_missing = int(
+            dev[column].isna().sum()
         )
 
-        passed = (
-            complete_loss
-            and np.isfinite(dev_total)
-            and np.isfinite(val_total)
-            and absolute_diff <= total_loss_tolerance
+        val_missing = int(
+            val[column].isna().sum()
         )
+
+        if pd.notna(dev_value) and pd.notna(val_value):
+
+            difference = abs(
+                dev_value - val_value
+            )
+
+            status = (
+                "PASS"
+                if difference <= tolerance
+                else "FAIL"
+            )
+
+        else:
+
+            difference = np.nan
+            status = "NOT_EVALUABLE"
 
         aggregate_rows.append({
             "Dataset": dataset_name,
-            "Metric": "Total_Loss",
-            "Developer_Value": dev_total,
-            "Validator_Value": val_total,
-            "Absolute_Difference": absolute_diff,
-            "Tolerance": total_loss_tolerance,
-            "Status": (
-                "PASS" if passed else "FAIL"
-            )
+            "Metric": metric,
+            "Developer_Value": dev_value,
+            "Validator_Value": val_value,
+            "Developer_Missing": dev_missing,
+            "Validator_Missing": val_missing,
+            "Absolute_Difference": difference,
+            "Tolerance": tolerance,
+            "Status": status
         })
 
     aggregate_summary = pd.DataFrame(
@@ -422,26 +633,42 @@ def check_reproducibility(
             "Metric",
             "Developer_Value",
             "Validator_Value",
+            "Developer_Missing",
+            "Validator_Missing",
             "Absolute_Difference",
             "Tolerance",
             "Status"
         ]
     )
 
-    # --------------------------------------------------
-    # 8. Overall PASS / FAIL
-    # --------------------------------------------------
+    # ==================================================
+    # 9. Overall reproducibility status
+    # ==================================================
 
-    overall_pass = (
+    record_alignment_pass = (
         len(matched) > 0
         and missing_records.empty
-        and record_summary["Status"].eq("PASS").all()
-        and performance_summary["Status"].eq("PASS").all()
-        and (
-            aggregate_summary.empty
-            or aggregate_summary["Status"].eq("PASS").all()
-        )
     )
+
+    record_values_pass = (
+        record_summary["Status"].eq("PASS").all()
+    )
+
+    performance_pass = (
+        performance_summary["Status"].eq("PASS").all()
+    )
+
+    aggregate_pass = (
+        aggregate_summary.empty
+        or aggregate_summary["Status"].eq("PASS").all()
+    )
+
+    overall_pass = all([
+        record_alignment_pass,
+        record_values_pass,
+        performance_pass,
+        aggregate_pass
+    ])
 
     overall_status = (
         "PASS" if overall_pass else "FAIL"
@@ -454,18 +681,22 @@ def check_reproducibility(
         "Matched_Rows": len(matched),
         "Missing_Extra_Rows": len(missing_records),
         "Record_Mismatches": len(mismatches),
+        "Eligible_Performance_Records": int(
+            eligible.sum()
+        ),
         "Overall_Status": overall_status
     }])
 
-    # --------------------------------------------------
-    # 9. Optional report export
-    # --------------------------------------------------
+    # ==================================================
+    # 10. Optional Excel and CSV reports
+    # ==================================================
 
     report_path = None
 
     if output_folder is not None:
 
         output_dir = Path(output_folder)
+
         output_dir.mkdir(
             parents=True,
             exist_ok=True
@@ -473,34 +704,28 @@ def check_reproducibility(
 
         safe_name = "".join(
             c if c.isalnum() or c in "-_" else "_"
-            for c in dataset_name
+            for c in str(dataset_name)
         )
 
         if not safe_name:
-            raise ValueError("Invalid dataset name.")
+            raise ValueError(
+                "Dataset name cannot be empty."
+            )
 
         report_path = (
             output_dir
             / f"{safe_name}_Reproducibility.xlsx"
         )
 
-        mismatch_path = (
-            output_dir
-            / f"{safe_name}_Mismatches.csv"
-        )
-
-        missing_path = (
-            output_dir
-            / f"{safe_name}_Missing_Records.csv"
-        )
-
         mismatches.to_csv(
-            mismatch_path,
+            output_dir
+            / f"{safe_name}_Mismatches.csv",
             index=False
         )
 
         missing_records.to_csv(
-            missing_path,
+            output_dir
+            / f"{safe_name}_Missing_Records.csv",
             index=False
         )
 
@@ -527,9 +752,15 @@ def check_reproducibility(
                 index=False
             )
 
+            missing_value_summary.to_excel(
+                writer,
+                sheet_name="Missing Value Summary",
+                index=False
+            )
+
             aggregate_summary.to_excel(
                 writer,
-                sheet_name="Aggregate Loss",
+                sheet_name="Aggregate Checks",
                 index=False
             )
 
@@ -545,29 +776,36 @@ def check_reproducibility(
                 index=False
             )
 
-    # --------------------------------------------------
-    # 10. Display and return
-    # --------------------------------------------------
+    # ==================================================
+    # 11. Display summary
+    # ==================================================
 
-    print(f"\n{'=' * 60}")
-    print(f"REPRODUCIBILITY: {dataset_name}")
-    print(f"{'=' * 60}")
+    print("\n" + "=" * 65)
+    print(f"REPRODUCIBILITY ASSESSMENT: {dataset_name}")
+    print("=" * 65)
 
-    print("\nRecord-Level Checks:")
-    print(record_summary.to_string(index=False))
+    print("\nRECORD-LEVEL CHECKS")
+    display(record_summary)
 
-    print("\nDataset-Level Metrics:")
-    print(performance_summary.to_string(index=False))
+    print("\nPERFORMANCE METRICS")
+    display(performance_summary)
+
+    print("\nMISSING VALUE SUMMARY")
+    display(missing_value_summary)
 
     if not aggregate_summary.empty:
-        print("\nAggregate Total Loss:")
-        print(aggregate_summary.to_string(index=False))
 
-    print(f"\nMissing/Extra Records: {len(missing_records)}")
-    print(f"Overall Status: {overall_status}")
+        print("\nAGGREGATE CHECKS")
+        display(aggregate_summary)
+
+    print("\nOVERALL RESULT:", overall_status)
 
     if report_path is not None:
-        print(f"Report: {report_path}")
+        print("Excel report:", report_path)
+
+    # ==================================================
+    # 12. Return all results
+    # ==================================================
 
     return {
         "dataset": dataset_name,
@@ -575,11 +813,138 @@ def check_reproducibility(
         "overall_summary": overall_summary,
         "record_summary": record_summary,
         "performance_summary": performance_summary,
+        "missing_value_summary": missing_value_summary,
         "aggregate_summary": aggregate_summary,
         "mismatches": mismatches,
         "missing_records": missing_records,
         "report_path": (
             str(report_path)
-            if report_path is not None else None
+            if report_path is not None
+            else None
         )
     }
+
+
+==================
+
+train_results = check_reproducibility(
+    developer_df=df_train_mod,
+    validator_df=df_train_val,
+    dataset_name="Train",
+    key_columns=["ApplicationID"],
+    target_col="Target",
+    probability_col="Predicted_Probability",
+    loss_col="SMIE_LOSS",
+    loss_ratio_col="SMIE_LR",
+    tolerance=1e-8,
+    output_folder="reproducibility_reports"
+)
+
+===============
+
+validation_results = check_reproducibility(
+    developer_df=df_validation_mod,
+    validator_df=df_validation_val,
+    dataset_name="Validation",
+    key_columns=["ApplicationID"],
+    target_col="Target",
+    probability_col="Predicted_Probability",
+    loss_col="SMIE_LOSS",
+    loss_ratio_col="SMIE_LR",
+    tolerance=1e-8,
+    output_folder="reproducibility_reports"
+)
+
+=============
+
+overall_results = pd.concat(
+    [
+        train_results["overall_summary"],
+        validation_results["overall_summary"]
+    ],
+    ignore_index=True
+)
+
+display(overall_results)
+
+=========
+
+
+combined_record_results = pd.concat(
+    [
+        train_results["record_summary"],
+        validation_results["record_summary"]
+    ],
+    ignore_index=True
+)
+
+display(combined_record_results)
+
+==========
+
+combined_performance = pd.concat(
+    [
+        train_results["performance_summary"],
+        validation_results["performance_summary"]
+    ],
+    ignore_index=True
+)
+
+display(combined_performance)
+
+combined_summary.to_excel(
+    "reproducibility_reports/Combined_Reproducibility_Summary.xlsx",
+    index=False
+)
+
+==========
+
+display(
+    train_results["missing_value_summary"].query(
+        "Metric == 'Loss_Ratio'"
+    )
+)
+
+display(
+    train_results["mismatches"].query(
+        "Metric == 'Loss_Ratio'"
+    )
+)
+
+===========
+
+
+from IPython.display import display
+
+
+def display_reproducibility_results(results):
+
+    dataset = results["dataset"]
+
+    print(f"\n{'=' * 65}")
+    print(f"{dataset.upper()} REPRODUCIBILITY RESULTS")
+    print(f"{'=' * 65}")
+
+    print("\n1. Overall Reproducibility Summary")
+    display(results["overall_summary"])
+
+    print("\n2. Record-Level Comparison")
+    display(results["record_summary"])
+
+    print("\n3. Performance Metrics")
+    display(results["performance_summary"])
+
+    print("\n4. Missing Value Summary")
+    display(results["missing_value_summary"])
+
+    print("\n5. Aggregate Loss and Loss Ratio")
+    display(results["aggregate_summary"])
+
+    print("\n6. Record-Level Mismatches")
+    display(results["mismatches"])
+
+    print("\n7. Missing / Extra Records")
+    display(results["missing_records"])
+
+
+
