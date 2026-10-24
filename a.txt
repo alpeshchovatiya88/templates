@@ -1,270 +1,751 @@
+%pip install openpyxl
+
+=========
 
 import pandas as pd
-from openpyxl import Workbook
-from openpyxl.styles import Font, PatternFill, Alignment
-from openpyxl.worksheet.datavalidation import DataValidation
-from openpyxl.utils import get_column_letter
-from openpyxl.workbook.properties import CalcProperties
+import numpy as np
+
+from pathlib import Path
+from datetime import datetime
+
+from sklearn.metrics import (
+    roc_auc_score,
+    accuracy_score,
+    precision_score,
+    recall_score,
+    brier_score_loss,
+    log_loss
+)
 
 
-def movement_summary(
-    df1,
-    df2,
-    id_col,
-    decile_col="rr_model_decile",
-    region_col="economic_region",
-    name1=None,
-    name2=None
+============
+
+
+def check_reproducibility(
+    developer_file,
+    validator_file,
+    dataset_name,
+    key_columns,
+    target_col="Target",
+    probability_col="Predicted_Probability",
+    label_col="Prediction_Label",
+    probability_tolerance=1e-8,
+    metric_tolerance=1e-8,
+    loss_tolerance=1e-6,
+    loss_ratio_tolerance=1e-8,
+    total_loss_tolerance=1e-4,
+    loss_col="Loss",
+    loss_ratio_col="Loss_Ratio",
+    output_folder="reproducibility_reports"
 ):
+    """
+    Reproducibility testing between developer and validator CSVs.
 
-    # 1. Prepare data
-    a = df1[[id_col, decile_col, region_col]].rename(
-        columns={decile_col: "base"}
+    Checks:
+      1. Record alignment, missing/extra IDs
+      2. Exact target and predicted-label comparison
+      3. Predicted probability comparison
+      4. Dataset-level AUC, accuracy, precision, recall,
+         Brier score and log loss
+      5. Optional Loss and Loss Ratio comparisons
+      6. Optional aggregate Total Loss
+      7. Excel and CSV exception reports
+
+    Loss and Loss Ratio are optional:
+      - Both files contain the column: compare it.
+      - Neither file contains the column: skip it.
+      - Only one file contains it: raise an error.
+
+    AUC and other performance metrics are calculated
+    independently from target, label and probability.
+    """
+
+    # ========================================================
+    # 1. Validate configuration
+    # ========================================================
+
+    key_columns = list(key_columns)
+
+    if not key_columns:
+        raise ValueError("At least one key column is required.")
+
+    required_columns = (
+        key_columns
+        + [target_col, probability_col, label_col]
     )
 
-    b = df2[[id_col, decile_col]].rename(
-        columns={decile_col: "compare"}
+    if len(set(required_columns)) != len(required_columns):
+        raise ValueError(
+            "Key, target, probability and label columns "
+            "must have distinct names."
+        )
+
+    tolerances = {
+        "Probability": probability_tolerance,
+        "Performance": metric_tolerance,
+        "Loss": loss_tolerance,
+        "Loss_Ratio": loss_ratio_tolerance,
+        "Total_Loss": total_loss_tolerance
+    }
+
+    for name, tolerance in tolerances.items():
+        if not np.isfinite(tolerance) or tolerance < 0:
+            raise ValueError(
+                f"{name} tolerance must be finite and >= 0."
+            )
+
+    # ========================================================
+    # 2. Read files
+    # ========================================================
+
+    key_dtypes = {
+        col: "string" for col in key_columns
+    }
+
+    dev = pd.read_csv(
+        developer_file,
+        dtype=key_dtypes,
+        low_memory=False
     )
 
-    temp = a.merge(
-        b,
-        on=id_col,
-        how="inner",
+    val = pd.read_csv(
+        validator_file,
+        dtype=key_dtypes,
+        low_memory=False
+    )
+
+    print(f"\nDataset: {dataset_name}")
+    print(f"Developer records: {len(dev):,}")
+    print(f"Validator records: {len(val):,}")
+
+    # ========================================================
+    # 3. Validate required columns and IDs
+    # ========================================================
+
+    for name, df in [
+        ("Developer", dev),
+        ("Validator", val)
+    ]:
+
+        if not df.columns.is_unique:
+            raise ValueError(
+                f"{name}: duplicate column names."
+            )
+
+        missing_cols = [
+            col for col in required_columns
+            if col not in df.columns
+        ]
+
+        if missing_cols:
+            raise ValueError(
+                f"{name}: missing columns {missing_cols}"
+            )
+
+        if df[key_columns].isna().any().any():
+            raise ValueError(
+                f"{name}: missing record IDs."
+            )
+
+        if df.duplicated(subset=key_columns).any():
+            raise ValueError(
+                f"{name}: duplicate record IDs."
+            )
+
+        for col in [
+            target_col,
+            probability_col,
+            label_col
+        ]:
+
+            original = df[col]
+
+            converted = pd.to_numeric(
+                original,
+                errors="coerce"
+            )
+
+            invalid = (
+                original.notna()
+                & converted.isna()
+            )
+
+            if invalid.any():
+                raise ValueError(
+                    f"{name}: nonnumeric values in {col}."
+                )
+
+            if converted.isna().any():
+                raise ValueError(
+                    f"{name}: missing values in {col}."
+                )
+
+            if not np.isfinite(converted).all():
+                raise ValueError(
+                    f"{name}: non-finite values in {col}."
+                )
+
+            df[col] = converted
+
+        # Binary classification validation.
+        if not df[target_col].isin([0, 1]).all():
+            raise ValueError(
+                f"{name}: target must be 0 or 1."
+            )
+
+        if not df[label_col].isin([0, 1]).all():
+            raise ValueError(
+                f"{name}: predicted label must be 0 or 1."
+            )
+
+        if not df[probability_col].between(0, 1).all():
+            raise ValueError(
+                f"{name}: probability must be in [0, 1]."
+            )
+
+    # ========================================================
+    # 4. Identify optional columns
+    # ========================================================
+
+    optional_metrics = {}
+
+    for metric_name, column, tolerance in [
+        ("Loss", loss_col, loss_tolerance),
+        ("Loss_Ratio", loss_ratio_col, loss_ratio_tolerance)
+    ]:
+
+        if column is None:
+            continue
+
+        in_dev = column in dev.columns
+        in_val = column in val.columns
+
+        if in_dev != in_val:
+            raise ValueError(
+                f"{column} exists in only one CSV."
+            )
+
+        if in_dev and in_val:
+
+            for name, df in [
+                ("Developer", dev),
+                ("Validator", val)
+            ]:
+
+                original = df[column]
+
+                converted = pd.to_numeric(
+                    original,
+                    errors="coerce"
+                )
+
+                invalid = (
+                    original.notna()
+                    & converted.isna()
+                )
+
+                if invalid.any():
+                    raise ValueError(
+                        f"{name}: nonnumeric {column}."
+                    )
+
+                if np.isinf(converted).any():
+                    raise ValueError(
+                        f"{name}: infinite {column}."
+                    )
+
+                df[column] = converted
+
+            optional_metrics[metric_name] = (
+                column,
+                tolerance
+            )
+
+    # ========================================================
+    # 5. Align records using unique identifiers
+    # ========================================================
+
+    compare_columns = (
+        [target_col, probability_col, label_col]
+        + [
+            column
+            for column, _ in optional_metrics.values()
+        ]
+    )
+
+    selected_columns = (
+        key_columns + list(dict.fromkeys(compare_columns))
+    )
+
+    merged = dev[selected_columns].merge(
+        val[selected_columns],
+        on=key_columns,
+        how="outer",
+        suffixes=("_DEV", "_VAL"),
+        indicator=True,
         validate="one_to_one"
     )
 
-    # 2. Convert deciles to numeric
-    for col in ["base", "compare"]:
-        temp[col] = pd.to_numeric(
-            temp[col].astype(str).str.extract(r"(\d+)")[0],
-            errors="coerce"
-        )
-
-    temp = temp.dropna(
-        subset=["base", "compare"]
-    ).copy()
-
-    temp = temp[
-        temp["base"].between(1, 20) &
-        temp["compare"].between(1, 20)
+    missing_records = merged.loc[
+        merged["_merge"] != "both",
+        key_columns + ["_merge"]
     ].copy()
 
-    # 3. Calculate movement
-    temp["movement"] = (
-        temp["compare"] - temp["base"]
-    )
-
-    temp["deciles_moved"] = (
-        temp["movement"].abs().astype(int)
-    )
-
-    temp["Direction"] = "No Movement"
-
-    temp.loc[
-        temp["movement"] < 0, "Direction"
-    ] = "Lower"
-
-    temp.loc[
-        temp["movement"] > 0, "Direction"
-    ] = "Higher"
-
-    # 4. Add Overall alongside regions
-    temp["Economic Region"] = (
-        temp[region_col]
-        .fillna("Missing")
+    missing_records["Issue"] = (
+        missing_records["_merge"]
         .astype(str)
+        .replace({
+            "left_only": "Missing in Validator",
+            "right_only": "Extra in Validator"
+        })
     )
 
-    # Reserve Overall as a summary label
-    if (temp["Economic Region"] == "Overall").any():
-        raise ValueError(
-            "'Overall' already exists as an Economic Region."
+    missing_records = missing_records[
+        key_columns + ["Issue"]
+    ].reset_index(drop=True)
+
+    matched = merged.loc[
+        merged["_merge"] == "both"
+    ].copy()
+
+    # ========================================================
+    # 6. Record-level comparisons
+    # ========================================================
+
+    record_config = {
+        "Target": (target_col, 0.0),
+        "Prediction_Label": (label_col, 0.0),
+        "Predicted_Probability": (
+            probability_col,
+            probability_tolerance
+        )
+    }
+
+    record_config.update(optional_metrics)
+
+    record_summary_rows = []
+    mismatch_frames = []
+
+    for metric_name, (column, tolerance) in (
+        record_config.items()
+    ):
+
+        dev_values = matched[f"{column}_DEV"]
+        val_values = matched[f"{column}_VAL"]
+
+        difference = (dev_values - val_values).abs()
+
+        valid = (
+            dev_values.notna()
+            & val_values.notna()
         )
 
-    overall = temp.copy()
-    overall["Economic Region"] = "Overall"
+        passed = valid & (difference <= tolerance)
 
-    all_data = pd.concat(
-        [overall, temp],
-        ignore_index=True
-    )
+        failed = ~passed
+        mismatch_count = int(failed.sum())
 
-    # 5. Calculate counts
-    counts = (
-        all_data.groupby(
-            [
-                "Economic Region",
-                "deciles_moved",
-                "Direction"
+        record_summary_rows.append({
+            "Dataset": dataset_name,
+            "Metric": metric_name,
+            "Level": "Record",
+            "Records_Compared": len(matched),
+            "Mismatch_Count": mismatch_count,
+            "Mismatch_Percentage": (
+                100 * mismatch_count / len(matched)
+                if len(matched) else np.nan
+            ),
+            "Max_Absolute_Difference": difference.max(),
+            "Tolerance": tolerance,
+            "Status": (
+                "PASS"
+                if len(matched) > 0 and mismatch_count == 0
+                else "FAIL"
+            )
+        })
+
+        if mismatch_count > 0:
+
+            detail = matched.loc[
+                failed,
+                key_columns
+            ].copy()
+
+            detail["Dataset"] = dataset_name
+            detail["Metric"] = metric_name
+            detail["Developer_Value"] = (
+                dev_values.loc[failed]
+            )
+            detail["Validator_Value"] = (
+                val_values.loc[failed]
+            )
+            detail["Absolute_Difference"] = (
+                difference.loc[failed]
+            )
+            detail["Tolerance"] = tolerance
+            detail["Status"] = "FAIL"
+
+            mismatch_frames.append(detail)
+
+    record_summary = pd.DataFrame(record_summary_rows)
+
+    if mismatch_frames:
+        mismatches = pd.concat(
+            mismatch_frames,
+            ignore_index=True
+        )
+    else:
+        mismatches = pd.DataFrame(
+            columns=key_columns + [
+                "Dataset",
+                "Metric",
+                "Developer_Value",
+                "Validator_Value",
+                "Absolute_Difference",
+                "Tolerance",
+                "Status"
             ]
         )
-        .size()
-        .reset_index(name="Count")
-    )
 
-    totals = (
-        all_data.groupby("Economic Region")
-        .size()
-        .to_dict()
-    )
+    # ========================================================
+    # 7. Dataset-level performance metrics
+    # ========================================================
 
-    regions = ["Overall"] + sorted(
-        r for r in totals if r != "Overall"
-    )
+    def calculate_performance(df):
 
-    # 6. Create Excel workbook
-    wb = Workbook()
+        y_true = df[target_col].to_numpy(dtype=int)
+        y_pred = df[label_col].to_numpy(dtype=int)
+        y_prob = df[probability_col].to_numpy(dtype=float)
 
-    ws = wb.active
-    ws.title = "Movement Summary"
-
-    data_ws = wb.create_sheet("Data")
-
-    # 7. Hidden data table
-    data_ws.append([
-        "Region",
-        "Movement",
-        "Direction",
-        "Count"
-    ])
-
-    for row in counts.itertuples(
-        index=False, name=None
-    ):
-        data_ws.append(list(row))
-
-    data_ws["F1"] = "Region"
-    data_ws["G1"] = "Total"
-
-    for i, region in enumerate(regions, start=2):
-        data_ws.cell(i, 6, region)
-        data_ws.cell(i, 7, totals[region])
-
-    last_row = data_ws.max_row
-    total_last = len(regions) + 1
-
-    # 8. Main summary title
-    ws["A1"] = "Economic Region"
-    ws["B1"] = "Overall"
-
-    ws["A2"] = (
-        f"Ventile Movement: "
-        f"DataSplit Seed {name1} vs Model-{name2}"
-    )
-
-    headers = [
-        "Deciles Moved",
-        "Lower",
-        "Higher",
-        "No Movement",
-        "Total Files",
-        "Percentage"
-    ]
-
-    for col, header in enumerate(headers, 1):
-        ws.cell(3, col, header)
-
-    # 9. Dynamic 20-row summary
-    for r in range(4, 24):
-
-        ws.cell(r, 1, r - 4)
-
-        for col, direction in [
-            (2, "Lower"),
-            (3, "Higher"),
-            (4, "No Movement")
-        ]:
-
-            formula = (
-                f'=SUMIFS('
-                f'Data!$D$2:$D${last_row},'
-                f'Data!$A$2:$A${last_row},$B$1,'
-                f'Data!$B$2:$B${last_row},$A{r},'
-                f'Data!$C$2:$C${last_row},'
-                f'"{direction}")'
+        if len(y_true) == 0:
+            raise ValueError(
+                "Cannot calculate metrics on empty data."
             )
 
-            ws.cell(r, col, formula)
+        if len(np.unique(y_true)) != 2:
+            raise ValueError(
+                "AUC requires both target classes "
+                f"in {dataset_name}."
+            )
 
-        # Total Files
-        ws.cell(
-            r, 5,
-            f"=SUM(B{r}:D{r})"
+        return {
+            "AUC": roc_auc_score(y_true, y_prob),
+            "Accuracy": accuracy_score(y_true, y_pred),
+            "Precision": precision_score(
+                y_true,
+                y_pred,
+                zero_division=0
+            ),
+            "Recall": recall_score(
+                y_true,
+                y_pred,
+                zero_division=0
+            ),
+            "Brier_Score": brier_score_loss(
+                y_true,
+                y_prob
+            ),
+            "Log_Loss": log_loss(
+                y_true,
+                y_prob,
+                labels=[0, 1]
+            )
+        }
+
+    dev_metrics = calculate_performance(dev)
+    val_metrics = calculate_performance(val)
+
+    performance_rows = []
+
+    for metric_name in dev_metrics:
+
+        dev_value = dev_metrics[metric_name]
+        val_value = val_metrics[metric_name]
+
+        difference = abs(dev_value - val_value)
+
+        performance_rows.append({
+            "Dataset": dataset_name,
+            "Metric": metric_name,
+            "Level": "Dataset",
+            "Developer_Value": dev_value,
+            "Validator_Value": val_value,
+            "Absolute_Difference": difference,
+            "Tolerance": metric_tolerance,
+            "Status": (
+                "PASS"
+                if difference <= metric_tolerance
+                else "FAIL"
+            )
+        })
+
+    performance_summary = pd.DataFrame(
+        performance_rows
+    )
+
+    # ========================================================
+    # 8. Aggregate total loss comparison
+    # ========================================================
+
+    aggregate_rows = []
+
+    if "Loss" in optional_metrics:
+
+        dev_total = dev[loss_col].sum(min_count=1)
+        val_total = val[loss_col].sum(min_count=1)
+
+        difference = abs(dev_total - val_total)
+
+        complete_loss = (
+            dev[loss_col].notna().all()
+            and val[loss_col].notna().all()
         )
 
-        # Percentage within selected region
-        ws.cell(
-            r, 6,
-            f'=IFERROR('
-            f'E{r}/SUMIF('
-            f'Data!$F$2:$F${total_last},'
-            f'$B$1,'
-            f'Data!$G$2:$G${total_last}'
-            f'),0)'
+        passed = (
+            complete_loss
+            and np.isfinite(dev_total)
+            and np.isfinite(val_total)
+            and difference <= total_loss_tolerance
         )
 
-        ws.cell(r, 6).number_format = "0.00%"
+        aggregate_rows.append({
+            "Dataset": dataset_name,
+            "Metric": "Total_Loss",
+            "Developer_Value": dev_total,
+            "Validator_Value": val_total,
+            "Absolute_Difference": difference,
+            "Tolerance": total_loss_tolerance,
+            "Status": "PASS" if passed else "FAIL"
+        })
 
-    # 10. Economic Region dropdown
-    dropdown = DataValidation(
-        type="list",
-        formula1=f"'Data'!$F$2:$F${total_last}",
-        allow_blank=False
+    aggregate_summary = pd.DataFrame(
+        aggregate_rows,
+        columns=[
+            "Dataset",
+            "Metric",
+            "Developer_Value",
+            "Validator_Value",
+            "Absolute_Difference",
+            "Tolerance",
+            "Status"
+        ]
     )
 
-    dropdown.error = "Select a region from the list."
-    dropdown.errorTitle = "Invalid Region"
-    dropdown.showErrorMessage = True
+    # ========================================================
+    # 9. Overall reproducibility assessment
+    # ========================================================
 
-    ws.add_data_validation(dropdown)
-    dropdown.add(ws["B1"])
-
-    # 11. Formatting
-    header_fill = PatternFill(
-        "solid", fgColor="17365D"
+    records_pass = (
+        missing_records.empty
+        and len(matched) > 0
     )
 
-    for cell in ws[3]:
-        cell.fill = header_fill
-        cell.font = Font(
-            color="FFFFFF",
-            bold=True
+    record_metrics_pass = (
+        record_summary["Status"].eq("PASS").all()
+    )
+
+    performance_pass = (
+        performance_summary["Status"].eq("PASS").all()
+    )
+
+    aggregate_pass = (
+        aggregate_summary.empty
+        or aggregate_summary["Status"].eq("PASS").all()
+    )
+
+    overall_pass = all([
+        records_pass,
+        record_metrics_pass,
+        performance_pass,
+        aggregate_pass
+    ])
+
+    overall_status = (
+        "PASS" if overall_pass else "FAIL"
+    )
+
+    overall_summary = pd.DataFrame([{
+        "Dataset": dataset_name,
+        "Developer_File": str(developer_file),
+        "Validator_File": str(validator_file),
+        "Developer_Rows": len(dev),
+        "Validator_Rows": len(val),
+        "Matched_Rows": len(matched),
+        "Missing_Extra_Rows": len(missing_records),
+        "Record_Mismatches": len(mismatches),
+        "Execution_Time": datetime.now().isoformat(
+            timespec="seconds"
+        ),
+        "Overall_Status": overall_status
+    }])
+
+    # ========================================================
+    # 10. Export reproducibility report
+    # ========================================================
+
+    output_dir = Path(output_folder)
+    output_dir.mkdir(
+        parents=True,
+        exist_ok=True
+    )
+
+    safe_name = "".join(
+        c if c.isalnum() or c in "-_" else "_"
+        for c in dataset_name
+    )
+
+    if not safe_name:
+        raise ValueError("Invalid dataset name.")
+
+    report_path = (
+        output_dir
+        / f"{safe_name}_Reproducibility.xlsx"
+    )
+
+    mismatch_csv = (
+        output_dir
+        / f"{safe_name}_Mismatches.csv"
+    )
+
+    missing_csv = (
+        output_dir
+        / f"{safe_name}_Missing_Records.csv"
+    )
+
+    mismatches.to_csv(
+        mismatch_csv,
+        index=False
+    )
+
+    missing_records.to_csv(
+        missing_csv,
+        index=False
+    )
+
+    excel_limit = 1_048_575
+
+    with pd.ExcelWriter(
+        report_path,
+        engine="openpyxl"
+    ) as writer:
+
+        overall_summary.to_excel(
+            writer,
+            sheet_name="Executive Summary",
+            index=False
         )
-        cell.alignment = Alignment(
-            horizontal="center"
+
+        record_summary.to_excel(
+            writer,
+            sheet_name="Record Checks",
+            index=False
         )
 
-    ws["A1"].font = Font(bold=True)
+        performance_summary.to_excel(
+            writer,
+            sheet_name="Performance Metrics",
+            index=False
+        )
 
-    ws["B1"].fill = PatternFill(
-        "solid", fgColor="FFF2CC"
-    )
-    ws["B1"].font = Font(bold=True)
+        aggregate_summary.to_excel(
+            writer,
+            sheet_name="Aggregate Loss",
+            index=False
+        )
 
-    for col in range(1, 7):
-        ws.column_dimensions[
-            get_column_letter(col)
-        ].width = 20
+        mismatches.head(excel_limit).to_excel(
+            writer,
+            sheet_name="Mismatches",
+            index=False
+        )
 
-    ws.freeze_panes = "B4"
+        missing_records.head(excel_limit).to_excel(
+            writer,
+            sheet_name="Missing Records",
+            index=False
+        )
 
-    # Hide supporting data
-    data_ws.sheet_state = "hidden"
+    # ========================================================
+    # 11. Display results
+    # ========================================================
 
-    # Recalculate formulas when opened in Excel
-    wb.calculation = CalcProperties(
-        calcMode="auto",
-        fullCalcOnLoad=True
-    )
+    print("\n" + "=" * 65)
+    print(f"REPRODUCIBILITY RESULTS: {dataset_name}")
+    print("=" * 65)
 
-    # 12. Save ONE Excel file
-    filename = (
-        f"Ventile_Movement_DataSplit_Seed_"
-        f"{name1}_vs_{name2}.xlsx"
-    )
+    print("\nRECORD-LEVEL CHECKS")
+    print(record_summary.to_string(index=False))
 
-    wb.save(filename)
+    print("\nDATASET-LEVEL PERFORMANCE METRICS")
+    print(performance_summary.to_string(index=False))
 
-    print(f"Excel file created: {filename}")
+    if not aggregate_summary.empty:
+        print("\nAGGREGATE LOSS")
+        print(aggregate_summary.to_string(index=False))
 
-    return filename
+    print(f"\nMissing / Extra Records: {len(missing_records)}")
+    print(f"Total Record Mismatches: {len(mismatches)}")
+
+    print(f"\nOVERALL STATUS: {overall_status}")
+    print(f"Report: {report_path}")
+
+    return {
+        "dataset": dataset_name,
+        "overall_status": overall_status,
+        "overall_summary": overall_summary,
+        "record_summary": record_summary,
+        "performance_summary": performance_summary,
+        "aggregate_summary": aggregate_summary,
+        "mismatches": mismatches,
+        "missing_records": missing_records,
+        "report_path": str(report_path)
+    }
+
+
+=============
+
+train_results = check_reproducibility(
+    developer_file="developer_train.csv",
+    validator_file="validator_train.csv",
+    dataset_name="Train",
+    key_columns=["PolicyID"]
+)
+
+============
+
+validation_results = check_reproducibility(
+    developer_file="developer_validation.csv",
+    validator_file="validator_validation.csv",
+    dataset_name="Validation",
+    key_columns=["PolicyID"]
+)
+
+========
+
+combined_performance = pd.concat(
+    [
+        train_results["performance_summary"],
+        validation_results["performance_summary"]
+    ],
+    ignore_index=True
+)
+
+display(combined_performance)
+
+============
+
+overall_results = pd.concat(
+    [
+        train_results["overall_summary"],
+        validation_results["overall_summary"]
+    ],
+    ignore_index=True
+)
+
+display(overall_results)
+
+==========
+
+display(
+    validation_results["mismatches"].head(20)
+)
