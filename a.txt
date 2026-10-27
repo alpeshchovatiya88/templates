@@ -1,1 +1,29 @@
 
+# ============================================================
+# PREPROCESSING
+# ============================================================
+enable_preprocessing: true
+dt_model: "202607"
+delq_claim_cutoff_dt: "202602"
+
+snowflake_config:
+  SNOWFLAKE_SECRET_NAME: "snowflake/connection/secret"
+
+fixed_feature_values:
+  contract_rate: 4.25
+  contract_rate_add_on: 1.00
+
+feature_bins:
+  dsr_diff:
+    cutpoints: [5, 10, 15, 20]
+    right: true
+  num_of_bor:
+    cutpoints: [1, 2]
+    right: true
+  actltv:
+    cutpoints: [50, 55, 60, 65, 70, 75, 80, 85, 90, 95]
+    right: true
+
+# ============================================================
+# DOCKER IMAGES
+# ============================================================
