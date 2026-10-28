@@ -1,42 +1,14 @@
 counts = pd.crosstab(
     df["BOOKYEAR"],
-    df["LOB_RENAMED"]
+    df["LOB_RENEWED"]
 )
 
-display(counts)
+percentages = counts.div(
+    counts.sum(axis=1), axis=0
+).mul(100)
 
-=====
+result = counts.astype(str) + " (" + percentages.round(2).astype(str) + "%)"
 
-counts = pd.crosstab(
-    df["BOOKYEAR"],
-    df["LOB_RENAMED"],
-    margins=True,
-    margins_name="Total"
-)
+result["Total"] = counts.sum(axis=1)
 
-display(counts)
-
-======
-
-percentages = pd.crosstab(
-    df["BOOKYEAR"],
-    df["LOB_RENAMED"],
-    normalize="index"
-).mul(100).round(2)
-
-display(percentages)
-
-=======
-
-counts.drop(index="Total").plot(
-    kind="bar",
-    figsize=(10, 5)
-)
-
-plt.title("LOB_RENAMED Distribution by BOOKYEAR")
-plt.xlabel("BOOKYEAR")
-plt.ylabel("Application Count")
-plt.legend(title="LOB_RENAMED")
-plt.xticks(rotation=0)
-plt.tight_layout()
-plt.show()
+display(result)
