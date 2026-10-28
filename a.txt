@@ -6,78 +6,39 @@ def make_shap_importance(
     df: pd.DataFrame,
     feature_cols: list,
     subgroup_cols: list = None,
-    shap_prefix: str = "SHAP_",
     min_rows: int = 200,
     max_levels: int = 12,
     combine_filters: bool = False,
     output_path: str = None,
 ) -> pd.DataFrame:
-    """
-    Calculate SHAP feature importance using existing row-level SHAP values.
-
-    Parameters
-    ----------
-    df : DataFrame
-        Input data containing SHAP values and subgroup columns.
-
-    feature_cols : list
-        Predictor names, e.g. ["AGE", "INCOME", "CREDIT_SCORE"].
-
-    subgroup_cols : list, optional
-        Columns used for subgroup analysis.
-        Example: ["REGION", "CUSTOMER_TYPE"].
-
-    shap_prefix : str
-        Prefix for SHAP value columns, e.g. SHAP_AGE.
-
-    min_rows : int
-        Minimum records required for subgroup calculations.
-
-    max_levels : int
-        Maximum distinct values evaluated per subgroup column.
-
-    combine_filters : bool
-        False: calculate each subgroup column independently.
-        True: also calculate combinations of two subgroup columns.
-
-    output_path : str, optional
-        CSV export path.
-
-    Returns
-    -------
-    DataFrame
-        Sub-Group, Direction, Predictor Rank,
-        Predictor Name, SHAP value, Abs SHAP value.
-    """
 
     subgroup_cols = list(subgroup_cols or [])
     feature_cols = list(feature_cols)
 
-    if not feature_cols:
-        raise ValueError("feature_cols cannot be empty.")
-
-    shap_cols = [
-        f"{shap_prefix}{feature}"
-        for feature in feature_cols
-    ]
-
-    required = shap_cols + subgroup_cols
-    missing = [c for c in required if c not in df.columns]
+    # Validate input
+    required_cols = feature_cols + subgroup_cols
+    missing = [c for c in required_cols if c not in df.columns]
 
     if missing:
         raise ValueError(f"Missing columns: {missing}")
 
+    if not feature_cols:
+        raise ValueError("feature_cols cannot be empty")
+
+    if df.empty:
+        raise ValueError("Input DataFrame is empty")
+
     results = []
 
     # --------------------------------------------------
-    # Calculate feature importance for a given subset
+    # Calculate SHAP importance
     # --------------------------------------------------
     def importance_table(data, subgroup_label):
 
-        shap_values = data[shap_cols].to_numpy(dtype=float)
+        sv = data[feature_cols].to_numpy(dtype=float)
 
-        mean_signed = np.nanmean(shap_values, axis=0)
-        mean_abs = np.nanmean(np.abs(shap_values), axis=0)
+        mean_signed = np.nanmean(sv, axis=0)
+        mean_abs = np.nanmean(np.abs(sv), axis=0)
 
         imp = pd.DataFrame({
             "Predictor Name": feature_cols,
@@ -118,13 +79,14 @@ def make_shap_importance(
         ]
 
     # --------------------------------------------------
-    # Overall importance
+    # Overall SHAP importance
     # --------------------------------------------------
-    if not df.empty:
-        results.append(importance_table(df, "All"))
+    results.append(
+        importance_table(df, "All")
+    )
 
     # --------------------------------------------------
-    # Individual subgroup importance
+    # Independent subgroup filtering
     # --------------------------------------------------
     for col in subgroup_cols:
 
@@ -153,7 +115,7 @@ def make_shap_importance(
             )
 
     # --------------------------------------------------
-    # Combined subgroup filtering
+    # Combined filtering
     # --------------------------------------------------
     if combine_filters and len(subgroup_cols) == 2:
 
@@ -200,40 +162,12 @@ def make_shap_importance(
                     importance_table(subset, label)
                 )
 
-    if not results:
-        raise ValueError("No rows available for SHAP analysis.")
-
-    final = pd.concat(results, ignore_index=True)
+    final = pd.concat(
+        results,
+        ignore_index=True
+    )
 
     if output_path:
         final.to_csv(output_path, index=False)
 
     return final
-
-=============
-
-predictors = [
-    "AGE",
-    "INCOME",
-    "CREDIT_SCORE",
-    "LOAN_AMOUNT",
-    "TENURE",
-    "DTI",
-    "EMPLOYMENT",
-    "BALANCE",
-    "UTILIZATION",
-    "PAYMENT_HISTORY",
-    "DELINQUENCY",
-    "ACCOUNT_AGE"
-]
-
-shap_importance = make_shap_importance(
-    df=df,
-    feature_cols=predictors,
-    subgroup_cols=["REGION", "CUSTOMER_TYPE"],
-    combine_filters=True,
-    min_rows=200,
-    output_path="shap_feature_importance.csv"
-)
-
-print(shap_importance)
