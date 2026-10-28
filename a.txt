@@ -1,389 +1,311 @@
 
 import os
-import sys
-import argparse
-from types import SimpleNamespace
-
-import joblib
 import numpy as np
 import pandas as pd
+import shap
+import matplotlib.pyplot as plt
 
-# Your ORIGINAL shap_plots.py
-import shap_plots
+# =====================================================
+# 1. CONFIGURATION
+# =====================================================
 
+df = merged_df.copy()
 
-def run_shap(
-    model_path,
-    data_path,
-    filter_col=None,
-    out_dir="shap_results",
-    model_name="xgb",
-    shap_sample=10000,
-    shap_top_k=5,
-    shap_dep_enabled=True,
-    shap_interaction_index=None,
-    shap_min_rows=200,
-    shap_max_levels=12,
-    random_state=42,
-    reproduce_train_order=False,
-):
-    """
-    Standalone SHAP analysis using the original make_shap().
+FILTER_COL = "LOB_RENEWED"
+ID_COL = "APPLICATION_NUMBER"
+OUT_DIR = "shap_results"
+TOP_K = 5
 
-    Does NOT train or refit the model.
+os.makedirs(OUT_DIR, exist_ok=True)
 
-    Reuses the original:
-        - SHAP explainer logic
-        - SHAP sampling
-        - One-hot grouping
-        - SHAP importance calculations
-        - Row-level SHAP exports
-        - Top 5 predictors
-        - Summary plot
-        - Dependence plots
+# =====================================================
+# 2. IDENTIFY YOUR 12 SHAP PREDICTORS
+# =====================================================
 
-    Parameters
-    ----------
-    model_path:
-        Saved fitted XGBoost pipeline (.joblib).
+# Exclude identifiers, metadata and feature-value columns.
+exclude_cols = {
+    ID_COL,
+    "top_5_features",
+    FILTER_COL
+}
 
-    data_path:
-        CSV containing the same feature-engineered model
-        inputs used in the original training run.
+predictor_cols = [
+    c for c in df.columns
+    if c not in exclude_cols
+    and not c.endswith("__value")
+    and pd.api.types.is_numeric_dtype(df[c])
+]
 
-    filter_col:
-        Exactly one optional subgroup column.
+print("Number of predictors:", len(predictor_cols))
+print("Predictors:", predictor_cols)
 
-    reproduce_train_order:
-        If True, sort by APPLICATION_NUMBER and shuffle
-        using the original train.py sequence.
+# Check this list. It should contain exactly your
+# 12 SHAP predictor columns, not other numeric metadata.
 
-        Use only if your input CSV represents the correct
-        stage of your original training data processing.
-    """
+if len(predictor_cols) != 12:
+    raise ValueError(
+        "Expected 12 predictors. Check predictor_cols "
+        "and remove any non-SHAP numeric columns."
+    )
 
-    os.makedirs(out_dir, exist_ok=True)
+# =====================================================
+# 3. GENERIC FEATURE IMPORTANCE FUNCTION
+# =====================================================
 
-    # =====================================================
-    # 1. LOAD THE EXISTING TRAINED MODEL
-    # =====================================================
+def calculate_importance(data, label):
 
-    print("=" * 60)
-    print("LOADING TRAINED XGBOOST PIPELINE")
-    print("=" * 60)
+    sv = data[predictor_cols].to_numpy(dtype=float)
 
-    if not os.path.exists(model_path):
-        raise FileNotFoundError(
-            f"Model not found: {model_path}"
+    imp = pd.DataFrame({
+        "Predictor Name": predictor_cols,
+        "SHAP value": np.nanmean(sv, axis=0),
+        "Abs SHAP value": np.nanmean(np.abs(sv), axis=0)
+    })
+
+    imp = (
+        imp.sort_values(
+            "Abs SHAP value",
+            ascending=False
         )
+        .reset_index(drop=True)
+    )
 
-    pipeline = joblib.load(model_path)
+    imp["Predictor Rank"] = np.arange(
+        1, len(imp) + 1
+    )
 
-    if not hasattr(pipeline, "named_steps"):
-        raise TypeError(
-            "Saved object must be a fitted sklearn Pipeline."
+    imp["Sub-Group"] = label
+
+    imp["Direction"] = np.where(
+        imp["SHAP value"] > 0,
+        "increases",
+        np.where(
+            imp["SHAP value"] < 0,
+            "lowers",
+            "both"
         )
+    )
 
-    if "pre" not in pipeline.named_steps:
-        raise KeyError(
-            "Pipeline is missing preprocessing step 'pre'."
-        )
-
-    if "model" not in pipeline.named_steps:
-        raise KeyError(
-            "Pipeline is missing model step 'model'."
-        )
-
-    pre = pipeline.named_steps["pre"]
-    model = pipeline.named_steps["model"]
-
-    print("Model:", type(model).__name__)
-
-    # =====================================================
-    # 2. LOAD INPUT DATA
-    # =====================================================
-
-    print("\nLOADING INPUT DATA")
-
-    if not os.path.exists(data_path):
-        raise FileNotFoundError(
-            f"Input data not found: {data_path}"
-        )
-
-    df = pd.read_csv(data_path)
-
-    if df.empty:
-        raise ValueError("Input dataset is empty.")
-
-    if "APPLICATION_NUMBER" not in df.columns:
-        raise KeyError(
-            "APPLICATION_NUMBER is required."
-        )
-
-    if filter_col is not None:
-
-        if filter_col not in df.columns:
-            raise KeyError(
-                f"Filter column '{filter_col}' not found."
-            )
-
-    print("Input rows:", len(df))
-    print("Input columns:", len(df.columns))
-
-    # =====================================================
-    # 3. OPTIONAL ORIGINAL TRAINING ROW ORDER
-    # =====================================================
-
-    if reproduce_train_order:
-
-        print("\nREPRODUCING TRAINING ROW ORDER")
-
-        df = (
-            df.sort_values(
-                "APPLICATION_NUMBER",
-                kind="mergesort"
-            )
-            .reset_index(drop=True)
-        )
-
-        df = (
-            df.sample(
-                frac=1,
-                random_state=random_state
-            )
-            .reset_index(drop=True)
-        )
-
-    # =====================================================
-    # 4. RESTORE ORIGINAL MODEL FEATURES
-    # =====================================================
-
-    # The saved fitted preprocessor knows the raw
-    # predictor columns used during model training.
-
-    model_features = list(pre.feature_names_in_)
-
-    missing = [
-        col
-        for col in model_features
-        if col not in df.columns
+    return imp[
+        [
+            "Sub-Group",
+            "Direction",
+            "Predictor Rank",
+            "Predictor Name",
+            "SHAP value",
+            "Abs SHAP value"
+        ]
     ]
 
-    if missing:
-        raise ValueError(
-            "Input data is missing trained model features:\n"
-            f"{missing}"
+
+# =====================================================
+# 4. GENERIC SHAP PLOTTING FUNCTION
+# =====================================================
+
+def create_plots(data, importance, label):
+
+    sv = data[predictor_cols].to_numpy(dtype=float)
+
+    value_cols = [
+        f"{col}__value"
+        for col in predictor_cols
+    ]
+
+    has_values = all(
+        c in data.columns
+        for c in value_cols
+    )
+
+    X = (
+        data[value_cols].to_numpy(dtype=float)
+        if has_values
+        else None
+    )
+
+    safe_label = "".join(
+        c if c.isalnum() or c in "._-"
+        else "_"
+        for c in str(label)
+    )
+
+    # -------------------------------------------------
+    # A. FEATURE IMPORTANCE BAR PLOT
+    # -------------------------------------------------
+
+    plot_df = importance.sort_values(
+        "Abs SHAP value",
+        ascending=True
+    )
+
+    fig, ax = plt.subplots(figsize=(10, 7))
+
+    ax.barh(
+        plot_df["Predictor Name"],
+        plot_df["Abs SHAP value"]
+    )
+
+    ax.set_xlabel("Mean Absolute SHAP Value")
+    ax.set_title(f"SHAP Importance — {label}")
+
+    plt.tight_layout()
+
+    plt.savefig(
+        f"{OUT_DIR}/importance_{safe_label}.png",
+        dpi=180,
+        bbox_inches="tight"
+    )
+
+    plt.show()
+    plt.close(fig)
+
+    # -------------------------------------------------
+    # B. SHAP SUMMARY / BEESWARM PLOT
+    # -------------------------------------------------
+
+    plt.figure(figsize=(10, 7))
+
+    shap.summary_plot(
+        sv,
+        X,
+        feature_names=predictor_cols,
+        show=False
+    )
+
+    plt.title(f"SHAP Summary — {label}")
+    plt.tight_layout()
+
+    plt.savefig(
+        f"{OUT_DIR}/summary_{safe_label}.png",
+        dpi=180,
+        bbox_inches="tight"
+    )
+
+    plt.show()
+    plt.close("all")
+
+    # -------------------------------------------------
+    # C. DEPENDENCE PLOTS — TOP 5 PREDICTORS
+    # -------------------------------------------------
+
+    if X is None:
+        print(
+            f"Skipping dependence plots for {label}: "
+            "feature values unavailable."
         )
+        return
 
-    print("\nRaw model predictors:", len(model_features))
-    print("Predictors:", model_features)
-
-    # Only original trained features are treated
-    # as model predictors.
-    X_shap = df[model_features].copy()
-
-    # =====================================================
-    # 5. PRESERVE APPLICATION NUMBER AND ONE FILTER
-    # =====================================================
-
-    # The original make_shap() requires
-    # APPLICATION_NUMBER inside its X_train argument.
-
-    # Extra identifier/filter columns are safe only
-    # when the fitted ColumnTransformer selects its
-    # trained feature columns and ignores extras.
-
-    if "APPLICATION_NUMBER" not in X_shap.columns:
-
-        X_shap.insert(
-            0,
-            "APPLICATION_NUMBER",
-            df["APPLICATION_NUMBER"].to_numpy()
-        )
-
-    if filter_col is not None:
-
-        if filter_col not in X_shap.columns:
-
-            X_shap[filter_col] = (
-                df[filter_col].to_numpy()
-            )
-
-    # Check that extra metadata columns do not change
-    # the fitted preprocessor's transformed feature count.
-    check_n = min(5, len(X_shap))
-
-    transformed_check = pre.transform(
-        X_shap.iloc[:check_n]
-    )
-
-    expected_names = list(
-        pre.get_feature_names_out()
-    )
-
-    if transformed_check.shape[1] != len(expected_names):
-        raise ValueError(
-            "Transformed features do not match "
-            "saved preprocessor feature names."
-        )
-
-    # =====================================================
-    # 6. USE EXACT FEATURE-NAME LOGIC FROM train.py
-    # =====================================================
-
-    feature_names = []
-
-    for name in expected_names:
-
-        clean_name = name.split("__", 1)[-1]
-
-        feature_names.append(clean_name)
-
-    print(
-        "Encoded model features:",
-        len(feature_names)
-    )
-
-    # =====================================================
-    # 7. ORIGINAL SHAP CONFIGURATION
-    # =====================================================
-
-    cfg = SimpleNamespace()
-
-    cfg.shap_sample = int(shap_sample)
-
-    cfg.shap_top_k = int(shap_top_k)
-
-    cfg.shap_dep_enabled = bool(
-        shap_dep_enabled
-    )
-
-    cfg.shap_interaction_index = (
-        shap_interaction_index
-    )
-
-    cfg.random_state = int(random_state)
-
-    cfg.shap_min_rows = int(shap_min_rows)
-
-    cfg.shap_max_levels = int(shap_max_levels)
-
-    # =====================================================
-    # 8. ONE FILTER ONLY
-    # =====================================================
-
-    if filter_col is None:
-
-        subgroup_cols = []
-
-    else:
-
-        subgroup_cols = [filter_col]
-
-    print("\nSHAP Configuration:")
-    print("Sample:", cfg.shap_sample)
-    print("Random state:", cfg.random_state)
-    print("Filter:", filter_col)
-    print("Min subgroup rows:", cfg.shap_min_rows)
-    print("Max subgroup levels:", cfg.shap_max_levels)
-
-    # =====================================================
-    # 9. USE ORIGINAL SHAP FUNCTION
-    # =====================================================
-
-    print("\n" + "=" * 60)
-    print("RUNNING ORIGINAL SHAP LOGIC")
-    print("=" * 60)
-
-    # Original shap_plots.py calls display().
-    # Make display available in a standalone script.
-    try:
-        from IPython.display import display
-        shap_plots.display = display
-    except ImportError:
-        shap_plots.display = print
-
-    # This calls your ORIGINAL implementation without
-    # replacing its explainer, grouping, or sampling.
-    shap_plots.make_shap(
-        pipeline=pipeline,
-        X_train=X_shap,
-        out_dir=out_dir,
-        cfg=cfg,
-        model_name=model_name,
-        feat_names=feature_names,
-        subgroup_cols=subgroup_cols,
-        one_hot_group=True,
-    )
-
-    # =====================================================
-    # 10. LOAD ORIGINAL SHAP FEATURE IMPORTANCE OUTPUT
-    # =====================================================
-
-    importance_path = os.path.join(
-        out_dir,
-        f"shap_feature_importance_{model_name}.csv"
-    )
-
-    importance = pd.read_csv(importance_path)
-
-    print("\n" + "=" * 60)
-    print("SHAP COMPLETED")
-    print("=" * 60)
-
-    print("\nFeature importance file:")
-    print(importance_path)
-
-    print("\nSubgroups:")
-    print(
-        importance["Sub-Group"]
-        .drop_duplicates()
+    top_features = (
+        importance["Predictor Name"]
+        .head(TOP_K)
         .tolist()
     )
 
-    print("\nOverall Top Predictors:")
+    for feature in top_features:
 
-    overall = importance.loc[
-        importance["Sub-Group"] == "All"
-    ]
+        idx = predictor_cols.index(feature)
 
-    print(overall.head(12).to_string(index=False))
+        if np.all(np.isnan(X[:, idx])):
+            continue
 
-    return importance
+        plt.figure(figsize=(8, 5))
+
+        shap.dependence_plot(
+            ind=idx,
+            shap_values=sv,
+            features=X,
+            feature_names=predictor_cols,
+            interaction_index=None,
+            show=False
+        )
+
+        plt.title(f"{label} — {feature}")
+        plt.tight_layout()
+
+        plt.savefig(
+            f"{OUT_DIR}/dependence_"
+            f"{safe_label}_{feature}.png",
+            dpi=180,
+            bbox_inches="tight"
+        )
+
+        plt.show()
+        plt.close("all")
 
 
-# ============================================================
-# 11. RUN STANDALONE
-# ============================================================
+# =====================================================
+# 5. OVERALL FEATURE IMPORTANCE AND PLOTS
+# =====================================================
 
-if __name__ == "__main__":
+results = []
 
-    result = run_shap(
+overall_importance = calculate_importance(
+    df,
+    "All"
+)
 
-        # EXISTING TRAINED MODEL
-        model_path="best_xgb.joblib",
+results.append(overall_importance)
 
-        # PREPARED INPUT DATA
-        data_path="train.csv",
+print("\nOVERALL FEATURE IMPORTANCE")
+display(overall_importance)
 
-        # ONE FILTER
-        filter_col="ECON_REGION",
+create_plots(
+    df,
+    overall_importance,
+    "All"
+)
 
-        # OUTPUT LOCATION
-        out_dir="shap_results",
+# =====================================================
+# 6. SUBGROUP-WISE FEATURE IMPORTANCE AND PLOTS
+# =====================================================
 
-        model_name="xgb",
+for level, subset in df.groupby(
+    FILTER_COL,
+    dropna=False
+):
 
-        # MUST MATCH ORIGINAL TRAINING CONFIG
-        shap_sample=10000,
-        shap_top_k=5,
-        shap_dep_enabled=True,
-        shap_interaction_index=None,
-        shap_min_rows=200,
-        shap_max_levels=12,
-        random_state=42,
+    label = f"{FILTER_COL}={level}"
 
-        # Set True only if you need to recreate the
-        # original initial sort/shuffle from train.py.
-        reproduce_train_order=False,
+    importance = calculate_importance(
+        subset,
+        label
     )
+
+    results.append(importance)
+
+    print(f"\nFEATURE IMPORTANCE: {label}")
+    display(importance)
+
+    create_plots(
+        subset,
+        importance,
+        label
+    )
+
+# =====================================================
+# 7. COMBINE AND EXPORT TABLES
+# =====================================================
+
+final_importance = pd.concat(
+    results,
+    ignore_index=True
+)
+
+final_importance.to_csv(
+    f"{OUT_DIR}/shap_feature_importance_all.csv",
+    index=False
+)
+
+overall_importance.to_csv(
+    f"{OUT_DIR}/shap_importance_overall.csv",
+    index=False
+)
+
+final_importance.loc[
+    final_importance["Sub-Group"] != "All"
+].to_csv(
+    f"{OUT_DIR}/shap_importance_subgroups.csv",
+    index=False
+)
+
+print("\nSHAP analysis completed.")
+print("Files saved in:", OUT_DIR)
