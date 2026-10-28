@@ -1,13 +1,15 @@
 
 import os
 import sys
+import argparse
+from types import SimpleNamespace
 
 import joblib
 import numpy as np
 import pandas as pd
-import scipy.sparse as sp
-import shap
-import matplotlib.pyplot as plt
+
+# Your ORIGINAL shap_plots.py
+import shap_plots
 
 
 def run_shap(
@@ -17,505 +19,371 @@ def run_shap(
     out_dir="shap_results",
     model_name="xgb",
     shap_sample=10000,
+    shap_top_k=5,
+    shap_dep_enabled=True,
+    shap_interaction_index=None,
     shap_min_rows=200,
     shap_max_levels=12,
-    shap_top_k=5,
     random_state=42,
+    reproduce_train_order=False,
 ):
     """
-    Standalone SHAP analysis for an already-trained XGBoost pipeline.
+    Standalone SHAP analysis using the original make_shap().
 
-    No model training.
+    Does NOT train or refit the model.
 
-    Uses one optional filter and automatically discovers predictors
-    from the fitted preprocessor.
+    Reuses the original:
+        - SHAP explainer logic
+        - SHAP sampling
+        - One-hot grouping
+        - SHAP importance calculations
+        - Row-level SHAP exports
+        - Top 5 predictors
+        - Summary plot
+        - Dependence plots
 
-    Produces:
-      - Row-level SHAP CSV for All and each subgroup
-      - Top 5 features per application
-      - SHAP importance CSV with original column structure
-      - Overall SHAP summary plot
-      - Overall dependence plots for numeric features
+    Parameters
+    ----------
+    model_path:
+        Saved fitted XGBoost pipeline (.joblib).
+
+    data_path:
+        CSV containing the same feature-engineered model
+        inputs used in the original training run.
+
+    filter_col:
+        Exactly one optional subgroup column.
+
+    reproduce_train_order:
+        If True, sort by APPLICATION_NUMBER and shuffle
+        using the original train.py sequence.
+
+        Use only if your input CSV represents the correct
+        stage of your original training data processing.
     """
 
     os.makedirs(out_dir, exist_ok=True)
 
-    # -------------------------------------------------------
-    # 1. LOAD SAVED PIPELINE AND INPUT DATA
-    # -------------------------------------------------------
+    # =====================================================
+    # 1. LOAD THE EXISTING TRAINED MODEL
+    # =====================================================
+
+    print("=" * 60)
+    print("LOADING TRAINED XGBOOST PIPELINE")
+    print("=" * 60)
+
+    if not os.path.exists(model_path):
+        raise FileNotFoundError(
+            f"Model not found: {model_path}"
+        )
 
     pipeline = joblib.load(model_path)
-    df = pd.read_csv(data_path)
+
+    if not hasattr(pipeline, "named_steps"):
+        raise TypeError(
+            "Saved object must be a fitted sklearn Pipeline."
+        )
+
+    if "pre" not in pipeline.named_steps:
+        raise KeyError(
+            "Pipeline is missing preprocessing step 'pre'."
+        )
+
+    if "model" not in pipeline.named_steps:
+        raise KeyError(
+            "Pipeline is missing model step 'model'."
+        )
 
     pre = pipeline.named_steps["pre"]
     model = pipeline.named_steps["model"]
 
-    model_features = list(pre.feature_names_in_)
+    print("Model:", type(model).__name__)
 
-    required = ["APPLICATION_NUMBER"] + model_features
+    # =====================================================
+    # 2. LOAD INPUT DATA
+    # =====================================================
 
-    if filter_col is not None:
-        required.append(filter_col)
+    print("\nLOADING INPUT DATA")
 
-    missing = [c for c in required if c not in df.columns]
+    if not os.path.exists(data_path):
+        raise FileNotFoundError(
+            f"Input data not found: {data_path}"
+        )
 
-    if missing:
-        raise ValueError(f"Missing columns: {missing}")
+    df = pd.read_csv(data_path)
 
-    if len(df) == 0:
+    if df.empty:
         raise ValueError("Input dataset is empty.")
 
-    X = df[model_features]
-
-    # -------------------------------------------------------
-    # 2. MAP TRANSFORMED FEATURES TO ORIGINAL PREDICTORS
-    # -------------------------------------------------------
-
-    transformed_names = list(pre.get_feature_names_out())
-
-    feature_groups = [
-        name.split("__", 1)[-1]
-        for name in transformed_names
-    ]
-
-    categorical_groups = set()
-
-    for name, transformer, columns in pre.transformers_:
-
-        if name not in ("cat", "binary"):
-            continue
-
-        if isinstance(columns, str):
-            columns = [columns]
-
-        columns = list(columns)
-
-        if not columns:
-            continue
-
-        encoder = transformer
-
-        if hasattr(transformer, "named_steps"):
-            encoder = None
-
-            for step_name in ("ohe", "onehot", "binary"):
-                if step_name in transformer.named_steps:
-                    encoder = transformer.named_steps[step_name]
-                    break
-
-        if encoder is None:
-            continue
-
-        if not hasattr(encoder, "get_feature_names_out"):
-            continue
-
-        output_slice = pre.output_indices_[name]
-
-        encoded_names = list(
-            encoder.get_feature_names_out(columns)
+    if "APPLICATION_NUMBER" not in df.columns:
+        raise KeyError(
+            "APPLICATION_NUMBER is required."
         )
 
-        expected = output_slice.stop - output_slice.start
+    if filter_col is not None:
 
-        if len(encoded_names) != expected:
-            raise ValueError(
-                f"Feature-name mismatch in transformer '{name}'"
+        if filter_col not in df.columns:
+            raise KeyError(
+                f"Filter column '{filter_col}' not found."
             )
 
-        categorical_groups.update(columns)
+    print("Input rows:", len(df))
+    print("Input columns:", len(df.columns))
 
-        for offset, encoded_name in enumerate(encoded_names):
+    # =====================================================
+    # 3. OPTIONAL ORIGINAL TRAINING ROW ORDER
+    # =====================================================
 
-            for original in sorted(
-                columns,
-                key=len,
-                reverse=True
-            ):
-                if encoded_name.startswith(original + "_"):
-                    feature_groups[output_slice.start + offset] = original
-                    break
+    if reproduce_train_order:
 
-    grouped_names = list(dict.fromkeys(feature_groups))
+        print("\nREPRODUCING TRAINING ROW ORDER")
 
-    group_indices = {
-        feature: [
-            i for i, name in enumerate(feature_groups)
-            if name == feature
-        ]
-        for feature in grouped_names
-    }
-
-    print("Model predictors:", len(model_features))
-    print("SHAP output features:", len(grouped_names))
-    print("Filter:", filter_col or "None")
-
-    # -------------------------------------------------------
-    # 3. CREATE SHAP EXPLAINER ONCE
-    # -------------------------------------------------------
-
-    explainer = shap.TreeExplainer(model)
-
-    def safe_name(value):
-        return "".join(
-            c if c.isalnum() or c in "._-" else "_"
-            for c in str(value)
-        )
-
-    # -------------------------------------------------------
-    # 4. CALCULATE SHAP FOR A DATA SUBSET
-    # -------------------------------------------------------
-
-    def calculate_subset(subset, subgroup_label):
-
-        n = min(len(subset), int(shap_sample))
-
-        if n == 0:
-            raise ValueError("Empty subgroup")
-
-        sampled = (
-            subset.sample(n=n, random_state=random_state)
-            if n < len(subset)
-            else subset.copy()
-        )
-
-        X_sample = sampled[model_features]
-
-        X_transformed = pre.transform(X_sample)
-
-        if sp.issparse(X_transformed):
-            X_transformed = X_transformed.toarray()
-
-        X_transformed = np.asarray(X_transformed)
-
-        sv = explainer.shap_values(X_transformed)
-
-        if isinstance(sv, list):
-            if len(sv) != 2:
-                raise ValueError(
-                    "Expected binary classification SHAP."
-                )
-            sv = sv[1]
-
-        sv = np.asarray(sv)
-
-        if sv.ndim == 3:
-            if sv.shape[-1] != 2:
-                raise ValueError(
-                    "Expected binary classification."
-                )
-            sv = sv[:, :, 1]
-
-        if sv.shape != X_transformed.shape:
-            raise ValueError(
-                f"SHAP shape mismatch: {sv.shape} "
-                f"versus {X_transformed.shape}"
-            )
-
-        # Group one-hot SHAP contributions by raw feature
-        grouped_sv = np.column_stack([
-            sv[:, group_indices[name]].sum(axis=1)
-            for name in grouped_names
-        ])
-
-        # Match the original script:
-        # categorical grouped plotting values are NaN.
-        grouped_X = np.column_stack([
-            np.full(len(sampled), np.nan)
-            if name in categorical_groups
-            else X_transformed[:, group_indices[name]].mean(axis=1)
-            for name in grouped_names
-        ])
-
-        suffix = (
-            ""
-            if subgroup_label == "All"
-            else f"_{safe_name(subgroup_label)}"
-        )
-
-        # ---------------------------------------------------
-        # 5. APPLICATION-LEVEL SHAP CSV
-        # ---------------------------------------------------
-
-        row_df = pd.DataFrame(
-            grouped_sv,
-            columns=grouped_names
-        )
-
-        row_df.insert(
-            0,
-            "APPLICATION_NUMBER",
-            sampled["APPLICATION_NUMBER"].to_numpy()
-        )
-
-        top_5 = [
-            [
-                grouped_names[j]
-                for j in np.argsort(
-                    -np.abs(grouped_sv[i])
-                )[:5]
-            ]
-            for i in range(len(grouped_sv))
-        ]
-
-        row_df.insert(1, "top_5_features", top_5)
-
-        values_df = pd.DataFrame(
-            grouped_X,
-            columns=[
-                f"{name}__value"
-                for name in grouped_names
-            ]
-        )
-
-        row_df = pd.concat(
-            [
-                row_df.reset_index(drop=True),
-                values_df.reset_index(drop=True)
-            ],
-            axis=1
-        )
-
-        row_df.to_csv(
-            os.path.join(
-                out_dir,
-                f"shap_values_{model_name}{suffix}.csv"
-            ),
-            index=False
-        )
-
-        np.save(
-            os.path.join(
-                out_dir,
-                f"shap_values_{model_name}{suffix}.npy"
-            ),
-            grouped_sv
-        )
-
-        pd.DataFrame({
-            "feature_name": grouped_names
-        }).to_csv(
-            os.path.join(
-                out_dir,
-                f"shap_feature_names_{model_name}{suffix}.csv"
-            ),
-            index=False
-        )
-
-        np.save(
-            os.path.join(
-                out_dir,
-                f"shap_feature_names_{model_name}{suffix}.npy"
-            ),
-            np.array(grouped_names, dtype=object)
-        )
-
-        # ---------------------------------------------------
-        # 6. FEATURE IMPORTANCE — ORIGINAL LOGIC
-        # ---------------------------------------------------
-
-        mean_signed = np.nanmean(grouped_sv, axis=0)
-        mean_abs = np.nanmean(np.abs(grouped_sv), axis=0)
-
-        importance = pd.DataFrame({
-            "Predictor Name": grouped_names,
-            "SHAP value": mean_signed,
-            "Abs SHAP value": mean_abs
-        })
-
-        importance = (
-            importance
-            .sort_values(
-                "Abs SHAP value",
-                ascending=False
+        df = (
+            df.sort_values(
+                "APPLICATION_NUMBER",
+                kind="mergesort"
             )
             .reset_index(drop=True)
         )
 
-        importance["Predictor Rank"] = (
-            np.arange(1, len(importance) + 1)
-        )
-
-        importance["Sub-Group"] = subgroup_label
-
-        importance["Direction"] = np.where(
-            importance["SHAP value"] > 0,
-            "increases",
-            np.where(
-                importance["SHAP value"] < 0,
-                "lowers",
-                "both"
+        df = (
+            df.sample(
+                frac=1,
+                random_state=random_state
             )
+            .reset_index(drop=True)
         )
 
-        importance = importance[
-            [
-                "Sub-Group",
-                "Direction",
-                "Predictor Rank",
-                "Predictor Name",
-                "SHAP value",
-                "Abs SHAP value"
-            ]
-        ]
+    # =====================================================
+    # 4. RESTORE ORIGINAL MODEL FEATURES
+    # =====================================================
 
-        return importance, grouped_sv, grouped_X
+    # The saved fitted preprocessor knows the raw
+    # predictor columns used during model training.
 
-    # -------------------------------------------------------
-    # 7. OVERALL SHAP
-    # -------------------------------------------------------
+    model_features = list(pre.feature_names_in_)
 
-    all_results = []
+    missing = [
+        col
+        for col in model_features
+        if col not in df.columns
+    ]
 
-    overall, sv_all, X_all = calculate_subset(
-        df,
-        "All"
-    )
+    if missing:
+        raise ValueError(
+            "Input data is missing trained model features:\n"
+            f"{missing}"
+        )
 
-    all_results.append(overall)
+    print("\nRaw model predictors:", len(model_features))
+    print("Predictors:", model_features)
 
-    # -------------------------------------------------------
-    # 8. ONE FILTER — AUTOMATICALLY CALCULATE EACH LEVEL
-    # -------------------------------------------------------
+    # Only original trained features are treated
+    # as model predictors.
+    X_shap = df[model_features].copy()
+
+    # =====================================================
+    # 5. PRESERVE APPLICATION NUMBER AND ONE FILTER
+    # =====================================================
+
+    # The original make_shap() requires
+    # APPLICATION_NUMBER inside its X_train argument.
+
+    # Extra identifier/filter columns are safe only
+    # when the fitted ColumnTransformer selects its
+    # trained feature columns and ignores extras.
+
+    if "APPLICATION_NUMBER" not in X_shap.columns:
+
+        X_shap.insert(
+            0,
+            "APPLICATION_NUMBER",
+            df["APPLICATION_NUMBER"].to_numpy()
+        )
 
     if filter_col is not None:
 
-        values = df[filter_col].astype("string")
+        if filter_col not in X_shap.columns:
 
-        levels = (
-            values.value_counts(dropna=False)
-            .index.tolist()[:shap_max_levels]
-        )
-
-        for level in levels:
-
-            mask = values.eq(str(level)).fillna(False)
-
-            subset = df.loc[mask]
-
-            if len(subset) < shap_min_rows:
-                continue
-
-            subgroup_label = f"{filter_col}={level}"
-
-            importance, _, _ = calculate_subset(
-                subset,
-                subgroup_label
+            X_shap[filter_col] = (
+                df[filter_col].to_numpy()
             )
 
-            all_results.append(importance)
+    # Check that extra metadata columns do not change
+    # the fitted preprocessor's transformed feature count.
+    check_n = min(5, len(X_shap))
 
-            print(
-                f"Completed: {subgroup_label} "
-                f"({len(subset)} rows)"
-            )
-
-    # -------------------------------------------------------
-    # 9. FINAL SHAP IMPORTANCE CSV
-    # -------------------------------------------------------
-
-    final_importance = pd.concat(
-        all_results,
-        ignore_index=True
+    transformed_check = pre.transform(
+        X_shap.iloc[:check_n]
     )
 
-    final_importance.to_csv(
-        os.path.join(
-            out_dir,
-            f"shap_feature_importance_{model_name}.csv"
-        ),
-        index=False
+    expected_names = list(
+        pre.get_feature_names_out()
     )
 
-    # -------------------------------------------------------
-    # 10. SHAP SUMMARY PLOT
-    # -------------------------------------------------------
-
-    plt.figure(figsize=(9, 6))
-
-    shap.summary_plot(
-        sv_all,
-        X_all,
-        feature_names=grouped_names,
-        show=False
-    )
-
-    plt.tight_layout()
-
-    plt.savefig(
-        os.path.join(
-            out_dir,
-            f"shap_summary_{model_name}.png"
-        ),
-        dpi=180,
-        bbox_inches="tight"
-    )
-
-    plt.close()
-
-    # -------------------------------------------------------
-    # 11. DEPENDENCE PLOTS — TOP NUMERIC FEATURES
-    # -------------------------------------------------------
-
-    mean_abs = np.nanmean(np.abs(sv_all), axis=0)
-
-    top_indices = np.argsort(-mean_abs)[:shap_top_k]
-
-    for idx in top_indices:
-
-        # The original grouped categorical X values
-        # are NaN, so skip those dependence plots.
-        if np.all(np.isnan(X_all[:, idx])):
-            continue
-
-        shap.dependence_plot(
-            ind=int(idx),
-            shap_values=sv_all,
-            features=X_all,
-            feature_names=grouped_names,
-            interaction_index=None,
-            show=False
+    if transformed_check.shape[1] != len(expected_names):
+        raise ValueError(
+            "Transformed features do not match "
+            "saved preprocessor feature names."
         )
 
-        plt.tight_layout()
+    # =====================================================
+    # 6. USE EXACT FEATURE-NAME LOGIC FROM train.py
+    # =====================================================
 
-        plt.savefig(
-            os.path.join(
-                out_dir,
-                f"shap_dependence_{model_name}_"
-                f"{safe_name(grouped_names[idx])}.png"
-            ),
-            dpi=180,
-            bbox_inches="tight"
-        )
+    feature_names = []
 
-        plt.close()
+    for name in expected_names:
 
-    print("\nSHAP completed successfully.")
-    print(final_importance.head(15))
+        clean_name = name.split("__", 1)[-1]
 
-    return final_importance
+        feature_names.append(clean_name)
+
+    print(
+        "Encoded model features:",
+        len(feature_names)
+    )
+
+    # =====================================================
+    # 7. ORIGINAL SHAP CONFIGURATION
+    # =====================================================
+
+    cfg = SimpleNamespace()
+
+    cfg.shap_sample = int(shap_sample)
+
+    cfg.shap_top_k = int(shap_top_k)
+
+    cfg.shap_dep_enabled = bool(
+        shap_dep_enabled
+    )
+
+    cfg.shap_interaction_index = (
+        shap_interaction_index
+    )
+
+    cfg.random_state = int(random_state)
+
+    cfg.shap_min_rows = int(shap_min_rows)
+
+    cfg.shap_max_levels = int(shap_max_levels)
+
+    # =====================================================
+    # 8. ONE FILTER ONLY
+    # =====================================================
+
+    if filter_col is None:
+
+        subgroup_cols = []
+
+    else:
+
+        subgroup_cols = [filter_col]
+
+    print("\nSHAP Configuration:")
+    print("Sample:", cfg.shap_sample)
+    print("Random state:", cfg.random_state)
+    print("Filter:", filter_col)
+    print("Min subgroup rows:", cfg.shap_min_rows)
+    print("Max subgroup levels:", cfg.shap_max_levels)
+
+    # =====================================================
+    # 9. USE ORIGINAL SHAP FUNCTION
+    # =====================================================
+
+    print("\n" + "=" * 60)
+    print("RUNNING ORIGINAL SHAP LOGIC")
+    print("=" * 60)
+
+    # Original shap_plots.py calls display().
+    # Make display available in a standalone script.
+    try:
+        from IPython.display import display
+        shap_plots.display = display
+    except ImportError:
+        shap_plots.display = print
+
+    # This calls your ORIGINAL implementation without
+    # replacing its explainer, grouping, or sampling.
+    shap_plots.make_shap(
+        pipeline=pipeline,
+        X_train=X_shap,
+        out_dir=out_dir,
+        cfg=cfg,
+        model_name=model_name,
+        feat_names=feature_names,
+        subgroup_cols=subgroup_cols,
+        one_hot_group=True,
+    )
+
+    # =====================================================
+    # 10. LOAD ORIGINAL SHAP FEATURE IMPORTANCE OUTPUT
+    # =====================================================
+
+    importance_path = os.path.join(
+        out_dir,
+        f"shap_feature_importance_{model_name}.csv"
+    )
+
+    importance = pd.read_csv(importance_path)
+
+    print("\n" + "=" * 60)
+    print("SHAP COMPLETED")
+    print("=" * 60)
+
+    print("\nFeature importance file:")
+    print(importance_path)
+
+    print("\nSubgroups:")
+    print(
+        importance["Sub-Group"]
+        .drop_duplicates()
+        .tolist()
+    )
+
+    print("\nOverall Top Predictors:")
+
+    overall = importance.loc[
+        importance["Sub-Group"] == "All"
+    ]
+
+    print(overall.head(12).to_string(index=False))
+
+    return importance
 
 
 # ============================================================
-# RUN — CHANGE ONLY THESE THREE PATHS/COLUMNS
+# 11. RUN STANDALONE
 # ============================================================
 
 if __name__ == "__main__":
 
-    # Make sure your original util.py is importable:
-    # the saved preprocessor uses Log1pClipNonNeg.
-    # For example, keep util.py in the same folder.
-    import util
-
     result = run_shap(
+
+        # EXISTING TRAINED MODEL
         model_path="best_xgb.joblib",
+
+        # PREPARED INPUT DATA
         data_path="train.csv",
+
+        # ONE FILTER
         filter_col="ECON_REGION",
-        out_dir="shap_results"
+
+        # OUTPUT LOCATION
+        out_dir="shap_results",
+
+        model_name="xgb",
+
+        # MUST MATCH ORIGINAL TRAINING CONFIG
+        shap_sample=10000,
+        shap_top_k=5,
+        shap_dep_enabled=True,
+        shap_interaction_index=None,
+        shap_min_rows=200,
+        shap_max_levels=12,
+        random_state=42,
+
+        # Set True only if you need to recreate the
+        # original initial sort/shuffle from train.py.
+        reproduce_train_order=False,
     )
-
-==========
-pip install joblib numpy pandas scipy shap matplotlib xgboost scikit-learn
-python run_shap.py
-
-=========
