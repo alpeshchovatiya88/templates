@@ -1,73 +1,353 @@
+
+import os
+import sys
+
+import joblib
 import numpy as np
 import pandas as pd
+import scipy.sparse as sp
+import shap
+import matplotlib.pyplot as plt
 
 
-def make_shap_importance(
-    df: pd.DataFrame,
-    feature_cols: list,
-    subgroup_cols: list = None,
-    min_rows: int = 200,
-    max_levels: int = 12,
-    combine_filters: bool = False,
-    output_path: str = None,
-) -> pd.DataFrame:
+def run_shap(
+    model_path,
+    data_path,
+    filter_col=None,
+    out_dir="shap_results",
+    model_name="xgb",
+    shap_sample=10000,
+    shap_min_rows=200,
+    shap_max_levels=12,
+    shap_top_k=5,
+    random_state=42,
+):
+    """
+    Standalone SHAP analysis for an already-trained XGBoost pipeline.
 
-    subgroup_cols = list(subgroup_cols or [])
-    feature_cols = list(feature_cols)
+    No model training.
 
-    # Validate input
-    required_cols = feature_cols + subgroup_cols
-    missing = [c for c in required_cols if c not in df.columns]
+    Uses one optional filter and automatically discovers predictors
+    from the fitted preprocessor.
+
+    Produces:
+      - Row-level SHAP CSV for All and each subgroup
+      - Top 5 features per application
+      - SHAP importance CSV with original column structure
+      - Overall SHAP summary plot
+      - Overall dependence plots for numeric features
+    """
+
+    os.makedirs(out_dir, exist_ok=True)
+
+    # -------------------------------------------------------
+    # 1. LOAD SAVED PIPELINE AND INPUT DATA
+    # -------------------------------------------------------
+
+    pipeline = joblib.load(model_path)
+    df = pd.read_csv(data_path)
+
+    pre = pipeline.named_steps["pre"]
+    model = pipeline.named_steps["model"]
+
+    model_features = list(pre.feature_names_in_)
+
+    required = ["APPLICATION_NUMBER"] + model_features
+
+    if filter_col is not None:
+        required.append(filter_col)
+
+    missing = [c for c in required if c not in df.columns]
 
     if missing:
         raise ValueError(f"Missing columns: {missing}")
 
-    if not feature_cols:
-        raise ValueError("feature_cols cannot be empty")
+    if len(df) == 0:
+        raise ValueError("Input dataset is empty.")
 
-    if df.empty:
-        raise ValueError("Input DataFrame is empty")
+    X = df[model_features]
 
-    results = []
+    # -------------------------------------------------------
+    # 2. MAP TRANSFORMED FEATURES TO ORIGINAL PREDICTORS
+    # -------------------------------------------------------
 
-    # --------------------------------------------------
-    # Calculate SHAP importance
-    # --------------------------------------------------
-    def importance_table(data, subgroup_label):
+    transformed_names = list(pre.get_feature_names_out())
 
-        sv = data[feature_cols].to_numpy(dtype=float)
+    feature_groups = [
+        name.split("__", 1)[-1]
+        for name in transformed_names
+    ]
 
-        mean_signed = np.nanmean(sv, axis=0)
-        mean_abs = np.nanmean(np.abs(sv), axis=0)
+    categorical_groups = set()
 
-        imp = pd.DataFrame({
-            "Predictor Name": feature_cols,
+    for name, transformer, columns in pre.transformers_:
+
+        if name not in ("cat", "binary"):
+            continue
+
+        if isinstance(columns, str):
+            columns = [columns]
+
+        columns = list(columns)
+
+        if not columns:
+            continue
+
+        encoder = transformer
+
+        if hasattr(transformer, "named_steps"):
+            encoder = None
+
+            for step_name in ("ohe", "onehot", "binary"):
+                if step_name in transformer.named_steps:
+                    encoder = transformer.named_steps[step_name]
+                    break
+
+        if encoder is None:
+            continue
+
+        if not hasattr(encoder, "get_feature_names_out"):
+            continue
+
+        output_slice = pre.output_indices_[name]
+
+        encoded_names = list(
+            encoder.get_feature_names_out(columns)
+        )
+
+        expected = output_slice.stop - output_slice.start
+
+        if len(encoded_names) != expected:
+            raise ValueError(
+                f"Feature-name mismatch in transformer '{name}'"
+            )
+
+        categorical_groups.update(columns)
+
+        for offset, encoded_name in enumerate(encoded_names):
+
+            for original in sorted(
+                columns,
+                key=len,
+                reverse=True
+            ):
+                if encoded_name.startswith(original + "_"):
+                    feature_groups[output_slice.start + offset] = original
+                    break
+
+    grouped_names = list(dict.fromkeys(feature_groups))
+
+    group_indices = {
+        feature: [
+            i for i, name in enumerate(feature_groups)
+            if name == feature
+        ]
+        for feature in grouped_names
+    }
+
+    print("Model predictors:", len(model_features))
+    print("SHAP output features:", len(grouped_names))
+    print("Filter:", filter_col or "None")
+
+    # -------------------------------------------------------
+    # 3. CREATE SHAP EXPLAINER ONCE
+    # -------------------------------------------------------
+
+    explainer = shap.TreeExplainer(model)
+
+    def safe_name(value):
+        return "".join(
+            c if c.isalnum() or c in "._-" else "_"
+            for c in str(value)
+        )
+
+    # -------------------------------------------------------
+    # 4. CALCULATE SHAP FOR A DATA SUBSET
+    # -------------------------------------------------------
+
+    def calculate_subset(subset, subgroup_label):
+
+        n = min(len(subset), int(shap_sample))
+
+        if n == 0:
+            raise ValueError("Empty subgroup")
+
+        sampled = (
+            subset.sample(n=n, random_state=random_state)
+            if n < len(subset)
+            else subset.copy()
+        )
+
+        X_sample = sampled[model_features]
+
+        X_transformed = pre.transform(X_sample)
+
+        if sp.issparse(X_transformed):
+            X_transformed = X_transformed.toarray()
+
+        X_transformed = np.asarray(X_transformed)
+
+        sv = explainer.shap_values(X_transformed)
+
+        if isinstance(sv, list):
+            if len(sv) != 2:
+                raise ValueError(
+                    "Expected binary classification SHAP."
+                )
+            sv = sv[1]
+
+        sv = np.asarray(sv)
+
+        if sv.ndim == 3:
+            if sv.shape[-1] != 2:
+                raise ValueError(
+                    "Expected binary classification."
+                )
+            sv = sv[:, :, 1]
+
+        if sv.shape != X_transformed.shape:
+            raise ValueError(
+                f"SHAP shape mismatch: {sv.shape} "
+                f"versus {X_transformed.shape}"
+            )
+
+        # Group one-hot SHAP contributions by raw feature
+        grouped_sv = np.column_stack([
+            sv[:, group_indices[name]].sum(axis=1)
+            for name in grouped_names
+        ])
+
+        # Match the original script:
+        # categorical grouped plotting values are NaN.
+        grouped_X = np.column_stack([
+            np.full(len(sampled), np.nan)
+            if name in categorical_groups
+            else X_transformed[:, group_indices[name]].mean(axis=1)
+            for name in grouped_names
+        ])
+
+        suffix = (
+            ""
+            if subgroup_label == "All"
+            else f"_{safe_name(subgroup_label)}"
+        )
+
+        # ---------------------------------------------------
+        # 5. APPLICATION-LEVEL SHAP CSV
+        # ---------------------------------------------------
+
+        row_df = pd.DataFrame(
+            grouped_sv,
+            columns=grouped_names
+        )
+
+        row_df.insert(
+            0,
+            "APPLICATION_NUMBER",
+            sampled["APPLICATION_NUMBER"].to_numpy()
+        )
+
+        top_5 = [
+            [
+                grouped_names[j]
+                for j in np.argsort(
+                    -np.abs(grouped_sv[i])
+                )[:5]
+            ]
+            for i in range(len(grouped_sv))
+        ]
+
+        row_df.insert(1, "top_5_features", top_5)
+
+        values_df = pd.DataFrame(
+            grouped_X,
+            columns=[
+                f"{name}__value"
+                for name in grouped_names
+            ]
+        )
+
+        row_df = pd.concat(
+            [
+                row_df.reset_index(drop=True),
+                values_df.reset_index(drop=True)
+            ],
+            axis=1
+        )
+
+        row_df.to_csv(
+            os.path.join(
+                out_dir,
+                f"shap_values_{model_name}{suffix}.csv"
+            ),
+            index=False
+        )
+
+        np.save(
+            os.path.join(
+                out_dir,
+                f"shap_values_{model_name}{suffix}.npy"
+            ),
+            grouped_sv
+        )
+
+        pd.DataFrame({
+            "feature_name": grouped_names
+        }).to_csv(
+            os.path.join(
+                out_dir,
+                f"shap_feature_names_{model_name}{suffix}.csv"
+            ),
+            index=False
+        )
+
+        np.save(
+            os.path.join(
+                out_dir,
+                f"shap_feature_names_{model_name}{suffix}.npy"
+            ),
+            np.array(grouped_names, dtype=object)
+        )
+
+        # ---------------------------------------------------
+        # 6. FEATURE IMPORTANCE — ORIGINAL LOGIC
+        # ---------------------------------------------------
+
+        mean_signed = np.nanmean(grouped_sv, axis=0)
+        mean_abs = np.nanmean(np.abs(grouped_sv), axis=0)
+
+        importance = pd.DataFrame({
+            "Predictor Name": grouped_names,
             "SHAP value": mean_signed,
             "Abs SHAP value": mean_abs
         })
 
-        imp = (
-            imp.sort_values(
+        importance = (
+            importance
+            .sort_values(
                 "Abs SHAP value",
                 ascending=False
             )
             .reset_index(drop=True)
         )
 
-        imp["Predictor Rank"] = np.arange(1, len(imp) + 1)
-        imp["Sub-Group"] = subgroup_label
+        importance["Predictor Rank"] = (
+            np.arange(1, len(importance) + 1)
+        )
 
-        imp["Direction"] = np.where(
-            imp["SHAP value"] > 0,
+        importance["Sub-Group"] = subgroup_label
+
+        importance["Direction"] = np.where(
+            importance["SHAP value"] > 0,
             "increases",
             np.where(
-                imp["SHAP value"] < 0,
+                importance["SHAP value"] < 0,
                 "lowers",
                 "both"
             )
         )
 
-        return imp[
+        importance = importance[
             [
                 "Sub-Group",
                 "Direction",
@@ -78,96 +358,164 @@ def make_shap_importance(
             ]
         ]
 
-    # --------------------------------------------------
-    # Overall SHAP importance
-    # --------------------------------------------------
-    results.append(
-        importance_table(df, "All")
+        return importance, grouped_sv, grouped_X
+
+    # -------------------------------------------------------
+    # 7. OVERALL SHAP
+    # -------------------------------------------------------
+
+    all_results = []
+
+    overall, sv_all, X_all = calculate_subset(
+        df,
+        "All"
     )
 
-    # --------------------------------------------------
-    # Independent subgroup filtering
-    # --------------------------------------------------
-    for col in subgroup_cols:
+    all_results.append(overall)
 
-        if col.lower() == "all":
-            continue
+    # -------------------------------------------------------
+    # 8. ONE FILTER — AUTOMATICALLY CALCULATE EACH LEVEL
+    # -------------------------------------------------------
 
-        values = df[col].astype("string")
+    if filter_col is not None:
+
+        values = df[filter_col].astype("string")
 
         levels = (
             values.value_counts(dropna=False)
-            .index.tolist()[:max_levels]
+            .index.tolist()[:shap_max_levels]
         )
 
         for level in levels:
 
             mask = values.eq(str(level)).fillna(False)
+
             subset = df.loc[mask]
 
-            if len(subset) < min_rows:
+            if len(subset) < shap_min_rows:
                 continue
 
-            label = f"{col}={level}"
+            subgroup_label = f"{filter_col}={level}"
 
-            results.append(
-                importance_table(subset, label)
+            importance, _, _ = calculate_subset(
+                subset,
+                subgroup_label
             )
 
-    # --------------------------------------------------
-    # Combined filtering
-    # --------------------------------------------------
-    if combine_filters and len(subgroup_cols) == 2:
+            all_results.append(importance)
 
-        col1, col2 = subgroup_cols
+            print(
+                f"Completed: {subgroup_label} "
+                f"({len(subset)} rows)"
+            )
 
-        levels1 = (
-            df[col1].astype("string")
-            .value_counts(dropna=False)
-            .index.tolist()[:max_levels]
-        )
+    # -------------------------------------------------------
+    # 9. FINAL SHAP IMPORTANCE CSV
+    # -------------------------------------------------------
 
-        levels2 = (
-            df[col2].astype("string")
-            .value_counts(dropna=False)
-            .index.tolist()[:max_levels]
-        )
-
-        for level1 in levels1:
-            for level2 in levels2:
-
-                mask1 = (
-                    df[col1].astype("string")
-                    .eq(str(level1))
-                    .fillna(False)
-                )
-
-                mask2 = (
-                    df[col2].astype("string")
-                    .eq(str(level2))
-                    .fillna(False)
-                )
-
-                subset = df.loc[mask1 & mask2]
-
-                if len(subset) < min_rows:
-                    continue
-
-                label = (
-                    f"{col1}={level1} | "
-                    f"{col2}={level2}"
-                )
-
-                results.append(
-                    importance_table(subset, label)
-                )
-
-    final = pd.concat(
-        results,
+    final_importance = pd.concat(
+        all_results,
         ignore_index=True
     )
 
-    if output_path:
-        final.to_csv(output_path, index=False)
+    final_importance.to_csv(
+        os.path.join(
+            out_dir,
+            f"shap_feature_importance_{model_name}.csv"
+        ),
+        index=False
+    )
 
-    return final
+    # -------------------------------------------------------
+    # 10. SHAP SUMMARY PLOT
+    # -------------------------------------------------------
+
+    plt.figure(figsize=(9, 6))
+
+    shap.summary_plot(
+        sv_all,
+        X_all,
+        feature_names=grouped_names,
+        show=False
+    )
+
+    plt.tight_layout()
+
+    plt.savefig(
+        os.path.join(
+            out_dir,
+            f"shap_summary_{model_name}.png"
+        ),
+        dpi=180,
+        bbox_inches="tight"
+    )
+
+    plt.close()
+
+    # -------------------------------------------------------
+    # 11. DEPENDENCE PLOTS — TOP NUMERIC FEATURES
+    # -------------------------------------------------------
+
+    mean_abs = np.nanmean(np.abs(sv_all), axis=0)
+
+    top_indices = np.argsort(-mean_abs)[:shap_top_k]
+
+    for idx in top_indices:
+
+        # The original grouped categorical X values
+        # are NaN, so skip those dependence plots.
+        if np.all(np.isnan(X_all[:, idx])):
+            continue
+
+        shap.dependence_plot(
+            ind=int(idx),
+            shap_values=sv_all,
+            features=X_all,
+            feature_names=grouped_names,
+            interaction_index=None,
+            show=False
+        )
+
+        plt.tight_layout()
+
+        plt.savefig(
+            os.path.join(
+                out_dir,
+                f"shap_dependence_{model_name}_"
+                f"{safe_name(grouped_names[idx])}.png"
+            ),
+            dpi=180,
+            bbox_inches="tight"
+        )
+
+        plt.close()
+
+    print("\nSHAP completed successfully.")
+    print(final_importance.head(15))
+
+    return final_importance
+
+
+# ============================================================
+# RUN — CHANGE ONLY THESE THREE PATHS/COLUMNS
+# ============================================================
+
+if __name__ == "__main__":
+
+    # Make sure your original util.py is importable:
+    # the saved preprocessor uses Log1pClipNonNeg.
+    # For example, keep util.py in the same folder.
+    import util
+
+    result = run_shap(
+        model_path="best_xgb.joblib",
+        data_path="train.csv",
+        filter_col="ECON_REGION",
+        out_dir="shap_results"
+    )
+
+==========
+pip install joblib numpy pandas scipy shap matplotlib xgboost scikit-learn
+python run_shap.py
+
+=========
