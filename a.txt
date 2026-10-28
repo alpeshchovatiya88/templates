@@ -1,29 +1,239 @@
+import numpy as np
+import pandas as pd
 
-# ============================================================
-# PREPROCESSING
-# ============================================================
-enable_preprocessing: true
-dt_model: "202607"
-delq_claim_cutoff_dt: "202602"
 
-snowflake_config:
-  SNOWFLAKE_SECRET_NAME: "snowflake/connection/secret"
+def make_shap_importance(
+    df: pd.DataFrame,
+    feature_cols: list,
+    subgroup_cols: list = None,
+    shap_prefix: str = "SHAP_",
+    min_rows: int = 200,
+    max_levels: int = 12,
+    combine_filters: bool = False,
+    output_path: str = None,
+) -> pd.DataFrame:
+    """
+    Calculate SHAP feature importance using existing row-level SHAP values.
 
-fixed_feature_values:
-  contract_rate: 4.25
-  contract_rate_add_on: 1.00
+    Parameters
+    ----------
+    df : DataFrame
+        Input data containing SHAP values and subgroup columns.
 
-feature_bins:
-  dsr_diff:
-    cutpoints: [5, 10, 15, 20]
-    right: true
-  num_of_bor:
-    cutpoints: [1, 2]
-    right: true
-  actltv:
-    cutpoints: [50, 55, 60, 65, 70, 75, 80, 85, 90, 95]
-    right: true
+    feature_cols : list
+        Predictor names, e.g. ["AGE", "INCOME", "CREDIT_SCORE"].
 
-# ============================================================
-# DOCKER IMAGES
-# ============================================================
+    subgroup_cols : list, optional
+        Columns used for subgroup analysis.
+        Example: ["REGION", "CUSTOMER_TYPE"].
+
+    shap_prefix : str
+        Prefix for SHAP value columns, e.g. SHAP_AGE.
+
+    min_rows : int
+        Minimum records required for subgroup calculations.
+
+    max_levels : int
+        Maximum distinct values evaluated per subgroup column.
+
+    combine_filters : bool
+        False: calculate each subgroup column independently.
+        True: also calculate combinations of two subgroup columns.
+
+    output_path : str, optional
+        CSV export path.
+
+    Returns
+    -------
+    DataFrame
+        Sub-Group, Direction, Predictor Rank,
+        Predictor Name, SHAP value, Abs SHAP value.
+    """
+
+    subgroup_cols = list(subgroup_cols or [])
+    feature_cols = list(feature_cols)
+
+    if not feature_cols:
+        raise ValueError("feature_cols cannot be empty.")
+
+    shap_cols = [
+        f"{shap_prefix}{feature}"
+        for feature in feature_cols
+    ]
+
+    required = shap_cols + subgroup_cols
+    missing = [c for c in required if c not in df.columns]
+
+    if missing:
+        raise ValueError(f"Missing columns: {missing}")
+
+    results = []
+
+    # --------------------------------------------------
+    # Calculate feature importance for a given subset
+    # --------------------------------------------------
+    def importance_table(data, subgroup_label):
+
+        shap_values = data[shap_cols].to_numpy(dtype=float)
+
+        mean_signed = np.nanmean(shap_values, axis=0)
+        mean_abs = np.nanmean(np.abs(shap_values), axis=0)
+
+        imp = pd.DataFrame({
+            "Predictor Name": feature_cols,
+            "SHAP value": mean_signed,
+            "Abs SHAP value": mean_abs
+        })
+
+        imp = (
+            imp.sort_values(
+                "Abs SHAP value",
+                ascending=False
+            )
+            .reset_index(drop=True)
+        )
+
+        imp["Predictor Rank"] = np.arange(1, len(imp) + 1)
+        imp["Sub-Group"] = subgroup_label
+
+        imp["Direction"] = np.where(
+            imp["SHAP value"] > 0,
+            "increases",
+            np.where(
+                imp["SHAP value"] < 0,
+                "lowers",
+                "both"
+            )
+        )
+
+        return imp[
+            [
+                "Sub-Group",
+                "Direction",
+                "Predictor Rank",
+                "Predictor Name",
+                "SHAP value",
+                "Abs SHAP value"
+            ]
+        ]
+
+    # --------------------------------------------------
+    # Overall importance
+    # --------------------------------------------------
+    if not df.empty:
+        results.append(importance_table(df, "All"))
+
+    # --------------------------------------------------
+    # Individual subgroup importance
+    # --------------------------------------------------
+    for col in subgroup_cols:
+
+        if col.lower() == "all":
+            continue
+
+        values = df[col].astype("string")
+
+        levels = (
+            values.value_counts(dropna=False)
+            .index.tolist()[:max_levels]
+        )
+
+        for level in levels:
+
+            mask = values.eq(str(level)).fillna(False)
+            subset = df.loc[mask]
+
+            if len(subset) < min_rows:
+                continue
+
+            label = f"{col}={level}"
+
+            results.append(
+                importance_table(subset, label)
+            )
+
+    # --------------------------------------------------
+    # Combined subgroup filtering
+    # --------------------------------------------------
+    if combine_filters and len(subgroup_cols) == 2:
+
+        col1, col2 = subgroup_cols
+
+        levels1 = (
+            df[col1].astype("string")
+            .value_counts(dropna=False)
+            .index.tolist()[:max_levels]
+        )
+
+        levels2 = (
+            df[col2].astype("string")
+            .value_counts(dropna=False)
+            .index.tolist()[:max_levels]
+        )
+
+        for level1 in levels1:
+            for level2 in levels2:
+
+                mask1 = (
+                    df[col1].astype("string")
+                    .eq(str(level1))
+                    .fillna(False)
+                )
+
+                mask2 = (
+                    df[col2].astype("string")
+                    .eq(str(level2))
+                    .fillna(False)
+                )
+
+                subset = df.loc[mask1 & mask2]
+
+                if len(subset) < min_rows:
+                    continue
+
+                label = (
+                    f"{col1}={level1} | "
+                    f"{col2}={level2}"
+                )
+
+                results.append(
+                    importance_table(subset, label)
+                )
+
+    if not results:
+        raise ValueError("No rows available for SHAP analysis.")
+
+    final = pd.concat(results, ignore_index=True)
+
+    if output_path:
+        final.to_csv(output_path, index=False)
+
+    return final
+
+=============
+
+predictors = [
+    "AGE",
+    "INCOME",
+    "CREDIT_SCORE",
+    "LOAN_AMOUNT",
+    "TENURE",
+    "DTI",
+    "EMPLOYMENT",
+    "BALANCE",
+    "UTILIZATION",
+    "PAYMENT_HISTORY",
+    "DELINQUENCY",
+    "ACCOUNT_AGE"
+]
+
+shap_importance = make_shap_importance(
+    df=df,
+    feature_cols=predictors,
+    subgroup_cols=["REGION", "CUSTOMER_TYPE"],
+    combine_filters=True,
+    min_rows=200,
+    output_path="shap_feature_importance.csv"
+)
+
+print(shap_importance)
