@@ -1,311 +1,42 @@
-
-import os
-import numpy as np
-import pandas as pd
-import shap
-import matplotlib.pyplot as plt
-
-# =====================================================
-# 1. CONFIGURATION
-# =====================================================
-
-df = merged_df.copy()
-
-FILTER_COL = "LOB_RENEWED"
-ID_COL = "APPLICATION_NUMBER"
-OUT_DIR = "shap_results"
-TOP_K = 5
-
-os.makedirs(OUT_DIR, exist_ok=True)
-
-# =====================================================
-# 2. IDENTIFY YOUR 12 SHAP PREDICTORS
-# =====================================================
-
-# Exclude identifiers, metadata and feature-value columns.
-exclude_cols = {
-    ID_COL,
-    "top_5_features",
-    FILTER_COL
-}
-
-predictor_cols = [
-    c for c in df.columns
-    if c not in exclude_cols
-    and not c.endswith("__value")
-    and pd.api.types.is_numeric_dtype(df[c])
-]
-
-print("Number of predictors:", len(predictor_cols))
-print("Predictors:", predictor_cols)
-
-# Check this list. It should contain exactly your
-# 12 SHAP predictor columns, not other numeric metadata.
-
-if len(predictor_cols) != 12:
-    raise ValueError(
-        "Expected 12 predictors. Check predictor_cols "
-        "and remove any non-SHAP numeric columns."
-    )
-
-# =====================================================
-# 3. GENERIC FEATURE IMPORTANCE FUNCTION
-# =====================================================
-
-def calculate_importance(data, label):
-
-    sv = data[predictor_cols].to_numpy(dtype=float)
-
-    imp = pd.DataFrame({
-        "Predictor Name": predictor_cols,
-        "SHAP value": np.nanmean(sv, axis=0),
-        "Abs SHAP value": np.nanmean(np.abs(sv), axis=0)
-    })
-
-    imp = (
-        imp.sort_values(
-            "Abs SHAP value",
-            ascending=False
-        )
-        .reset_index(drop=True)
-    )
-
-    imp["Predictor Rank"] = np.arange(
-        1, len(imp) + 1
-    )
-
-    imp["Sub-Group"] = label
-
-    imp["Direction"] = np.where(
-        imp["SHAP value"] > 0,
-        "increases",
-        np.where(
-            imp["SHAP value"] < 0,
-            "lowers",
-            "both"
-        )
-    )
-
-    return imp[
-        [
-            "Sub-Group",
-            "Direction",
-            "Predictor Rank",
-            "Predictor Name",
-            "SHAP value",
-            "Abs SHAP value"
-        ]
-    ]
-
-
-# =====================================================
-# 4. GENERIC SHAP PLOTTING FUNCTION
-# =====================================================
-
-def create_plots(data, importance, label):
-
-    sv = data[predictor_cols].to_numpy(dtype=float)
-
-    value_cols = [
-        f"{col}__value"
-        for col in predictor_cols
-    ]
-
-    has_values = all(
-        c in data.columns
-        for c in value_cols
-    )
-
-    X = (
-        data[value_cols].to_numpy(dtype=float)
-        if has_values
-        else None
-    )
-
-    safe_label = "".join(
-        c if c.isalnum() or c in "._-"
-        else "_"
-        for c in str(label)
-    )
-
-    # -------------------------------------------------
-    # A. FEATURE IMPORTANCE BAR PLOT
-    # -------------------------------------------------
-
-    plot_df = importance.sort_values(
-        "Abs SHAP value",
-        ascending=True
-    )
-
-    fig, ax = plt.subplots(figsize=(10, 7))
-
-    ax.barh(
-        plot_df["Predictor Name"],
-        plot_df["Abs SHAP value"]
-    )
-
-    ax.set_xlabel("Mean Absolute SHAP Value")
-    ax.set_title(f"SHAP Importance — {label}")
-
-    plt.tight_layout()
-
-    plt.savefig(
-        f"{OUT_DIR}/importance_{safe_label}.png",
-        dpi=180,
-        bbox_inches="tight"
-    )
-
-    plt.show()
-    plt.close(fig)
-
-    # -------------------------------------------------
-    # B. SHAP SUMMARY / BEESWARM PLOT
-    # -------------------------------------------------
-
-    plt.figure(figsize=(10, 7))
-
-    shap.summary_plot(
-        sv,
-        X,
-        feature_names=predictor_cols,
-        show=False
-    )
-
-    plt.title(f"SHAP Summary — {label}")
-    plt.tight_layout()
-
-    plt.savefig(
-        f"{OUT_DIR}/summary_{safe_label}.png",
-        dpi=180,
-        bbox_inches="tight"
-    )
-
-    plt.show()
-    plt.close("all")
-
-    # -------------------------------------------------
-    # C. DEPENDENCE PLOTS — TOP 5 PREDICTORS
-    # -------------------------------------------------
-
-    if X is None:
-        print(
-            f"Skipping dependence plots for {label}: "
-            "feature values unavailable."
-        )
-        return
-
-    top_features = (
-        importance["Predictor Name"]
-        .head(TOP_K)
-        .tolist()
-    )
-
-    for feature in top_features:
-
-        idx = predictor_cols.index(feature)
-
-        if np.all(np.isnan(X[:, idx])):
-            continue
-
-        plt.figure(figsize=(8, 5))
-
-        shap.dependence_plot(
-            ind=idx,
-            shap_values=sv,
-            features=X,
-            feature_names=predictor_cols,
-            interaction_index=None,
-            show=False
-        )
-
-        plt.title(f"{label} — {feature}")
-        plt.tight_layout()
-
-        plt.savefig(
-            f"{OUT_DIR}/dependence_"
-            f"{safe_label}_{feature}.png",
-            dpi=180,
-            bbox_inches="tight"
-        )
-
-        plt.show()
-        plt.close("all")
-
-
-# =====================================================
-# 5. OVERALL FEATURE IMPORTANCE AND PLOTS
-# =====================================================
-
-results = []
-
-overall_importance = calculate_importance(
-    df,
-    "All"
+counts = pd.crosstab(
+    df["BOOKYEAR"],
+    df["LOB_RENAMED"]
 )
 
-results.append(overall_importance)
+display(counts)
 
-print("\nOVERALL FEATURE IMPORTANCE")
-display(overall_importance)
+=====
 
-create_plots(
-    df,
-    overall_importance,
-    "All"
+counts = pd.crosstab(
+    df["BOOKYEAR"],
+    df["LOB_RENAMED"],
+    margins=True,
+    margins_name="Total"
 )
 
-# =====================================================
-# 6. SUBGROUP-WISE FEATURE IMPORTANCE AND PLOTS
-# =====================================================
+display(counts)
 
-for level, subset in df.groupby(
-    FILTER_COL,
-    dropna=False
-):
+======
 
-    label = f"{FILTER_COL}={level}"
+percentages = pd.crosstab(
+    df["BOOKYEAR"],
+    df["LOB_RENAMED"],
+    normalize="index"
+).mul(100).round(2)
 
-    importance = calculate_importance(
-        subset,
-        label
-    )
+display(percentages)
 
-    results.append(importance)
+=======
 
-    print(f"\nFEATURE IMPORTANCE: {label}")
-    display(importance)
-
-    create_plots(
-        subset,
-        importance,
-        label
-    )
-
-# =====================================================
-# 7. COMBINE AND EXPORT TABLES
-# =====================================================
-
-final_importance = pd.concat(
-    results,
-    ignore_index=True
+counts.drop(index="Total").plot(
+    kind="bar",
+    figsize=(10, 5)
 )
 
-final_importance.to_csv(
-    f"{OUT_DIR}/shap_feature_importance_all.csv",
-    index=False
-)
-
-overall_importance.to_csv(
-    f"{OUT_DIR}/shap_importance_overall.csv",
-    index=False
-)
-
-final_importance.loc[
-    final_importance["Sub-Group"] != "All"
-].to_csv(
-    f"{OUT_DIR}/shap_importance_subgroups.csv",
-    index=False
-)
-
-print("\nSHAP analysis completed.")
-print("Files saved in:", OUT_DIR)
+plt.title("LOB_RENAMED Distribution by BOOKYEAR")
+plt.xlabel("BOOKYEAR")
+plt.ylabel("Application Count")
+plt.legend(title="LOB_RENAMED")
+plt.xticks(rotation=0)
+plt.tight_layout()
+plt.show()
