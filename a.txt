@@ -1,4 +1,11 @@
+import json
 
+with open("application.json", "w") as f:
+    json.dump(myinput, f, indent=4)
+
+print("JSON file created successfully!")
+
+======
 import boto3
 import json
 import pandas as pd
