@@ -1,33 +1,31 @@
 import pandas as pd
 import numpy as np
 
-# ==========================================
+# =====================================================
 # 1. READ CSV FILES
-# ==========================================
+# =====================================================
 
 dev = pd.read_csv("dev.csv", keep_default_na=False)
 val = pd.read_csv("val.csv", keep_default_na=False)
 
-# ==========================================
-# 2. SELECT ONLY REQUIRED ROWS
-# ==========================================
+# =====================================================
+# 2. SELECT ONLY REQUIRED EXCEL ROWS
+# =====================================================
 
-# Excel rows 10 to 16
-dev = dev.iloc[8:15].copy()
+# Excel row 1 is the header
+dev = dev.iloc[8:15].copy()     # Excel rows 10–16
+val = val.iloc[13:20].copy()    # Excel rows 15–21
 
-# Excel rows 15 to 21
-val = val.iloc[13:20].copy()
-
-# ==========================================
+# =====================================================
 # 3. CLEAN COLUMN NAMES
-# ==========================================
+# =====================================================
 
 dev.columns = dev.columns.str.strip()
 val.columns = val.columns.str.strip()
 
-# ==========================================
+# =====================================================
 # 4. DEFINE METRICS
-# ==========================================
+# =====================================================
 
 metrics = [
     "n",
@@ -41,13 +39,12 @@ metrics = [
 
 columns = ["BOOKYEAR"] + metrics
 
-# Keep only required columns
 dev = dev[columns].copy()
 val = val[columns].copy()
 
-# ==========================================
-# 5. CONVERT BOOKYEAR TO NUMERIC
-# ==========================================
+# =====================================================
+# 5. CLEAN BOOKYEAR
+# =====================================================
 
 dev["BOOKYEAR"] = pd.to_numeric(
     dev["BOOKYEAR"],
@@ -59,35 +56,29 @@ val["BOOKYEAR"] = pd.to_numeric(
     errors="coerce"
 )
 
-# Remove rows where BOOKYEAR is "-"
-dev = dev.dropna(subset=["BOOKYEAR"])
-val = val.dropna(subset=["BOOKYEAR"])
+# Check invalid Bookyears instead of silently removing them
+if dev["BOOKYEAR"].isna().any():
+    raise ValueError("Invalid BOOKYEAR in selected DEV rows")
 
-# Convert to integer
+if val["BOOKYEAR"].isna().any():
+    raise ValueError("Invalid BOOKYEAR in selected VAL rows")
+
 dev["BOOKYEAR"] = dev["BOOKYEAR"].astype(int)
 val["BOOKYEAR"] = val["BOOKYEAR"].astype(int)
 
-# ==========================================
+# =====================================================
 # 6. SORT BY BOOKYEAR
-# ==========================================
+# =====================================================
 
-dev = dev.sort_values(
-    "BOOKYEAR"
-).reset_index(drop=True)
+dev = dev.sort_values("BOOKYEAR").reset_index(drop=True)
+val = val.sort_values("BOOKYEAR").reset_index(drop=True)
 
-val = val.sort_values(
-    "BOOKYEAR"
-).reset_index(drop=True)
+print("DEV BOOKYEARS:", dev["BOOKYEAR"].tolist())
+print("VAL BOOKYEARS:", val["BOOKYEAR"].tolist())
 
-print("DEV BOOKYEARS:")
-print(dev["BOOKYEAR"].tolist())
-
-print("\nVAL BOOKYEARS:")
-print(val["BOOKYEAR"].tolist())
-
-# ==========================================
-# 7. MERGE BY BOOKYEAR
-# ==========================================
+# =====================================================
+# 7. MERGE DEV AND VAL BY BOOKYEAR
+# =====================================================
 
 merged = pd.merge(
     dev,
@@ -103,19 +94,15 @@ merged = merged.sort_values(
     "BOOKYEAR"
 ).reset_index(drop=True)
 
-# ==========================================
-# 8. CALCULATE METRIC DIFFERENCES
-# ==========================================
-
-tolerance = 1e-8
+# =====================================================
+# 8. CONVERT METRICS TO NUMERIC
+# =====================================================
 
 for metric in metrics:
 
-    dev_col = f"{metric}_DEV"
-    val_col = f"{metric}_VAL"
+    for suffix in ["DEV", "VAL"]:
 
-    # Convert metrics to numeric
-    for col in [dev_col, val_col]:
+        col = f"{metric}_{suffix}"
 
         merged[col] = pd.to_numeric(
             merged[col]
@@ -125,109 +112,147 @@ for metric in metrics:
             errors="coerce"
         )
 
-    # Absolute difference
-    merged[f"{metric}_Difference"] = abs(
-        merged[dev_col] - merged[val_col]
-    )
+# =====================================================
+# 9. CALCULATE ABSOLUTE DIFFERENCE AND PASS/FAIL
+# =====================================================
 
-    # PASS / FAIL
-    merged[f"{metric}_Status"] = np.where(
-        (
-            merged["_merge"].eq("both")
-            &
-            merged[f"{metric}_Difference"].notna()
-            &
-            (
-                merged[f"{metric}_Difference"]
-                <= tolerance
-            )
-        ),
+tolerance = 1e-8
+
+for metric in metrics:
+
+    dev_col = f"{metric}_DEV"
+    val_col = f"{metric}_VAL"
+
+    diff_col = f"{metric}_Difference"
+    status_col = f"{metric}_Status"
+
+    merged[diff_col] = (
+        merged[dev_col] - merged[val_col]
+    ).abs()
+
+    merged[status_col] = np.where(
+        merged["_merge"].eq("both")
+        & merged[diff_col].notna()
+        & (merged[diff_col] <= tolerance),
         "PASS",
         "FAIL"
     )
 
-# ==========================================
-# 9. CREATE WIDE FORMAT REPORT
-# ==========================================
+# =====================================================
+# 10. CREATE FINAL REPORT WITH ACTUAL VALUES
+# =====================================================
 
-report_columns = ["BOOKYEAR"]
+final_df = pd.DataFrame()
 
-for metric in metrics:
+final_df["BOOKYEAR"] = merged["BOOKYEAR"]
 
-    report_columns.extend([
-        f"{metric}_DEV",
-        f"{metric}_VAL",
-        f"{metric}_Difference",
-        f"{metric}_Status"
-    ])
+# Total Application
+final_df["Total Application"] = merged["n_DEV"]
 
-wide_report = merged[report_columns].copy()
+# Actual Loss
+final_df["ACTUAL_LOSS_DEV"] = merged["ACTUAL_LOSS_DEV"]
+final_df["ACTUAL_LOSS_VAL"] = merged["ACTUAL_LOSS_VAL"]
 
-# ==========================================
-# 10. OVERALL PASS / FAIL
-# ==========================================
+# Predicted Loss
+final_df["SMI3_LOSS_DEV"] = merged["SMI3_LOSS_DEV"]
+final_df["SMI3_LOSS_VAL"] = merged["SMI3_LOSS_VAL"]
+
+# Actual Loss Ratio
+final_df["ACTUAL_LR_DEV"] = merged["ACTUAL_LR_DEV"]
+final_df["ACTUAL_LR_VAL"] = merged["ACTUAL_LR_VAL"]
+
+# Predicted Loss Ratio
+final_df["SMI3_LR_DEV"] = merged["SMI3_LR_DEV"]
+final_df["SMI3_LR_VAL"] = merged["SMI3_LR_VAL"]
+
+# Actual Delinquency and Claims
+final_df["Actual_Delq_Claims_DEV"] = (
+    merged["Actual_n_Delq_and_Claims_DEV"]
+)
+
+final_df["Actual_Delq_Claims_VAL"] = (
+    merged["Actual_n_Delq_and_Claims_VAL"]
+)
+
+# Predicted Delinquency and Claims
+final_df["Predicted_Delq_Claims_DEV"] = (
+    merged["Predicted_n_Delq_and_Claims_DEV"]
+)
+
+final_df["Predicted_Delq_Claims_VAL"] = (
+    merged["Predicted_n_Delq_and_Claims_VAL"]
+)
+
+# =====================================================
+# 11. OVERALL PASS/FAIL FOR EACH BOOKYEAR
+# =====================================================
 
 status_cols = [
     f"{metric}_Status"
     for metric in metrics
 ]
 
-wide_report["Overall_Status"] = np.where(
-    wide_report[status_cols].eq("PASS").all(axis=1),
+final_df["STATUS"] = np.where(
+    merged[status_cols].eq("PASS").all(axis=1),
     "PASS",
     "FAIL"
 )
 
-# ==========================================
-# 11. SIMPLE STATUS REPORT
-# ==========================================
+# =====================================================
+# 12. SORT FINAL REPORT
+# =====================================================
 
-status_report = wide_report[
-    ["BOOKYEAR"] + status_cols + ["Overall_Status"]
-].copy()
+final_df = final_df.sort_values(
+    "BOOKYEAR"
+).reset_index(drop=True)
 
-status_report.columns = (
-    ["BOOKYEAR"] + metrics + ["Overall_Status"]
-)
+# =====================================================
+# 13. DISPLAY REPORT
+# =====================================================
 
-# ==========================================
-# 12. PRINT RESULTS
-# ==========================================
+pd.set_option("display.max_columns", None)
+pd.set_option("display.width", 2000)
+pd.set_option("display.float_format", "{:.6f}".format)
 
 print("\nPERFORMANCE REPRODUCIBILITY REPORT\n")
-print(wide_report.to_string(index=False))
 
-print("\nPASS/FAIL SUMMARY\n")
-print(status_report.to_string(index=False))
+display(final_df)
+
+# =====================================================
+# 14. OVERALL REPRODUCIBILITY
+# =====================================================
 
 overall_result = (
     "PASS"
-    if len(wide_report) > 0
-    and wide_report["Overall_Status"].eq("PASS").all()
+    if len(final_df) > 0
+    and final_df["STATUS"].eq("PASS").all()
     else "FAIL"
 )
 
 print("\nOVERALL REPRODUCIBILITY:", overall_result)
 
-# ==========================================
-# 13. EXPORT TO EXCEL
-# ==========================================
+# =====================================================
+# 15. EXPORT TO EXCEL
+# =====================================================
+
+output_file = "Performance_Reproducibility_Report.xlsx"
 
 with pd.ExcelWriter(
-    "Performance_Reproducibility_Report.xlsx",
+    output_file,
     engine="openpyxl"
 ) as writer:
 
-    wide_report.to_excel(
+    final_df.to_excel(
         writer,
-        sheet_name="Detailed Comparison",
+        sheet_name="Performance Comparison",
         index=False
     )
 
-    status_report.to_excel(
+    # Detailed differences and individual metric statuses
+    merged.to_excel(
         writer,
-        sheet_name="PASS FAIL Summary",
+        sheet_name="Detailed Validation",
         index=False
     )
 
-print("\nReport generated successfully.")
+print("\nReport generated successfully:", output_file)
