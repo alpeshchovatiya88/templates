@@ -1,19 +1,32 @@
-limport pandas as pd
+import pandas as pd
 import numpy as np
 
-# Read files
+# --------------------------------
+# 1. Read CSV files
+# --------------------------------
+
 dev = pd.read_csv("dev.csv")
 val = pd.read_csv("val.csv")
 
-# Select required rows
-dev = dev.iloc[9:16].copy()
-val = val.iloc[14:21].copy()
+# --------------------------------
+# 2. Select rows
+# --------------------------------
 
-# Remove spaces from column names
+# Data row numbers, excluding CSV header
+dev = dev.iloc[9:16].copy()    # 10 to 16
+val = val.iloc[14:21].copy()   # 15 to 21
+
+# --------------------------------
+# 3. Clean column names
+# --------------------------------
+
 dev.columns = dev.columns.str.strip()
 val.columns = val.columns.str.strip()
 
-# Columns to compare
+# --------------------------------
+# 4. Metrics to compare
+# --------------------------------
+
 metrics = [
     "Total Application",
     "Actual Loss",
@@ -24,14 +37,21 @@ metrics = [
     "Claims"
 ]
 
+# Keep required columns only
 columns = ["Bookyear"] + metrics
 
-# Keep only required columns
-dev = dev[columns]
-val = val[columns]
+dev = dev[columns].copy()
+val = val[columns].copy()
 
-# Merge using Bookyear
-df = pd.merge(
+# Standardize Bookyear
+for df in [dev, val]:
+    df["Bookyear"] = df["Bookyear"].astype(str).str.strip()
+
+# --------------------------------
+# 5. Merge by Bookyear
+# --------------------------------
+
+merged = pd.merge(
     dev,
     val,
     on="Bookyear",
@@ -41,41 +61,117 @@ df = pd.merge(
     validate="one_to_one"
 )
 
-# Compare each metric
-for col in metrics:
+# --------------------------------
+# 6. Calculate reproducibility
+# --------------------------------
 
-    dev_value = pd.to_numeric(
-        df[f"{col}_DEV"], errors="coerce"
+tolerance = 1e-8
+
+results = []
+
+for _, row in merged.iterrows():
+
+    bookyear = row["Bookyear"]
+
+    for metric in metrics:
+
+        dev_raw = row[f"{metric}_DEV"]
+        val_raw = row[f"{metric}_VAL"]
+
+        # Convert values to numeric
+        dev_value = pd.to_numeric(
+            str(dev_raw).replace(",", "").strip(),
+            errors="coerce"
+        )
+
+        val_value = pd.to_numeric(
+            str(val_raw).replace(",", "").strip(),
+            errors="coerce"
+        )
+
+        # Calculate absolute difference
+        if pd.notna(dev_value) and pd.notna(val_value):
+            difference = abs(dev_value - val_value)
+        else:
+            difference = np.nan
+
+        # PASS / FAIL
+        if (
+            row["_merge"] == "both"
+            and pd.notna(difference)
+            and difference <= tolerance
+        ):
+            status = "PASS"
+        else:
+            status = "FAIL"
+
+        results.append({
+            "Bookyear": bookyear,
+            "Metric": metric,
+            "Developer_Value": dev_value,
+            "Validator_Value": val_value,
+            "Absolute_Difference": difference,
+            "Tolerance": tolerance,
+            "Status": status
+        })
+
+# --------------------------------
+# 7. Create report
+# --------------------------------
+
+report = pd.DataFrame(results)
+
+print("\nPERFORMANCE REPRODUCIBILITY REPORT\n")
+print(report.to_string(index=False))
+
+# --------------------------------
+# 8. Summary by Bookyear
+# --------------------------------
+
+summary = (
+    report.groupby("Bookyear", sort=False)["Status"]
+    .apply(
+        lambda x: "PASS"
+        if (x == "PASS").all()
+        else "FAIL"
     )
-
-    val_value = pd.to_numeric(
-        df[f"{col}_VAL"], errors="coerce"
-    )
-
-    df[f"{col}_Status"] = np.where(
-        np.isclose(
-            dev_value,
-            val_value,
-            atol=0.0001,
-            rtol=0,
-            equal_nan=False
-        ),
-        "PASS",
-        "FAIL"
-    )
-
-# Overall status
-status_cols = [f"{col}_Status" for col in metrics]
-
-df["Overall_Status"] = np.where(
-    (df[status_cols] == "PASS").all(axis=1)
-    & (df["_merge"] == "both"),
-    "PASS",
-    "FAIL"
+    .reset_index(name="Overall_Status")
 )
 
-# Final result
-print(df[["Bookyear"] + status_cols + ["Overall_Status"]])
+print("\nBOOKYEAR SUMMARY\n")
+print(summary.to_string(index=False))
 
-# Export
-df.to_excel("Reproducibility_Report.xlsx", index=False)
+# --------------------------------
+# 9. Overall conclusion
+# --------------------------------
+
+overall = (
+    "PASS"
+    if (report["Status"] == "PASS").all()
+    else "FAIL"
+)
+
+print("\nOverall Reproducibility:", overall)
+
+# --------------------------------
+# 10. Export to Excel
+# --------------------------------
+
+with pd.ExcelWriter(
+    "Performance_Reproducibility.xlsx",
+    engine="openpyxl"
+) as writer:
+
+    report.to_excel(
+        writer,
+        sheet_name="Metric Comparison",
+        index=False
+    )
+
+    summary.to_excel(
+        writer,
+        sheet_name="Bookyear Summary",
+        index=False
+    )
+
+print("Report generated successfully.")
