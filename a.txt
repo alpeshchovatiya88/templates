@@ -1,70 +1,38 @@
+
 import json
+import copy
 
-with open("application.json", "w") as f:
-    json.dump(myinput, f, indent=4)
+applications = []
 
-print("JSON file created successfully!")
+# Different credit scores for 5 applications
+credit_scores = [
+    [(760, 725), (800, 780)],
+    [(650, 620), (680, 660)],
+    [(720, 700), (750, 730)],
+    [(580, 550), (610, 590)],
+    [(850, 820), (830, 810)]
+]
 
-======
-import boto3
-import json
-import pandas as pd
+for i in range(5):
+    app = copy.deepcopy(myinput)
 
-# SageMaker endpoint
-ENDPOINT_NAME = "YOUR_ENDPOINT_NAME"
+    app["APPLICATION_NUMBER"] = 2024165346 + i
 
-runtime = boto3.client(
-    "sagemaker-runtime",
-    region_name="ca-central-1"
-)
+    app["ACTLTV"] = [70, 75, 80, 85, 90][i]
+    app["PRD_COMP_TDSR"] = [30, 32, 35, 37, 40][i]
+    app["PRD_COMP_GDSR"] = [25, 27, 29, 31, 34][i]
 
-# Load existing applications
-with open("applications.json", "r") as f:
-    applications = json.load(f)
+    # Different credit scores for each borrower
+    for j, borrower in enumerate(app["BORROWERS"]):
+        tv, fico = credit_scores[i][j]
 
-if isinstance(applications, dict):
-    applications = [applications]
+        borrower["CRD_SCORE_TV"] = tv
+        borrower["CRD_SCORE_FICO10"] = fico
 
-results = []
+    applications.append(app)
 
-# Test each application
-for app in applications:
-    app_id = app.get("APPLICATION_NUMBER")
+# Save 5 applications in one JSON
+with open("applications.json", "w") as f:
+    json.dump(applications, f, indent=4)
 
-    try:
-        response = runtime.invoke_endpoint(
-            EndpointName=ENDPOINT_NAME,
-            ContentType="application/json",
-            Body=json.dumps(app)
-        )
-
-        prediction = json.loads(
-            response["Body"].read().decode("utf-8")
-        )
-
-        results.append({
-            "APPLICATION_NUMBER": app_id,
-            "STATUS": "PASS",
-            "CLAIM_60TH": prediction.get("CLAIM_60TH"),
-            "LOSS_60TH": prediction.get("LOSS_60TH"),
-            "CLAIM_95TH": prediction.get("CLAIM_95TH"),
-            "LOSS_95TH": prediction.get("LOSS_95TH"),
-            "ERROR": ""
-        })
-
-        print(f"PASS: {app_id}")
-
-    except Exception as e:
-        results.append({
-            "APPLICATION_NUMBER": app_id,
-            "STATUS": "FAIL",
-            "ERROR": str(e)
-        })
-
-        print(f"FAIL: {app_id} - {e}")
-
-# Save test results
-df = pd.DataFrame(results)
-df.to_csv("test_results.csv", index=False)
-
-print("\n", df)
+print("5 applications saved successfully!")
