@@ -1,258 +1,63 @@
+
+import boto3
+import json
 import pandas as pd
-import numpy as np
 
-# =====================================================
-# 1. READ CSV FILES
-# =====================================================
+# SageMaker endpoint
+ENDPOINT_NAME = "YOUR_ENDPOINT_NAME"
 
-dev = pd.read_csv("dev.csv", keep_default_na=False)
-val = pd.read_csv("val.csv", keep_default_na=False)
-
-# =====================================================
-# 2. SELECT ONLY REQUIRED EXCEL ROWS
-# =====================================================
-
-# Excel row 1 is the header
-dev = dev.iloc[8:15].copy()     # Excel rows 10–16
-val = val.iloc[13:20].copy()    # Excel rows 15–21
-
-# =====================================================
-# 3. CLEAN COLUMN NAMES
-# =====================================================
-
-dev.columns = dev.columns.str.strip()
-val.columns = val.columns.str.strip()
-
-# =====================================================
-# 4. DEFINE METRICS
-# =====================================================
-
-metrics = [
-    "n",
-    "ACTUAL_LOSS",
-    "SMI3_LOSS",
-    "ACTUAL_LR",
-    "SMI3_LR",
-    "Actual_n_Delq_and_Claims",
-    "Predicted_n_Delq_and_Claims"
-]
-
-columns = ["BOOKYEAR"] + metrics
-
-dev = dev[columns].copy()
-val = val[columns].copy()
-
-# =====================================================
-# 5. CLEAN BOOKYEAR
-# =====================================================
-
-dev["BOOKYEAR"] = pd.to_numeric(
-    dev["BOOKYEAR"],
-    errors="coerce"
+runtime = boto3.client(
+    "sagemaker-runtime",
+    region_name="ca-central-1"
 )
 
-val["BOOKYEAR"] = pd.to_numeric(
-    val["BOOKYEAR"],
-    errors="coerce"
-)
+# Load existing applications
+with open("applications.json", "r") as f:
+    applications = json.load(f)
 
-# Check invalid Bookyears instead of silently removing them
-if dev["BOOKYEAR"].isna().any():
-    raise ValueError("Invalid BOOKYEAR in selected DEV rows")
+if isinstance(applications, dict):
+    applications = [applications]
 
-if val["BOOKYEAR"].isna().any():
-    raise ValueError("Invalid BOOKYEAR in selected VAL rows")
+results = []
 
-dev["BOOKYEAR"] = dev["BOOKYEAR"].astype(int)
-val["BOOKYEAR"] = val["BOOKYEAR"].astype(int)
+# Test each application
+for app in applications:
+    app_id = app.get("APPLICATION_NUMBER")
 
-# =====================================================
-# 6. SORT BY BOOKYEAR
-# =====================================================
-
-dev = dev.sort_values("BOOKYEAR").reset_index(drop=True)
-val = val.sort_values("BOOKYEAR").reset_index(drop=True)
-
-print("DEV BOOKYEARS:", dev["BOOKYEAR"].tolist())
-print("VAL BOOKYEARS:", val["BOOKYEAR"].tolist())
-
-# =====================================================
-# 7. MERGE DEV AND VAL BY BOOKYEAR
-# =====================================================
-
-merged = pd.merge(
-    dev,
-    val,
-    on="BOOKYEAR",
-    how="outer",
-    suffixes=("_DEV", "_VAL"),
-    indicator=True,
-    validate="one_to_one"
-)
-
-merged = merged.sort_values(
-    "BOOKYEAR"
-).reset_index(drop=True)
-
-# =====================================================
-# 8. CONVERT METRICS TO NUMERIC
-# =====================================================
-
-for metric in metrics:
-
-    for suffix in ["DEV", "VAL"]:
-
-        col = f"{metric}_{suffix}"
-
-        merged[col] = pd.to_numeric(
-            merged[col]
-            .astype("string")
-            .str.replace(",", "", regex=False)
-            .str.strip(),
-            errors="coerce"
+    try:
+        response = runtime.invoke_endpoint(
+            EndpointName=ENDPOINT_NAME,
+            ContentType="application/json",
+            Body=json.dumps(app)
         )
 
-# =====================================================
-# 9. CALCULATE ABSOLUTE DIFFERENCE AND PASS/FAIL
-# =====================================================
+        prediction = json.loads(
+            response["Body"].read().decode("utf-8")
+        )
 
-tolerance = 1e-8
+        results.append({
+            "APPLICATION_NUMBER": app_id,
+            "STATUS": "PASS",
+            "CLAIM_60TH": prediction.get("CLAIM_60TH"),
+            "LOSS_60TH": prediction.get("LOSS_60TH"),
+            "CLAIM_95TH": prediction.get("CLAIM_95TH"),
+            "LOSS_95TH": prediction.get("LOSS_95TH"),
+            "ERROR": ""
+        })
 
-for metric in metrics:
+        print(f"PASS: {app_id}")
 
-    dev_col = f"{metric}_DEV"
-    val_col = f"{metric}_VAL"
+    except Exception as e:
+        results.append({
+            "APPLICATION_NUMBER": app_id,
+            "STATUS": "FAIL",
+            "ERROR": str(e)
+        })
 
-    diff_col = f"{metric}_Difference"
-    status_col = f"{metric}_Status"
+        print(f"FAIL: {app_id} - {e}")
 
-    merged[diff_col] = (
-        merged[dev_col] - merged[val_col]
-    ).abs()
+# Save test results
+df = pd.DataFrame(results)
+df.to_csv("test_results.csv", index=False)
 
-    merged[status_col] = np.where(
-        merged["_merge"].eq("both")
-        & merged[diff_col].notna()
-        & (merged[diff_col] <= tolerance),
-        "PASS",
-        "FAIL"
-    )
-
-# =====================================================
-# 10. CREATE FINAL REPORT WITH ACTUAL VALUES
-# =====================================================
-
-final_df = pd.DataFrame()
-
-final_df["BOOKYEAR"] = merged["BOOKYEAR"]
-
-# Total Application
-final_df["Total Application"] = merged["n_DEV"]
-
-# Actual Loss
-final_df["ACTUAL_LOSS_DEV"] = merged["ACTUAL_LOSS_DEV"]
-final_df["ACTUAL_LOSS_VAL"] = merged["ACTUAL_LOSS_VAL"]
-
-# Predicted Loss
-final_df["SMI3_LOSS_DEV"] = merged["SMI3_LOSS_DEV"]
-final_df["SMI3_LOSS_VAL"] = merged["SMI3_LOSS_VAL"]
-
-# Actual Loss Ratio
-final_df["ACTUAL_LR_DEV"] = merged["ACTUAL_LR_DEV"]
-final_df["ACTUAL_LR_VAL"] = merged["ACTUAL_LR_VAL"]
-
-# Predicted Loss Ratio
-final_df["SMI3_LR_DEV"] = merged["SMI3_LR_DEV"]
-final_df["SMI3_LR_VAL"] = merged["SMI3_LR_VAL"]
-
-# Actual Delinquency and Claims
-final_df["Actual_Delq_Claims_DEV"] = (
-    merged["Actual_n_Delq_and_Claims_DEV"]
-)
-
-final_df["Actual_Delq_Claims_VAL"] = (
-    merged["Actual_n_Delq_and_Claims_VAL"]
-)
-
-# Predicted Delinquency and Claims
-final_df["Predicted_Delq_Claims_DEV"] = (
-    merged["Predicted_n_Delq_and_Claims_DEV"]
-)
-
-final_df["Predicted_Delq_Claims_VAL"] = (
-    merged["Predicted_n_Delq_and_Claims_VAL"]
-)
-
-# =====================================================
-# 11. OVERALL PASS/FAIL FOR EACH BOOKYEAR
-# =====================================================
-
-status_cols = [
-    f"{metric}_Status"
-    for metric in metrics
-]
-
-final_df["STATUS"] = np.where(
-    merged[status_cols].eq("PASS").all(axis=1),
-    "PASS",
-    "FAIL"
-)
-
-# =====================================================
-# 12. SORT FINAL REPORT
-# =====================================================
-
-final_df = final_df.sort_values(
-    "BOOKYEAR"
-).reset_index(drop=True)
-
-# =====================================================
-# 13. DISPLAY REPORT
-# =====================================================
-
-pd.set_option("display.max_columns", None)
-pd.set_option("display.width", 2000)
-pd.set_option("display.float_format", "{:.6f}".format)
-
-print("\nPERFORMANCE REPRODUCIBILITY REPORT\n")
-
-display(final_df)
-
-# =====================================================
-# 14. OVERALL REPRODUCIBILITY
-# =====================================================
-
-overall_result = (
-    "PASS"
-    if len(final_df) > 0
-    and final_df["STATUS"].eq("PASS").all()
-    else "FAIL"
-)
-
-print("\nOVERALL REPRODUCIBILITY:", overall_result)
-
-# =====================================================
-# 15. EXPORT TO EXCEL
-# =====================================================
-
-output_file = "Performance_Reproducibility_Report.xlsx"
-
-with pd.ExcelWriter(
-    output_file,
-    engine="openpyxl"
-) as writer:
-
-    final_df.to_excel(
-        writer,
-        sheet_name="Performance Comparison",
-        index=False
-    )
-
-    # Detailed differences and individual metric statuses
-    merged.to_excel(
-        writer,
-        sheet_name="Detailed Validation",
-        index=False
-    )
-
-print("\nReport generated successfully:", output_file)
+print("\n", df)
