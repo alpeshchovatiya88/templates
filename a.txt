@@ -1,5 +1,81 @@
-Backtesting (2009–2015)
+limport pandas as pd
+import numpy as np
 
-Backtesting for the 2009–2015 period showed conservative aggregate loss overprediction of approximately $28.6 million (5.8%), with predicted losses of $525.0 million compared to actual losses of $496.4 million. The model underpredicted losses in 2009 and 2013, while the largest overprediction occurred in 2015 at approximately $21.4 million. The aggregate predicted loss ratio was 17.31%, compared to the actual loss ratio of 16.77%, indicating a slight overall overprediction in loss ratios. Predicted loss ratios were relatively close to actual experience in most years, with more pronounced deviations observed in 2009 and 2015.
+# Read files
+dev = pd.read_csv("dev.csv")
+val = pd.read_csv("val.csv")
 
-Claims backtesting showed an overall overprediction of 1,077 claims (15.3%), with 8,125 predicted claims compared to 7,048 actual claims. Claims were slightly underpredicted in 2009 but consistently overpredicted from 2010 onward, with the largest differences observed in 2015 and 2011. Overall, the results indicate relatively stable loss predictions in earlier years, with increasing conservatism in predicted losses and claim counts toward the end of the backtesting period.
+# Select required rows
+dev = dev.iloc[9:16].copy()
+val = val.iloc[14:21].copy()
+
+# Remove spaces from column names
+dev.columns = dev.columns.str.strip()
+val.columns = val.columns.str.strip()
+
+# Columns to compare
+metrics = [
+    "Total Application",
+    "Actual Loss",
+    "Predicted Loss",
+    "Actual LR",
+    "Predicted LR",
+    "Actual N of Delq",
+    "Claims"
+]
+
+columns = ["Bookyear"] + metrics
+
+# Keep only required columns
+dev = dev[columns]
+val = val[columns]
+
+# Merge using Bookyear
+df = pd.merge(
+    dev,
+    val,
+    on="Bookyear",
+    how="outer",
+    suffixes=("_DEV", "_VAL"),
+    indicator=True,
+    validate="one_to_one"
+)
+
+# Compare each metric
+for col in metrics:
+
+    dev_value = pd.to_numeric(
+        df[f"{col}_DEV"], errors="coerce"
+    )
+
+    val_value = pd.to_numeric(
+        df[f"{col}_VAL"], errors="coerce"
+    )
+
+    df[f"{col}_Status"] = np.where(
+        np.isclose(
+            dev_value,
+            val_value,
+            atol=0.0001,
+            rtol=0,
+            equal_nan=False
+        ),
+        "PASS",
+        "FAIL"
+    )
+
+# Overall status
+status_cols = [f"{col}_Status" for col in metrics]
+
+df["Overall_Status"] = np.where(
+    (df[status_cols] == "PASS").all(axis=1)
+    & (df["_merge"] == "both"),
+    "PASS",
+    "FAIL"
+)
+
+# Final result
+print(df[["Bookyear"] + status_cols + ["Overall_Status"]])
+
+# Export
+df.to_excel("Reproducibility_Report.xlsx", index=False)
