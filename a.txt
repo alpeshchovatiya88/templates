@@ -1,38 +1,7 @@
+The validation team reviewed the SMI3.0 deployment framework, including deployment configuration, SageMaker endpoint management, inference processing, and monitoring utilities. The review focused on the deployment architecture, input validation, prediction generation, and monitoring capabilities.
 
-import json
-import copy
+SMI3.0 is deployed using Amazon SageMaker for real-time inference. The deployment framework supports model artifact loading, endpoint creation, configuration, and updates. Incoming mortgage application data undergoes JSON preprocessing and validation before the trained XGBoost model generates claim probabilities. These predictions are integrated with LGD and loss calculation components to produce the final outputs.
 
-applications = []
+The implementation also supports endpoint testing, inference data capture, scheduled data-quality monitoring, and operational monitoring through Amazon CloudWatch. The overall deployment workflow is summarized in Fig. 2.2.2.
 
-# Different credit scores for 5 applications
-credit_scores = [
-    [(760, 725), (800, 780)],
-    [(650, 620), (680, 660)],
-    [(720, 700), (750, 730)],
-    [(580, 550), (610, 590)],
-    [(850, 820), (830, 810)]
-]
-
-for i in range(5):
-    app = copy.deepcopy(myinput)
-
-    app["APPLICATION_NUMBER"] = 2024165346 + i
-
-    app["ACTLTV"] = [70, 75, 80, 85, 90][i]
-    app["PRD_COMP_TDSR"] = [30, 32, 35, 37, 40][i]
-    app["PRD_COMP_GDSR"] = [25, 27, 29, 31, 34][i]
-
-    # Different credit scores for each borrower
-    for j, borrower in enumerate(app["BORROWERS"]):
-        tv, fico = credit_scores[i][j]
-
-        borrower["CRD_SCORE_TV"] = tv
-        borrower["CRD_SCORE_FICO10"] = fico
-
-    applications.append(app)
-
-# Save 5 applications in one JSON
-with open("applications.json", "w") as f:
-    json.dump(applications, f, indent=4)
-
-print("5 applications saved successfully!")
+Conclusion: The reviewed code provides a structured deployment framework with defined inference, validation, and monitoring components. Production readiness and monitoring effectiveness remain subject to successful testing and configuration verification.
