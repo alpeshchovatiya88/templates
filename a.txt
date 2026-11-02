@@ -1,7 +1,11 @@
-The validation team reviewed the SMI3.0 deployment framework, including deployment configuration, SageMaker endpoint management, inference processing, and monitoring utilities. The review focused on the deployment architecture, input validation, prediction generation, and monitoring capabilities.
-
-SMI3.0 is deployed using Amazon SageMaker for real-time inference. The deployment framework supports model artifact loading, endpoint creation, configuration, and updates. Incoming mortgage application data undergoes JSON preprocessing and validation before the trained XGBoost model generates claim probabilities. These predictions are integrated with LGD and loss calculation components to produce the final outputs.
-
-The implementation also supports endpoint testing, inference data capture, scheduled data-quality monitoring, and operational monitoring through Amazon CloudWatch. The overall deployment workflow is summarized in Fig. 2.2.2.
-
-Conclusion: The reviewed code provides a structured deployment framework with defined inference, validation, and monitoring components. Production readiness and monitoring effectiveness remain subject to successful testing and configuration verification.
+BL presented the completed multi-phase business validation of SMI 3.0, including a review of 2,400 files with an overall underwriter agreement rate of 82%.
+The model was simplified from 18 to 12 features to improve consistency, transparency and explainability while maintaining predictive performance.
+BL discussed refinements to debt treatment, risk factors and monotone constraints to improve model stability and risk differentiation.
+RD presented hyperparameter optimization results, which reduced model instability from approximately 13% to 4%, with broadly consistent results across testing methodologies.
+BL highlighted that changes to economic scenario assumptions require reassessment, validation and recalibration. The team completed over 50 model iterations and continued final testing and documentation.
+BL presented LGD refinements, including enhanced property-level distress factors, expense treatment and mortgage risk considerations.
+BL compared SMI 2.0 and SMI 3.0, demonstrating broadly similar overall results with improved risk separation and limited movement in risk rankings.
+BL discussed the revised credit-score approach using TransUnion TrueVision as the primary score and FICO 10 as backup, along with regional impacts, particularly in Atlantic Canada.
+JB presented the integration of SMI 3.0 into the existing LRU Plus pricing framework, with minimal overall premium impact; approximately 80% of loans showed no premium change.
+RD confirmed completion of major technical validation checks, with remaining findings primarily related to documentation, rationale and acceptance criteria.
+CS, SL, AC, EO and WM agreed to approve business validation, subject to completion of final documentation at the next MSC meeting.
