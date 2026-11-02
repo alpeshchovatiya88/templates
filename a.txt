@@ -1,10 +1,15 @@
-lSummary of Individual Model Components
+Loss Estimation and Risk-Based Pricing (RBP)
 
-Following is the summary of individual model components:
+For the validation dataset, estimated losses are generated for Mortgage Insurance (MI) and LRU+ loans using SMI 3.0. These losses support risk ranking and risk-based pricing (RBP). Unlike SMI 2.0, which produces monthly cashflows, SMI 3.0 generates total estimated losses. To maintain compatibility with the existing RBP framework, total losses are distributed across monthly periods using the corresponding MI or LRU+ loss curves.
 
-* Probability of Default (PD): The PD model estimates the frequency of delay or default events based on historical data. A boosting factor of 4 is applied to the estimated frequency, as indicated in the model framework. The adjusted PD serves as an input to the expected loss calculation.
-* Probability of Claim Given Default (PCD): The PCD component estimates the probability of a claim occurring given a default event. The calculation is based on historical data and business-driven assumptions. A PCD value of 0.67 is used in the model to determine the likelihood of a claim following default.
-* Loss Given Default (LCD): The LCD component estimates the expected financial loss associated with a default event. The calculation incorporates business-driven default assumptions and expense calculations to determine the loss severity used in the expected loss estimation.
-* Expected Loss Calculation: The expected loss is calculated by combining the outputs of the PD, PCD, and LCD components. The calculation incorporates the adjusted frequency of default, probability of claim given default, and expected loss severity to estimate the overall potential loss.
-* Loss Ratio (LR): The loss ratio is calculated by dividing the estimated loss by the corresponding premium (LR = Loss / Premium). The resulting ratio represents the proportion of premium expected to be consumed by losses and serves as an input to the underwriting risk ranking process.
-* Underwriting Risk Ranking: The risk ranking process uses the calculated loss ratio to rank exposures based on their expected risk levels. Higher loss ratios indicate relatively higher expected risk, while lower loss ratios indicate relatively lower expected risk. The resulting rankings support underwriters in evaluating and prioritizing risks for underwriting decisions.
+The monthly loss calculation is defined as:
+
+Loss Estimate_RBP_Month = Estimated Loss × Loss Curve Vector (MI or LRU+)
+
+For LRU+, the business team developed a standardized loss curve based on SMI 2.0 loss patterns for funded loans from the 2025 book year. Double exponential smoothing was applied to reduce volatility while preserving the 120-month loss distribution, as illustrated in Figure XX.
+
+Figure XX: LRU+ Loss Pattern – Original vs. Smoothed Curve
+
+The business team’s validation confirmed that the smoothed curve has minimal pricing impact, with approximately 96% of loans experiencing premium rate changes within ±1 basis point. Although SMI 3.0 generates higher estimated losses than SMI 2.0, primarily due to updated property-level distress factors, subsequent pricing assessments showed no material impact on average premiums or ROE. Accordingly, the business team concluded that SMI 3.0 losses are appropriate for LRU+ RBP without further calibration.
+
+Further details on the loss curve methodology, calibration, and pricing validation are provided in the Business Validation Report (Section XX). The RBP calculation methodology reference will be added following confirmation from Jacklyn.
