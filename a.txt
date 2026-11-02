@@ -1,11 +1,10 @@
-BL presented the completed multi-phase business validation of SMI 3.0, including a review of 2,400 files with an overall underwriter agreement rate of 82%.
-The model was simplified from 18 to 12 features to improve consistency, transparency and explainability while maintaining predictive performance.
-BL discussed refinements to debt treatment, risk factors and monotone constraints to improve model stability and risk differentiation.
-RD presented hyperparameter optimization results, which reduced model instability from approximately 13% to 4%, with broadly consistent results across testing methodologies.
-BL highlighted that changes to economic scenario assumptions require reassessment, validation and recalibration. The team completed over 50 model iterations and continued final testing and documentation.
-BL presented LGD refinements, including enhanced property-level distress factors, expense treatment and mortgage risk considerations.
-BL compared SMI 2.0 and SMI 3.0, demonstrating broadly similar overall results with improved risk separation and limited movement in risk rankings.
-BL discussed the revised credit-score approach using TransUnion TrueVision as the primary score and FICO 10 as backup, along with regional impacts, particularly in Atlantic Canada.
-JB presented the integration of SMI 3.0 into the existing LRU Plus pricing framework, with minimal overall premium impact; approximately 80% of loans showed no premium change.
-RD confirmed completion of major technical validation checks, with remaining findings primarily related to documentation, rationale and acceptance criteria.
-CS, SL, AC, EO and WM agreed to approve business validation, subject to completion of final documentation at the next MSC meeting.
+lSummary of Individual Model Components
+
+Following is the summary of individual model components:
+
+* Probability of Default (PD): The PD model estimates the frequency of delay or default events based on historical data. A boosting factor of 4 is applied to the estimated frequency, as indicated in the model framework. The adjusted PD serves as an input to the expected loss calculation.
+* Probability of Claim Given Default (PCD): The PCD component estimates the probability of a claim occurring given a default event. The calculation is based on historical data and business-driven assumptions. A PCD value of 0.67 is used in the model to determine the likelihood of a claim following default.
+* Loss Given Default (LCD): The LCD component estimates the expected financial loss associated with a default event. The calculation incorporates business-driven default assumptions and expense calculations to determine the loss severity used in the expected loss estimation.
+* Expected Loss Calculation: The expected loss is calculated by combining the outputs of the PD, PCD, and LCD components. The calculation incorporates the adjusted frequency of default, probability of claim given default, and expected loss severity to estimate the overall potential loss.
+* Loss Ratio (LR): The loss ratio is calculated by dividing the estimated loss by the corresponding premium (LR = Loss / Premium). The resulting ratio represents the proportion of premium expected to be consumed by losses and serves as an input to the underwriting risk ranking process.
+* Underwriting Risk Ranking: The risk ranking process uses the calculated loss ratio to rank exposures based on their expected risk levels. Higher loss ratios indicate relatively higher expected risk, while lower loss ratios indicate relatively lower expected risk. The resulting rankings support underwriters in evaluating and prioritizing risks for underwriting decisions.
