@@ -16,3 +16,20 @@ Discussion Summary
 * Regional Impact: The committee requested an urban-rural breakdown of Atlantic results to support automated decision-threshold setting.
 * Pricing Impact: The committee reviewed the minimal impact of SMI 3.0 on LRU Plus premiums.
 * Validation and Approval: The committee reviewed outstanding validation requirements and granted conditional business-validation approval, with final documentation to be presented at the next MSC meeting.
+
+
+=============
+
+* BL presented SMI 3.0 business validation results, including 2,400 files reviewed (82% underwriter agreement), model simplification from 18 to 12 features, refinements to debt treatment, monotone constraints and LGD calculations, and improved risk differentiation. BL also compared SMI 2.0 and 3.0, highlighting limited risk-ranking movements, updated credit scoring (TrueVision and FICO 10), use of maximum borrower scores, and regional impacts, particularly in Atlantic Canada.
+* RD presented hyperparameter optimization results demonstrating improved model stability, clarified usage restrictions under the 60th-percentile economic scenario (file-level risk ranking only, excluding loss forecasting), and provided technical validation updates, with final testing and documentation outstanding.
+* JB presented SMI 3.0 integration into the LRU Plus pricing framework, with minimal premium impact and approximately 80% of loans showing no change.
+* CS, SL, AC, EO and WM conditionally approved business validation, subject to completion of final validation activities and documentation.
+
+---
+Discussion Summary
+
+* Model Refinements: The committee discussed the trade-off between predictive performance and explainability, including the potential reassessment of refinance risk in future model iterations.
+* Model Usage: RD clarified that SMI 3.0 is restricted to file-level risk ranking under the approved 60th-percentile economic scenario, with reassessment and recalibration required for any changes.
+* Regional Impact: The committee requested an urban-rural breakdown of Atlantic results to better understand regional risk differences and inform decision thresholds.
+* Threshold Setting: The committee discussed adopting a do-no-harm baseline to preserve key business and portfolio metrics.
+* Validation and Approval: The committee confirmed conditional business-validation approval, subject to completion of final technical testing and documentation at the next MSC meeting.
