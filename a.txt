@@ -1,35 +1,49 @@
-Meeting Highlights
+Since joining the team, I have improved my understanding of the Model Risk Management framework, model validation process, company guidelines, and regulatory requirements.
 
-* BL presented SMI 3.0 business validation results, including 2,400 files reviewed (82% underwriter agreement) and feature reduction from 18 to 12, improving consistency and explainability while maintaining predictive performance.
-* BL outlined refinements to debt treatment, risk factors, LGD calculations and model constraints to improve stability and risk differentiation.
-* RD presented hyperparameter optimization results demonstrating improved model stability and confirmed SMI 3.0’s use for file-level risk ranking under the 60th-percentile economic scenario only, excluding loss forecasting.
-* BL compared SMI 2.0 and 3.0, highlighting improved risk separation, updated credit scoring (TrueVision and FICO 10) and regional impacts, particularly in Atlantic Canada.
-* JB presented SMI 3.0 integration into the LRU Plus pricing framework, with minimal premium impact and approximately 80% of loans showing no change.
-* RD provided the technical validation update, confirming completion of major checks, with outstanding documentation and testing requirements.
-* CS, SL, AC, EO and WM conditionally approved business validation, subject to completion of final validation activities and documentation.
+I worked on the SMI3 project as the primary technical validator and took the lead on technical validation activities. I independently conducted more than 100 model experiments to assess model performance, behaviour, and potential risks.
 
-Discussion Summary
+As part of the validation, I performed Exploratory Data Analysis (EDA), backtesting, and swap set analysis. I also conducted experiments using different economic assumptions and book years to assess model performance and stability under different conditions.
 
-* Model Performance and Stability: The committee discussed model simplification, stability improvements and the trade-off between predictive performance and explainability.
-* Model Usage: RD clarified that SMI 3.0 is intended for file-level risk ranking under the approved economic scenario; any scenario changes require reassessment and recalibration.
-* Risk Differentiation: The committee reviewed LGD refinements, updated credit scoring and improved risk rankings compared with SMI 2.0.
-* Regional Impact: The committee requested an urban-rural breakdown of Atlantic results to support automated decision-threshold setting.
-* Pricing Impact: The committee reviewed the minimal impact of SMI 3.0 on LRU Plus premiums.
-* Validation and Approval: The committee reviewed outstanding validation requirements and granted conditional business-validation approval, with final documentation to be presented at the next MSC meeting.
+I performed a detailed line-by-line code review to check model implementation, code quality, and reproducibility of results. I documented technical findings and created Jira tickets to track identified issues.
 
+I also assessed key validation areas, including conceptual soundness, data quality, model performance, and reproducibility, in line with internal validation standards and relevant OSFI guidelines. I worked closely with my manager to discuss findings, review potential risks, and prepare a detailed technical validation report.
+
+Through this project, I gained valuable hands-on experience, improved my understanding of model risk management, and developed greater confidence in independently performing technical validation activities. This experience helped me contribute to a thorough and well-documented model validation process.
+
+================
+
+Since joining the team, I have strengthened my technical and analytical skills through hands-on experience with machine learning models during the SMI3 project.
+
+As part of the technical validation, I independently developed CatBoost and LightGBM models to compare their performance with the original XGBoost model. I used RandomizedSearchCV for hyperparameter optimization to identify suitable model parameters and evaluate model performance.
+
+I compared the models using AUC and other validation results to understand differences in their performance and behaviour. I also performed SHAP analysis to understand feature importance and how different features influence model predictions.
+
+Additionally, I conducted random seed experiments to assess model stability and consistency across different settings. These experiments helped me better understand the reliability and limitations of machine learning models.
+
+Through these activities, I improved my Python programming, machine learning, model development, and analytical skills. I also gained practical experience in model tuning, performance evaluation, explainability, and stability testing.
+
+Although I have not yet had the opportunity to work on Generative AI or LLM projects, I am interested in learning more about these areas and developing my understanding of AI model risks.
+
+=================
+
+Since joining the team, I have worked on building good relationships with my team members and learning from their experience.
+
+During the SMI3 project, I worked closely with the business and modeling teams to understand project requirements and discuss technical findings. Whenever I found bugs or errors, I communicated them to the modeling team and worked with them to understand and resolve the issues.
+
+I also presented my work and findings at the MSC meeting. The presentation went well and helped me feel more confident in sharing technical information with the committee.
+
+I have learned from my manager and team members and used their feedback to improve my work. I am working on becoming more confident in sharing my thoughts and ideas. I am putting in extra time to practice my presentation and communication skills, including explaining topics clearly. These efforts are helping me build confidence and improve my participation in team discussions.
+
+Overall, these experiences have helped me improve my teamwork, communication skills, and confidence.
 
 =============
 
-* BL presented SMI 3.0 business validation results, including 2,400 files reviewed (82% underwriter agreement), model simplification from 18 to 12 features, refinements to debt treatment, monotone constraints and LGD calculations, and improved risk differentiation. BL also compared SMI 2.0 and 3.0, highlighting limited risk-ranking movements, updated credit scoring (TrueVision and FICO 10), use of maximum borrower scores, and regional impacts, particularly in Atlantic Canada.
-* RD presented hyperparameter optimization results demonstrating improved model stability, clarified usage restrictions under the 60th-percentile economic scenario (file-level risk ranking only, excluding loss forecasting), and provided technical validation updates, with final testing and documentation outstanding.
-* JB presented SMI 3.0 integration into the LRU Plus pricing framework, with minimal premium impact and approximately 80% of loans showing no change.
-* CS, SL, AC, EO and WM conditionally approved business validation, subject to completion of final validation activities and documentation.
+I have made strong progress toward my goals by taking the lead as the primary technical validator on the SMI3 project. I independently completed more than 100 model experiments, performed detailed code reviews, identified and documented technical findings, and created Jira tickets to track issues. I also worked closely with my manager to prepare a detailed technical validation report. Through this project, I demonstrated ownership, strengthened my technical and analytical skills, and contributed to delivering high-quality model validation work.
 
----
-Discussion Summary
+==============
 
-* Model Refinements: The committee discussed the trade-off between predictive performance and explainability, including the potential reassessment of refinance risk in future model iterations.
-* Model Usage: RD clarified that SMI 3.0 is restricted to file-level risk ranking under the approved 60th-percentile economic scenario, with reassessment and recalibration required for any changes.
-* Regional Impact: The committee requested an urban-rural breakdown of Atlantic results to better understand regional risk differences and inform decision thresholds.
-* Threshold Setting: The committee discussed adopting a do-no-harm baseline to preserve key business and portfolio metrics.
-* Validation and Approval: The committee confirmed conditional business-validation approval, subject to completion of final technical testing and documentation at the next MSC meeting.
+One of my strengths this year has been “We Grow When You Grow.” Since joining the team, I have taken on new challenges and worked on improving my technical and analytical skills. During the SMI3 project, I independently completed more than 100 model experiments, learned new techniques, and took ownership of technical validation activities. I have also learned from my manager’s feedback and continued improving my knowledge of model risk management.
+
+========
+
+One area I am working on is “We Embrace Collaboration.” During the SMI3 project, I worked closely with the business and modeling teams to discuss technical findings and resolve issues. I would like to become more confident in sharing my thoughts and ideas during team meetings. I am putting in extra time to practice my communication and presentation skills, including explaining topics clearly. Presenting at the MSC meeting helped me gain confidence, and I will continue working on participating more actively in team discussions.
