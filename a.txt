@@ -1,19 +1,9 @@
-One of my strengths this year has been demonstrating Sagen’s value of “We Grow When You Grow.” Since joining the team, I have shown a strong willingness to learn, take on new challenges, and improve my technical and analytical skills.
+Since joining the team, I have made good progress in my role and gained valuable experience in model risk management and validation.
 
-During the SMI3 project, I took ownership of technical validation activities and independently completed more than 100 model experiments. I also learned and applied new machine learning techniques, which helped me improve my technical knowledge and problem-solving skills.
+During the SMI3 project, I took ownership of technical validation activities, independently completed more than 100 model experiments, performed detailed code reviews, and worked with my manager to prepare a technical validation report. These activities helped me identify potential model risks and improve my technical and analytical skills.
 
-I have been open to feedback from my manager and team members and used their suggestions to improve the quality of my work. I have also taken the initiative to learn new concepts and better understand the Model Risk Management framework and validation process.
+I also worked closely with the business and modeling teams, shared technical findings, and presented my work at the MSC meeting. I have been open to feedback and continued learning from my colleagues.
 
-Overall, I have made good progress in my professional development and will continue learning, taking on new challenges, and contributing to the team’s success.
+I am also working on improving my communication and presentation skills to become more confident and active in team discussions.
 
-========
-
-One area I am focusing on developing is Sagen’s value of “We Embrace Collaboration.” Since joining the team, I have been working on improving my communication skills and building good working relationships with my colleagues.
-
-During the SMI3 project, I worked closely with the business and modeling teams to discuss technical findings, communicate issues, and support the validation process. This experience helped me understand the importance of teamwork and clear communication.
-
-I recognize that I have an opportunity to become more confident in sharing my thoughts and ideas during team meetings and discussions. I am putting in extra time to practice my communication and presentation skills, including explaining technical topics clearly.
-
-I also had the opportunity to present my work and findings at the MSC meeting. The presentation went well and helped me build confidence in presenting information to the committee.
-
-Going forward, I will continue improving my communication skills, participating more actively in team discussions, and sharing my ideas with greater confidence. My goal is to become a more active contributor and strengthen my collaboration with the team.
+Overall, I believe I have made strong contributions to the SMI3 project while continuing to learn, grow, and improve in my role.
